@@ -28,3 +28,9 @@ Thumbs.db
 # Local override configs
 *.local.yaml
 local.*.yaml
+
+# Real HA entity map — contains personal entity_ids, friendly names, room
+# layout. Tracked as ha-entities.example.yaml; user copies that to the real
+# filename and fills in their own home.
+packages/ha-entities.yaml
+!packages/ha-entities.example.yaml

@@ -212,7 +212,8 @@ Default substitutions (tunable in `secrets.yaml` or top-level overrides):
 **Goal:** Define how the user describes their home to the panel — **for the MVP only**. Phase 9 replaces this with HA-side dynamic config; Phase 5's job is to get something on screen fast so we can validate the UI, touch, and idle/wake stack against a real home.
 
 Files added:
-- [ ] `packages/ha-entities.yaml` — list of areas, each with an ordered list of entity IDs. **User-edited for MVP. Will be replaced by dynamic discovery in Phase 9.**
+- [x] `packages/ha-entities.example.yaml` — committed template (sanitized placeholder areas/entities) so cloners see the schema.
+- [ ] `packages/ha-entities.yaml` — **gitignored**, user-edited per-install copy of the example. Contains real entity_ids and friendly names, so it never gets pushed. Will be replaced by dynamic discovery in Phase 9.
 
 ### Why static first, dynamic later
 

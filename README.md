@@ -55,10 +55,11 @@ configs.
 │   └── waveshare-2.16.yaml     # pins, display, touch, RTC for this board
 │   └── waveshare-1.75.yaml     # (future) other board variants
 ├── packages/
-│   ├── base.yaml               # wifi, api, ota, logger, time
-│   ├── lvgl-ui.yaml            # area carousel + entity scroller (board-agnostic)
-│   ├── ha-entities.yaml        # area + entity definitions (user-edited)
-│   └── screensaver.yaml        # AMOLED burn-in protection
+│   ├── base.yaml                  # wifi, api, ota, logger, time
+│   ├── idle.yaml                  # dim/blank state machine + IMU wake
+│   ├── lvgl-ui.yaml               # area carousel + entity scroller (board-agnostic)
+│   ├── ha-entities.example.yaml   # area + entity template — committed
+│   └── ha-entities.yaml           # area + entity real config — gitignored, user-edited
 └── components/
     └── (custom ESPHome external_components, e.g. QMI8658)
 ```
@@ -79,8 +80,9 @@ cd esp32-amoled-ha-panel
 cp secrets.example.yaml secrets.yaml
 # edit secrets.yaml with your wifi + HA details
 
-# 3. Define your areas + entities
-# edit packages/ha-entities.yaml (see plan.md §4 for schema)
+# 3. Define your areas + entities (NEVER commit this file — it lists your real entity_ids)
+cp packages/ha-entities.example.yaml packages/ha-entities.yaml
+# edit packages/ha-entities.yaml — drop in your areas, entity_ids, friendly names
 
 # 4. Install ESPHome (Python 3.10+, pipx recommended)
 pipx install esphome

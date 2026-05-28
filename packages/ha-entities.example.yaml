@@ -1,0 +1,51 @@
+# Static area + entity map for the panel — example template.
+#
+# USAGE:
+#   1. Copy this file to `packages/ha-entities.yaml`.
+#   2. Replace every area and entity with your own.
+#   3. `packages/ha-entities.yaml` is gitignored; your real config never leaves
+#      this machine.
+#
+# Areas render left-to-right in the carousel in the order declared here.
+# Entities render top-to-bottom inside an area in the order declared here.
+# Phase 5 reads this; Phase 9 will replace it with a live HA template sensor.
+#
+# Filter recommendation: keep domains the panel actually does something with —
+#   light, switch, fan, input_boolean, automation, script, cover  → tap-toggle
+#   sensor, binary_sensor, climate, media_player                  → read-only
+# Skip noisy/internal domains: sun, zone, person, device_tracker, update,
+# number, select, button — they clutter the carousel without adding value.
+#
+# Friendly names are optional but recommended; the panel falls back to the
+# entity_id prefix if not provided.
+
+areas:
+  - name: "Living Room"
+    entities:
+      - entity_id: light.living_room_lamp
+        friendly_name: "Couch lamp"
+      - entity_id: switch.tv_power
+        friendly_name: "TV"
+      - entity_id: sensor.living_room_temperature
+        friendly_name: "Temperature"
+
+  - name: "Kitchen"
+    entities:
+      - entity_id: light.kitchen_ceiling
+        friendly_name: "Ceiling"
+      - entity_id: binary_sensor.dishwasher_running
+        friendly_name: "Dishwasher"
+
+  - name: "Bedroom"
+    entities:
+      - entity_id: light.bedside_lamp
+        friendly_name: "Bedside"
+      - entity_id: cover.bedroom_blinds
+        friendly_name: "Blinds"
+
+  - name: "Office"
+    entities:
+      - entity_id: script.start_focus_lighting
+        friendly_name: "Focus mode"
+      - entity_id: automation.morning_routine
+        friendly_name: "Morning routine"
