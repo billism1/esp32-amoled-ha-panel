@@ -1,9 +1,12 @@
 #include "ha_panel.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <map>
 
+#include "esphome/core/application.h"
 #include "esphome/core/log.h"
+#include "esphome/core/version.h"
 
 namespace esphome {
 namespace ha_panel {
@@ -89,8 +92,6 @@ void HAPanel::rebuild_entity_row_text_(size_t entity_idx) {
     return;
   const auto &e = this->entities_[entity_idx];
   lv_label_set_text(badge, e.has_state ? e.state.c_str() : "…");
-  // Colour cue: green for on/open/home/active, grey for off/closed,
-  // red for unavailable/unknown, white for anything else.
   uint32_t col = 0xFFFFFF;
   if (e.state == "on" || e.state == "open" || e.state == "home" || e.state == "active")
     col = 0x66BB66;
@@ -142,7 +143,6 @@ bool HAPanel::tap(size_t area_idx, size_t entity_idx) {
 
 // ---------- LVGL UI build ----------
 
-// Convenience to create a styled "row" button representing one entity.
 static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_data,
                                  lv_event_cb_t cb, uintptr_t entity_idx,
                                  lv_obj_t **out_badge) {
@@ -154,6 +154,10 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
   lv_obj_set_style_radius(btn, 8, 0);
   lv_obj_set_style_border_width(btn, 0, 0);
   lv_obj_set_style_pad_all(btn, 0, 0);
+
+  // P7: tap visual feedback — pressed state lightens the bg.
+  lv_obj_set_style_bg_color(btn, lv_color_hex(0x3A4A6A), LV_STATE_PRESSED);
+
   lv_obj_set_user_data(btn, (void *) entity_idx);
   lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
 
@@ -173,6 +177,80 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
   *out_badge = badge;
 
   return btn;
+}
+
+void HAPanel::build_settings_tile_(lv_obj_t *parent) {
+  lv_obj_t *content = lv_obj_create(parent);
+  lv_obj_remove_style_all(content);
+  lv_obj_set_size(content, 480, 440);
+  lv_obj_set_style_bg_color(content, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(content, LV_OPA_COVER, 0);
+  // 16 px side padding because the settings labels run nearly edge-to-edge;
+  // gives the side rounded corners enough clearance not to clip the text.
+  lv_obj_set_style_pad_all(content, 16, 0);
+  // 32 px bottom — slightly more than the lists because the About block is
+  // the last item and is multi-line text, more sensitive to corner clipping.
+  lv_obj_set_style_pad_bottom(content, 32, 0);
+  lv_obj_set_style_pad_row(content, 14, 0);
+  lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_scroll_dir(content, LV_DIR_VER);
+
+  // Title.
+  lv_obj_t *title = lv_label_create(content);
+  lv_label_set_text(title, "Brightness");
+  lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+
+  // Brightness slider + value label.
+  this->brightness_slider_ = lv_slider_create(content);
+  lv_obj_set_width(this->brightness_slider_, LV_PCT(100));
+  lv_obj_set_height(this->brightness_slider_, 22);
+  lv_slider_set_range(this->brightness_slider_, 16, 255);
+  lv_slider_set_value(this->brightness_slider_, this->active_brightness_, LV_ANIM_OFF);
+  lv_obj_add_event_cb(this->brightness_slider_, &HAPanel::on_brightness_slider_,
+                      LV_EVENT_VALUE_CHANGED, this);
+
+  this->brightness_value_label_ = lv_label_create(content);
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%u / 255", (unsigned) this->active_brightness_);
+  lv_label_set_text(this->brightness_value_label_, buf);
+  lv_obj_set_style_text_color(this->brightness_value_label_, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(this->brightness_value_label_, &lv_font_montserrat_18, 0);
+
+  // Spacer.
+  lv_obj_t *spacer = lv_obj_create(content);
+  lv_obj_remove_style_all(spacer);
+  lv_obj_set_size(spacer, 1, 8);
+
+  // Timeouts (read-only display — substitution-driven, no runtime edit yet).
+  lv_obj_t *to_title = lv_label_create(content);
+  lv_label_set_text(to_title, "Idle timeouts");
+  lv_obj_set_style_text_color(to_title, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(to_title, &lv_font_montserrat_18, 0);
+
+  lv_obj_t *to_dim = lv_label_create(content);
+  lv_label_set_text(to_dim, "Dim after 15 s\nBlank after 45 s total");
+  lv_obj_set_style_text_color(to_dim, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(to_dim, &lv_font_montserrat_18, 0);
+
+  // About block.
+  lv_obj_t *about_title = lv_label_create(content);
+  lv_label_set_text(about_title, "About");
+  lv_obj_set_style_text_color(about_title, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(about_title, &lv_font_montserrat_18, 0);
+
+  lv_obj_t *about = lv_label_create(content);
+  // get_build_time_string takes a fixed-size buffer (BUILD_TIME_STR_SIZE,
+  // compile-time enforced). Old get_compilation_time() returned std::string
+  // but is deprecated and removed in 2026.7.0.
+  char build_buf[Application::BUILD_TIME_STR_SIZE];
+  App.get_build_time_string(build_buf);
+  char abuf[160];
+  snprintf(abuf, sizeof(abuf), "%s\nESPHome %s\nBuilt %s",
+           App.get_name().c_str(), ESPHOME_VERSION, build_buf);
+  lv_label_set_text(about, abuf);
+  lv_obj_set_style_text_color(about, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(about, &lv_font_montserrat_18, 0);
 }
 
 void HAPanel::build_ui_() {
@@ -203,6 +281,17 @@ void HAPanel::build_ui_() {
   lv_obj_add_flag(header, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(header, &HAPanel::on_header_clicked_, LV_EVENT_CLICKED, this);
 
+  // Connection status dot at far left. Panel's rounded-corner radius is
+  // larger than initially measured — clipping persisted at 28 px and 36 px;
+  // 44 px gives the dot full clearance on both sides.
+  this->status_dot_ = lv_obj_create(header);
+  lv_obj_remove_style_all(this->status_dot_);
+  lv_obj_set_size(this->status_dot_, 10, 10);
+  lv_obj_set_style_radius(this->status_dot_, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(this->status_dot_, lv_color_hex(0xCC4444), 0);
+  lv_obj_set_style_bg_opa(this->status_dot_, LV_OPA_COVER, 0);
+  lv_obj_align(this->status_dot_, LV_ALIGN_LEFT_MID, 44, 0);
+
   this->header_label_ = lv_label_create(header);
   lv_label_set_text(this->header_label_, this->areas_[0].name.c_str());
   lv_obj_set_style_text_color(this->header_label_, lv_color_hex(0xFFFFFF), 0);
@@ -214,6 +303,14 @@ void HAPanel::build_ui_() {
   lv_obj_set_style_text_color(chev, lv_color_hex(0x888888), 0);
   lv_obj_set_style_text_font(chev, &lv_font_montserrat_18, 0);
   lv_obj_align_to(chev, this->header_label_, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+
+  // Clock at far right. Matches the status-dot inset (44 px) so both sides
+  // clear the rounded corners equally.
+  this->clock_label_ = lv_label_create(header);
+  lv_label_set_text(this->clock_label_, "--:--");
+  lv_obj_set_style_text_color(this->clock_label_, lv_color_hex(0xCCCCCC), 0);
+  lv_obj_set_style_text_font(this->clock_label_, &lv_font_montserrat_18, 0);
+  lv_obj_align(this->clock_label_, LV_ALIGN_RIGHT_MID, -44, 0);
 
   // ---- Tileview (rest of screen) ----
   this->tileview_ = lv_tileview_create(scr);
@@ -227,24 +324,27 @@ void HAPanel::build_ui_() {
                       LV_EVENT_VALUE_CHANGED, this);
 
   this->tile_objs_.reserve(this->areas_.size());
+  // Total cols = areas_.size() + 1 (settings tile appended at end).
+  const uint8_t total_cols = (uint8_t)(this->areas_.size() + 1);
   for (size_t ai = 0; ai < this->areas_.size(); ai++) {
     lv_dir_t dir = LV_DIR_HOR;
     if (ai == 0)
       dir = LV_DIR_RIGHT;
-    else if (ai == this->areas_.size() - 1)
-      dir = LV_DIR_LEFT;
     lv_obj_t *tile = lv_tileview_add_tile(this->tileview_, (uint8_t) ai, 0, dir);
     lv_obj_set_style_pad_all(tile, 0, 0);
     this->tile_objs_.push_back(tile);
 
-    // Scrollable container for entity rows. Flex column gives auto vertical
-    // layout; the parent tile clips and lv_obj's built-in scroll handles overflow.
     lv_obj_t *list = lv_obj_create(tile);
     lv_obj_remove_style_all(list);
     lv_obj_set_size(list, 480, 440);
     lv_obj_set_style_bg_color(list, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
+    // 8 px side padding is enough — entity rows already inset their text by
+    // 12 px more, so the side rounded corners don't bite into the row text.
     lv_obj_set_style_pad_all(list, 8, 0);
+    // Bottom needs more (28 px) so the last entity row clears the bottom
+    // rounded corners (~16 px panel inset + a little visual breathing room).
+    lv_obj_set_style_pad_bottom(list, 28, 0);
     lv_obj_set_style_pad_row(list, 4, 0);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
@@ -258,6 +358,11 @@ void HAPanel::build_ui_() {
       this->rebuild_entity_row_text_(ei);
     }
   }
+  // Settings tile (last col). LV_DIR_LEFT only — can't scroll right past it.
+  this->settings_tile_ = lv_tileview_add_tile(this->tileview_, (uint8_t)(total_cols - 1),
+                                              0, LV_DIR_LEFT);
+  lv_obj_set_style_pad_all(this->settings_tile_, 0, 0);
+  this->build_settings_tile_(this->settings_tile_);
 
   // ---- Area picker (full-screen modal, hidden until header tapped) ----
   this->picker_ = lv_obj_create(scr);
@@ -285,6 +390,9 @@ void HAPanel::build_ui_() {
   lv_obj_set_style_bg_color(plist, lv_color_hex(0x000000), 0);
   lv_obj_set_style_bg_opa(plist, LV_OPA_COVER, 0);
   lv_obj_set_style_pad_all(plist, 4, 0);
+  // Same 28 px bottom inset as the entity list — keeps the last area row in
+  // the picker from being clipped by the bottom rounded corners.
+  lv_obj_set_style_pad_bottom(plist, 28, 0);
   lv_obj_set_style_pad_row(plist, 4, 0);
   lv_obj_set_flex_flow(plist, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_scroll_dir(plist, LV_DIR_VER);
@@ -294,6 +402,7 @@ void HAPanel::build_ui_() {
     lv_obj_set_width(row, LV_PCT(100));
     lv_obj_set_height(row, 56);
     lv_obj_set_style_bg_color(row, lv_color_hex(0x1A1A1A), 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x3A4A6A), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(row, 8, 0);
     lv_obj_set_style_border_width(row, 0, 0);
@@ -307,6 +416,51 @@ void HAPanel::build_ui_() {
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
     lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
   }
+  // Settings entry in picker so user can jump straight to it.
+  {
+    lv_obj_t *row = lv_button_create(plist);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, 56);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x222A33), 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x3A4A6A), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(row, 8, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_user_data(row, (void *) (uintptr_t)(total_cols - 1));
+    lv_obj_add_event_cb(row, &HAPanel::on_picker_row_clicked_, LV_EVENT_CLICKED, this);
+
+    lv_obj_t *lbl = lv_label_create(row);
+    lv_label_set_text(lbl, LV_SYMBOL_SETTINGS "  Settings");
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
+  }
+
+  // ---- Boot splash (hides everything until API connects) ----
+  this->splash_ = lv_obj_create(scr);
+  lv_obj_remove_style_all(this->splash_);
+  lv_obj_set_size(this->splash_, 480, 480);
+  lv_obj_set_pos(this->splash_, 0, 0);
+  lv_obj_set_style_bg_color(this->splash_, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(this->splash_, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(this->splash_, 0, 0);
+  lv_obj_set_style_border_width(this->splash_, 0, 0);
+  lv_obj_add_flag(this->splash_, LV_OBJ_FLAG_CLICKABLE);  // eat taps while shown
+
+  lv_obj_t *splash_name = lv_label_create(this->splash_);
+  lv_label_set_text(splash_name, App.get_name().c_str());
+  lv_obj_set_style_text_color(splash_name, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(splash_name, &lv_font_montserrat_18, 0);
+  lv_obj_align(splash_name, LV_ALIGN_CENTER, 0, -20);
+
+  lv_obj_t *splash_status = lv_label_create(this->splash_);
+  lv_label_set_text(splash_status, "Connecting to Home Assistant...");
+  lv_obj_set_style_text_color(splash_status, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(splash_status, &lv_font_montserrat_18, 0);
+  lv_obj_align(splash_status, LV_ALIGN_CENTER, 0, 20);
+
+  this->update_status_dot_();
 }
 
 void HAPanel::open_picker_() {
@@ -324,6 +478,48 @@ void HAPanel::close_picker_() {
   ESP_LOGD(TAG, "picker close");
 }
 
+void HAPanel::update_status_dot_() {
+  if (this->status_dot_ == nullptr)
+    return;
+  lv_obj_set_style_bg_color(this->status_dot_,
+                            lv_color_hex(this->api_connected_ ? 0x66BB66 : 0xCC4444), 0);
+}
+
+bool HAPanel::is_settings_active_() const {
+  if (this->tileview_ == nullptr || this->settings_tile_ == nullptr)
+    return false;
+  return lv_tileview_get_tile_active(this->tileview_) == this->settings_tile_;
+}
+
+void HAPanel::set_clock_text(const std::string &text) {
+  if (this->clock_label_ == nullptr)
+    return;
+  lv_label_set_text(this->clock_label_, text.c_str());
+}
+
+void HAPanel::set_api_connected(bool connected) {
+  if (this->api_connected_ == connected)
+    return;
+  this->api_connected_ = connected;
+  this->update_status_dot_();
+  if (connected && this->splash_ != nullptr) {
+    lv_obj_add_flag(this->splash_, LV_OBJ_FLAG_HIDDEN);
+  }
+  ESP_LOGI(TAG, "api %s", connected ? "connected" : "disconnected");
+}
+
+void HAPanel::set_active_brightness(uint8_t v) {
+  this->active_brightness_ = v;
+  if (this->brightness_slider_ != nullptr) {
+    lv_slider_set_value(this->brightness_slider_, v, LV_ANIM_OFF);
+  }
+  if (this->brightness_value_label_ != nullptr) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%u / 255", (unsigned) v);
+    lv_label_set_text(this->brightness_value_label_, buf);
+  }
+}
+
 // ---------- LVGL event trampolines ----------
 
 void HAPanel::on_tileview_changed_(lv_event_t *e) {
@@ -331,12 +527,16 @@ void HAPanel::on_tileview_changed_(lv_event_t *e) {
   if (self == nullptr || self->tileview_ == nullptr)
     return;
   lv_obj_t *tile = lv_tileview_get_tile_active(self->tileview_);
+  if (tile == self->settings_tile_) {
+    if (self->header_label_ != nullptr)
+      lv_label_set_text(self->header_label_, "Settings");
+    return;
+  }
   for (size_t ai = 0; ai < self->tile_objs_.size(); ai++) {
     if (self->tile_objs_[ai] != tile)
       continue;
     if (self->header_label_ != nullptr)
       lv_label_set_text(self->header_label_, self->areas_[ai].name.c_str());
-    ESP_LOGD(TAG, "area → %u %s", (unsigned) ai, self->areas_[ai].name.c_str());
     return;
   }
 }
@@ -362,12 +562,19 @@ void HAPanel::on_picker_row_clicked_(lv_event_t *e) {
   if (self == nullptr)
     return;
   lv_obj_t *row = lv_event_get_target_obj(e);
-  size_t ai = (size_t) (uintptr_t) lv_obj_get_user_data(row);
+  size_t col = (size_t) (uintptr_t) lv_obj_get_user_data(row);
   self->close_picker_();
-  if (self->tileview_ != nullptr && ai < self->areas_.size()) {
-    lv_tileview_set_tile_by_index(self->tileview_, (uint32_t) ai, 0, LV_ANIM_ON);
-    if (self->header_label_ != nullptr)
-      lv_label_set_text(self->header_label_, self->areas_[ai].name.c_str());
+  if (self->tileview_ == nullptr)
+    return;
+  const size_t total = self->areas_.size() + 1;
+  if (col >= total)
+    return;
+  lv_tileview_set_tile_by_index(self->tileview_, (uint32_t) col, 0, LV_ANIM_ON);
+  if (self->header_label_ != nullptr) {
+    if (col < self->areas_.size())
+      lv_label_set_text(self->header_label_, self->areas_[col].name.c_str());
+    else
+      lv_label_set_text(self->header_label_, "Settings");
   }
 }
 
@@ -377,6 +584,23 @@ void HAPanel::on_picker_bg_clicked_(lv_event_t *e) {
     return;
   if (lv_event_get_target_obj(e) == self->picker_)
     self->close_picker_();
+}
+
+void HAPanel::on_brightness_slider_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->brightness_slider_ == nullptr)
+    return;
+  int32_t v = lv_slider_get_value(self->brightness_slider_);
+  if (v < 0) v = 0;
+  if (v > 255) v = 255;
+  self->active_brightness_ = (uint8_t) v;
+  if (self->brightness_value_label_ != nullptr) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%u / 255", (unsigned) v);
+    lv_label_set_text(self->brightness_value_label_, buf);
+  }
+  if (self->brightness_setter_)
+    self->brightness_setter_((uint8_t) v);
 }
 
 }  // namespace ha_panel

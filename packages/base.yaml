@@ -33,6 +33,13 @@ api:
   # services. Both require explicit opt-in flags on the api block.
   homeassistant_states: true
   homeassistant_services: true
+  # Phase 7: feed connection state into the header status indicator + boot splash.
+  on_client_connected:
+    then:
+      - lambda: "id(ha_panel_id).set_api_connected(true);"
+  on_client_disconnected:
+    then:
+      - lambda: "id(ha_panel_id).set_api_connected(false);"
 
 ota:
   - platform: esphome

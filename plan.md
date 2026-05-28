@@ -27,7 +27,8 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 | 4 | Idle state machine + IMU wake | ✅ | verified on-device 2026-05-28: dim @ 16s, blank @ 45s, touch wakes from blank, motion wakes from dim |
 | 5 | Static HA entity model (MVP) | ✅ | verified 2026-05-28: 88 entity subscriptions arrived within ~1.5 s of HA connect, states match HA |
 | 6 | LVGL UI: area carousel + entity scroller | ✅ | verified 2026-05-28: tileview swipe, vertical scroll, tap-toggle, area picker modal all live; touch transform reset to no-swap/no-mirror |
-| 7 | Polish (clock, battery, settings tile) | ⬜ | |
+| 7a | Polish round 1 (clock, settings tile, splash, tap feedback) | ✅ | verified 2026-05-28; battery + RTC deferred |
+| 7b | Polish round 2 (additional UX items — TBD) | ⬜ | new items added before P8 |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
@@ -326,17 +327,28 @@ substitutions / Jinja, not at runtime.
 
 ---
 
-## Phase 7 — Polish
+## Phase 7a — Polish round 1
 
-**Status:** ⬜ not started · target tag: `p7-polish`
+**Status:** ✅ done · target tag: `p7a-polish`
 
 **Goal:** Make it pleasant to live with.
 
-- [ ] RTC integration: `pcf85063` + `homeassistant` time sources (guide §4 example).
-- [ ] Header clock that shows current time when not interacting.
-- [ ] Visual feedback on tap (LVGL `lv_btn` press style — brief colour change).
-- [ ] Boot splash with device + HA connection status.
-- [ ] Settings tile at the end of the area carousel: brightness slider (bound to the `mipi_spi` native brightness), screensaver timeout, version info.
+- [x] Header clock — 12-hour HH:MM AM/PM, refreshed every 15 s from HA time source via top-level YAML `interval`.
+- [x] Visual feedback on tap — explicit `LV_STATE_PRESSED` bg color (0x3A4A6A) on entity + picker rows. The built-in `lv_button` press-dim was already visible in P6; the override makes it more obvious.
+- [x] Boot splash — full-screen modal showing node name + "Connecting to Home Assistant…" until `api.on_client_connected` fires. Hidden once API reaches CONNECTED. Status dot in header turns red→green on the same event.
+- [x] Settings tile at the end of the area carousel — appended after the last area in the tileview, also reachable via a `⚙ Settings` row in the area picker. Contains: brightness slider (16–255, persisted via `active_brightness_g` global with `restore_value: yes`), idle timeout summary, About block (node name, ESPHome version, build time).
+- [~] RTC integration (`pcf85063`) — **deferred**. HA time source already covers the use case while online; PCF85063 is for offline survival, which is not yet a stated goal. Move into a follow-up if/when the panel is expected to run untethered.
+- [~] AXP2101 battery readout — **deferred**. No native ESPHome component; would need a custom `axp2101` external_component with ADC init + voltage register read. Worth its own ticket; not in P7a exit criteria.
+
+---
+
+## Phase 7b — Polish round 2
+
+**Status:** ⬜ not started · target tag: `p7b-polish`
+
+**Goal:** Additional UX items uncovered during P7a on-device testing.
+
+- [ ] _(items TBD — fill in before starting)_
 
 ---
 
@@ -458,6 +470,18 @@ text_sensor:
 ## Session notes & decisions log
 
 > Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-28 — P7a polish round 1 (verified on-device)
+
+- **Renamed P7 → P7a** at the user's request so a P7b can collect follow-up polish items uncovered during P7a on-device testing, before P8 (multi-board) starts.
+- **`id: ha_panel_id`** added to `packages/ha-entities.yaml` (real, gitignored) + `ha-entities.example.yaml`. The id is referenced by top-level YAML lambdas for clock updates, brightness setter, and api connect/disconnect triggers. Cleanest way to wire YAML → C++ in ESPHome.
+- **`brightness_active` substitution → runtime global** (`active_brightness_g`, `restore_value: yes`). Required so the settings-tile slider's edits survive idle cycles (every `enter_active` resets brightness) and reboots. Substitutions are compile-time only and can't be edited at runtime.
+- **`api.on_client_connected` / `on_client_disconnected`** triggers feed `HAPanel::set_api_connected(bool)` — drives the boot splash hide/show and the header status dot color. Discovered ESPHome supports these as standard `api:` automation triggers; no custom-API plumbing needed.
+- **Rounded-corner inset**: panel's visible corner radius is *much* larger than the docs guide's "~16 px" estimate. Empirical: status dot clipped at 12, 28, 36 px insets; clean at **44 px**. Updated header status-dot and clock to that value; entity-list and picker-list bottom paddings (28 / 28 / 32 px) are looser since vertical scroll can bring a clipped row up. Anchor for future corner-inset decisions: 44 px works for top corners of this CO5300 panel.
+- **`App.get_compilation_time()` deprecated** in ESPHome 2026.1, removed in 2026.7. Replaced with `App.get_build_time_string(buf)` which takes a `std::span<char, Application::BUILD_TIME_STR_SIZE>` (BUILD_TIME_STR_SIZE = 26, qualify via `Application::` from inside esphome namespace). Returns void; populates the buffer.
+- **`LV_USE_SLIDER` transitive dep**: enabling slider also requires `LV_USE_BAR=1` (slider is implemented on top of bar). Compile error was clear (`#error "lv_slider: lv_bar is required."`), worth noting for any future widget enable.
+- **Battery + RTC explicitly deferred.** Neither is in P7 exit criteria; battery needs a custom AXP2101 component, RTC is only useful when running offline. Tracked as deferred bullets, not unchecked items.
+- **`Settings` accessible two ways**: scroll past the last area, or open the header picker and tap the `⚙ Settings` row (separate tinted bg `0x222A33` to set it apart from area rows).
 
 ### 2026-05-28 — P6 LVGL UI (verified on-device)
 

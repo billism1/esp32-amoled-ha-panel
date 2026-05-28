@@ -20,6 +20,7 @@
 # entity_id if not provided.
 
 ha_panel:
+  id: ha_panel_id      # referenced by id(ha_panel_id) in lambdas (clock, api triggers, brightness setter)
   areas:
     - name: "Living Room"
       entities:

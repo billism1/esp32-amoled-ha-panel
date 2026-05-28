@@ -10,16 +10,45 @@ esphome:
   name: ${node_name}
   friendly_name: ${friendly_name}
   on_boot:
-    # Fires after wifi/api/display all up. Lets us confirm display bring-up
-    # from HA's event log without needing USB serial.
-    priority: -100
+    # Priority -100: after components (PROCESSOR / DATA / AFTER_CONNECTION) are
+    # constructed. Wire ha_panel's brightness setter to the display + idle
+    # global so the settings-tile slider updates persist through idle cycles.
+    - priority: -100
+      then:
+        - lambda: |-
+            id(ha_panel_id).set_brightness_setter([](uint8_t v) {
+              id(amoled_display).set_brightness(v);
+              id(active_brightness_g) = v;
+            });
+            id(ha_panel_id).set_active_brightness(id(active_brightness_g));
+    # Existing display bring-up event for HA visibility.
+    - priority: -200
+      then:
+        - delay: 2s
+        - logger.log: "Display bring-up: first frame should be visible"
+        - homeassistant.event:
+            event: esphome.display_first_frame
+            data:
+              device: ${node_name}
+
+# Push current HH:MM into the header clock label every 15 s. Runs against the
+# HA time source declared in packages/base.yaml.
+interval:
+  - interval: 15s
     then:
-      - delay: 2s
-      - logger.log: "Display bring-up: first frame should be visible"
-      - homeassistant.event:
-          event: esphome.display_first_frame
-          data:
-            device: ${node_name}
+      - lambda: |-
+          auto t = id(ha_time).now();
+          if (!t.is_valid()) {
+            id(ha_panel_id).set_clock_text("--:--");
+            return;
+          }
+          int h = t.hour;
+          const char *ampm = (h >= 12) ? "pm" : "am";
+          if (h == 0) h = 12;
+          else if (h > 12) h -= 12;
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%d:%02d %s", h, t.minute, ampm);
+          id(ha_panel_id).set_clock_text(buf);
 
 # Packages compose the firmware. ESPHome merges them at compile time.
 # Board package owns hardware (pins, chip, PSRAM, display, touch, IMU).

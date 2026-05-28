@@ -1,4 +1,4 @@
-# Idle state machine — Phase 4.
+# Idle state machine — Phase 4 + P7 brightness slider hook.
 #
 #                          touch / IMU motion
 #       ┌────────────────────────────────────────────────────┐
@@ -12,16 +12,21 @@
 #   - touchscreen on_touch  (wired in board package)
 #   - IMU motion binary_sensor on_press (wired in board package)
 # Both call script.execute: notify_input.
+#
+# P7: brightness_active is now a runtime global (`active_brightness_g`) so the
+# settings tile's brightness slider can edit it and the change persists
+# through subsequent active/dim/active cycles.
 
 substitutions:
   # Time without input before dimming.
   dim_timeout_s: "15"
   # Additional time at dim before fully blanking.
   blank_timeout_s: "30"
-  # mipi_spi brightness command argument (uint8_t, controller-defined scale).
-  brightness_active: "0xD0"   # ~80%
-  brightness_dim:    "0x20"   # ~12%
-  brightness_blank:  "0x00"   # off
+  # Initial active-state brightness (uint8_t). Slider writes the same global at
+  # runtime; this only sets the boot default.
+  brightness_active_default: "0xD0"   # ~80%
+  brightness_dim:    "0x20"            # ~12%
+  brightness_blank:  "0x00"            # off
   # IMU sensitivity. 0.10 g = picking up the device wakes it; setting it on a
   # table does not. Tune in `secrets.yaml` or top-level YAML if needed.
   motion_threshold_g: "0.10"
@@ -37,6 +42,12 @@ globals:
     type: int
     restore_value: no
     initial_value: "0"
+  # P7: live-tunable active brightness, edited by the settings-tile slider.
+  # restore_value: yes keeps a user-tweaked brightness across reboots.
+  - id: active_brightness_g
+    type: uint8_t
+    restore_value: yes
+    initial_value: ${brightness_active_default}
 
 script:
   # Single entry-point any input source calls. Always restamps the clock;
@@ -57,7 +68,7 @@ script:
     then:
       - lambda: |-
           id(idle_state) = 0;
-          id(amoled_display).set_brightness((uint8_t) ${brightness_active});
+          id(amoled_display).set_brightness(id(active_brightness_g));
           ESP_LOGI("idle", "→ active");
 
   - id: enter_dim

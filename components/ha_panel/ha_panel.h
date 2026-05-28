@@ -1,6 +1,7 @@
 // ha_panel.h — runtime model + state subscription + LVGL UI tree.
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -37,10 +38,18 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void add_area(const std::string &name);
   void add_entity(const std::string &entity_id, const std::string &friendly_name);
 
-  // Programmatic action (used by tests / future automations).
+  // Programmatic action (tests / future automations).
   bool tap(size_t area_idx, size_t entity_idx);
 
   size_t num_areas() const { return this->areas_.size(); }
+
+  // YAML-side hooks (P7).
+  void set_brightness_setter(std::function<void(uint8_t)> setter) {
+    this->brightness_setter_ = std::move(setter);
+  }
+  void set_active_brightness(uint8_t v);
+  void set_clock_text(const std::string &text);
+  void set_api_connected(bool connected);
 
  protected:
   // HA state callback.
@@ -52,9 +61,12 @@ class HAPanel : public Component, public api::CustomAPIDevice {
 
   // LVGL build + helpers.
   void build_ui_();
+  void build_settings_tile_(lv_obj_t *parent);
   void rebuild_entity_row_text_(size_t entity_idx);
   void open_picker_();
   void close_picker_();
+  void update_status_dot_();
+  bool is_settings_active_() const;
 
   // Event trampolines (LVGL takes raw C callbacks).
   static void on_tileview_changed_(lv_event_t *e);
@@ -62,16 +74,27 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_entity_row_clicked_(lv_event_t *e);
   static void on_picker_row_clicked_(lv_event_t *e);
   static void on_picker_bg_clicked_(lv_event_t *e);
+  static void on_brightness_slider_(lv_event_t *e);
 
   std::vector<Area> areas_;
   std::vector<Entity> entities_;
 
   // LVGL refs. nullptr until build_ui_ runs.
   lv_obj_t *header_label_{nullptr};
+  lv_obj_t *clock_label_{nullptr};
+  lv_obj_t *status_dot_{nullptr};
   lv_obj_t *tileview_{nullptr};
   lv_obj_t *picker_{nullptr};
+  lv_obj_t *splash_{nullptr};
+  lv_obj_t *settings_tile_{nullptr};
+  lv_obj_t *brightness_slider_{nullptr};
+  lv_obj_t *brightness_value_label_{nullptr};
   std::vector<lv_obj_t *> tile_objs_;            // [area_idx]
   std::vector<lv_obj_t *> badges_by_entity_;     // [entity_idx]
+
+  std::function<void(uint8_t)> brightness_setter_;
+  uint8_t active_brightness_{0xD0};
+  bool api_connected_{false};
 };
 
 }  // namespace ha_panel
