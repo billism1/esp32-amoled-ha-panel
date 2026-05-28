@@ -1,0 +1,30 @@
+# Secrets — never commit
+secrets.yaml
+secrets.*.yaml
+!secrets.example.yaml
+
+# ESPHome build artifacts
+.esphome/
+.pioenvs/
+.piolibdeps/
+.vscode/.browse.c_cpp.db*
+.vscode/ipch/
+
+# Python / venv
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+
+# Local override configs
+*.local.yaml
+local.*.yaml
