@@ -23,7 +23,7 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 | 0 | Repo bootstrap | ✅ | secrets, gitignore, README, plan |
 | 1 | Skeleton (Wi-Fi + HA API, no display) | ✅ | flashed, Wi-Fi up, HA API connected |
 | 2 | Display bring-up (CO5300) | ✅ | Hello label rendering, no edge artifacts |
-| 3 | Touch bring-up (CST9220) | ⬜ | |
+| 3 | Touch bring-up (CST9220) | ✅ | press events fire after vendored driver rewrite + power-cycle |
 | 4 | Idle state machine + IMU wake | ⬜ | battery-critical, before any real UI |
 | 5 | Static HA entity model (MVP) | ⬜ | |
 | 6 | LVGL UI: area carousel + entity scroller | ⬜ | |
@@ -123,18 +123,21 @@ Tasks:
 
 ## Phase 3 — Bring up touch
 
-**Status:** ⬜ not started · target tag: `p3-touch`
+**Status:** ✅ done · target tag: `p3-touch`
 
 **Goal:** Touches are logged with correct (x, y) coordinates.
 
-Files added to `boards/waveshare-2.16.yaml`:
-- [ ] `external_components:` pulling a `cst9217` driver (community fork — pin to a specific commit SHA).
-- [ ] `touchscreen:` block bound to the display, with `interrupt_pin` + `reset_pin`.
+Files added:
+- [x] `components/cst9220/` — vendored from sibling `esphome-lvgl-dashboard`, then rewritten against lewisxhe `SensorLib TouchDrvCST92xx` reference (working Arduino driver in `esp32-cheap-yellow-display-examples/projects/sand-multi-task-waveshare-esp32-s3-2_16inch`).
+- [x] `boards/waveshare-2.16.yaml` — `i2c:` bus on SDA=15/SCL=14, `external_components:` local path, `touchscreen:` block with shared `reset_pin: 2` (`allow_other_uses` on both display + touch), polling at 50ms, `transform: swap_xy: true, mirror_x: true`.
 
 Tasks:
-- [ ] Try the `shelson/esphome-cst9217` fork first. CST9220 register layout is close enough that a `cst9217` driver often works (guide §3). If not: try `fuzzybear62`'s fork next; last resort write a thin external component derived from lewisxhe `SensorLib` `TouchDrvCST92xx`.
-- [ ] Log raw touch events for orientation calibration. Set `transform: mirror_x/mirror_y` based on what we see.
-- [ ] Confirm multi-touch / gesture events fire — needed for swipe detection in Phase 6.
+- [x] Driver port — vendored sibling driver, then fixed 3 bugs against SensorLib: (1) raw 2-byte write for cmd-mode entry instead of `write_register16` 4-byte form; (2) added 8-byte FW-version read at 0xD208 (load-bearing for chip to enter scan mode); (3) write ACK `D0 00 AB` after every DATA_REG read so chip releases buffer for next scan; (4) dropped the bogus exit-cmd-mode write (chip transitions automatically on first DATA_REG access).
+- [x] Raw touch logging at INFO via board `on_touch` lambda.
+- [x] Single-finger press events fire (status 0x06). Release events (0x00 / 0x0B) intentionally ignored; chip emits them after every press.
+- [ ] Multi-touch/gesture: deferred to P6 — current driver caps at `CST9220_MAX_TOUCH_POINTS = 1`, fine for tap+swipe.
+
+**Operator quirk:** After every flash, touch is dead until the device is power-cycled (USB unplug or PWR button). Same behavior on the working Arduino reference and sibling ESPHome project. Cause unknown — chip enters bad state during ESP32 partial reset. Document and live with it.
 
 **Exit criteria:** A tap in each corner logs coordinates close to (0,0), (479,0), (0,479), (479,479) after transforms.
 
@@ -436,6 +439,17 @@ text_sensor:
 ## Session notes & decisions log
 
 > Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-27 — P3 touch up (after 6 false starts)
+
+- **Authoritative CST9220 reference**: `lewisxhe/SensorLib` `TouchDrvCST92xx.cpp` in `C:/Users/billi/Source/repos/esp32-cheap-yellow-display-examples/.pio/libdeps/sand-multi-task-waveshare-esp32-s3-2_16inch/SensorLib/src/touch/`. The Arduino working code at `projects/sand-multi-task-waveshare-esp32-s3-2_16inch/main.cpp` is the proof-positive driver call sequence.
+- **THE bug** in the vendored ESPHome cst9220 driver: missing post-read ACK write. Chip's DATA_REG works once-then-locks until you write `D0 00 AB` back. We were never ACKing → buffer never refilled → all-zero reads forever. Without this insight, no amount of YAML tweaking would have fixed it.
+- **Second bug**: original used `write_register16(0xD101, [0xD1, 0x01], 2)` which puts 4 bytes on the wire (`D1 01 D1 01`); SensorLib's `writeRegister(0xD1, 0x01)` puts 2 bytes (`D1 01`). The extra junk confused chip's mode state machine. Fix: use raw `this->write(buf, 2)` for cmd-mode entry.
+- **Third bug**: original wrote `0xD109` (NORMAL_MODE_REG) explicitly to exit cmd mode; SensorLib does nothing here — chip auto-transitions when DATA_REG (`0xD000`) is read. Removing the explicit exit write fixed the all-zero stall.
+- **Load-bearing read**: SensorLib's `getAttribute()` reads 8 bytes from `0xD208` (FW version + checksum). Skipping that left chip in a half-init state. Added it.
+- **Pin 2 RST sharing** between display + touch needs `allow_other_uses: true` on *both* claimants — confirmed reading both blocks compile together.
+- **Power-cycle required after every flash** for touch to start responding. Sibling project hit same wall. Likely chip enters bad state during ESP32 partial reset (USB reset doesn't fully cycle the AXP2101 → touch IC stays in zombie mode). Document.
+- **Transforms** per working Arduino: `setSwapXY(true) + setMirrorXY(true, false)` → LVGL `swap_xy: true, mirror_x: true, mirror_y: false`.
 
 ### 2026-05-27 — P2 display up
 

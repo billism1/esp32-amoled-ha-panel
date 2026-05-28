@@ -62,9 +62,10 @@ display:
     spi_id: lcd_qspi
     bus_mode: quad
     cs_pin: 12
-    # Pin 2 is shared with CST9220 touch RST; will gain `allow_other_uses: true`
-    # on both sides when touch lands in P3.
-    reset_pin: 2
+    # Pin 2 is shared with CST9220 touch RST — see touchscreen block below.
+    reset_pin:
+      number: 2
+      allow_other_uses: true
     dimensions:
       width: ${disp_width}
       height: ${disp_height}
@@ -74,3 +75,41 @@ display:
     brightness: 0xD0           # ~80%; P4 will replace with dynamic control
     update_interval: never     # LVGL drives flushes
     auto_clear_enabled: false
+
+# --- I2C bus (touch now; IMU/PMU/RTC in later phases) ---
+i2c:
+  - id: bus_a
+    sda: 15
+    scl: 14
+    frequency: 400kHz
+    scan: true
+
+# --- Touch: CST9220 (vendored from shelson/esphome-cst9217, adapted) ---
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [cst9220]
+
+touchscreen:
+  - id: main_touchscreen
+    platform: cst9220
+    i2c_id: bus_a
+    address: 0x5A
+    reset_pin:
+      number: 2
+      allow_other_uses: true   # shared with display reset
+    # Polling — INT pin handling deferred until idle/wake (P4) when battery
+    # cost of 50ms polling matters more.
+    touch_timeout: 50ms
+    update_interval: 50ms
+    # Per working Arduino reference (sand-multi project): setSwapXY(true) +
+    # setMirrorXY(true, false). LVGL equivalent below.
+    transform:
+      swap_xy: true
+      mirror_x: true
+      mirror_y: false
+    on_touch:
+      - lambda: |-
+          ESP_LOGI("touch", "x=%d y=%d  raw x=%d y=%d",
+            touch.x, touch.y, touch.x_raw, touch.y_raw);
