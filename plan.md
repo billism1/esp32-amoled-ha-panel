@@ -134,7 +134,7 @@ Tasks:
 - [x] Driver port — vendored sibling driver, then fixed 3 bugs against SensorLib: (1) raw 2-byte write for cmd-mode entry instead of `write_register16` 4-byte form; (2) added 8-byte FW-version read at 0xD208 (load-bearing for chip to enter scan mode); (3) write ACK `D0 00 AB` after every DATA_REG read so chip releases buffer for next scan; (4) dropped the bogus exit-cmd-mode write (chip transitions automatically on first DATA_REG access).
 - [x] Raw touch logging at INFO via board `on_touch` lambda.
 - [x] Single-finger press events fire (status 0x06). Release events (0x00 / 0x0B) intentionally ignored; chip emits them after every press.
-- [ ] Multi-touch/gesture: deferred to P6 — current driver caps at `CST9220_MAX_TOUCH_POINTS = 1`, fine for tap+swipe.
+- [~] Multi-touch/gesture: P6 confirmed single-touch is enough — LVGL tileview swipe, vertical scroll, and tap-toggle all worked with `CST9220_MAX_TOUCH_POINTS = 1`. Deferred to backlog; no pinch-zoom / two-finger use case in v1.
 
 **Operator quirk:** After every flash, touch is dead until the device is power-cycled (USB unplug or PWR button). Same behavior on the working Arduino reference and sibling ESPHome project. Cause unknown — chip enters bad state during ESP32 partial reset. Document and live with it.
 
@@ -213,7 +213,7 @@ Default substitutions (tunable in `secrets.yaml` or top-level overrides):
 
 Files added:
 - [x] `packages/ha-entities.example.yaml` — committed template (sanitized placeholder areas/entities) so cloners see the schema.
-- [ ] `packages/ha-entities.yaml` — **gitignored**, user-edited per-install copy of the example. Contains real entity_ids and friendly names, so it never gets pushed. Will be replaced by dynamic discovery in Phase 9.
+- [x] `packages/ha-entities.yaml` — **gitignored**, user-edited per-install copy of the example. Contains real entity_ids and friendly names, so it never gets pushed. Will be replaced by dynamic discovery in Phase 9.
 
 ### Why static first, dynamic later
 
@@ -279,7 +279,7 @@ ESPHome objects, none of which we'd actually render. Instead:
 **Goal:** The actual feature — horizontal swipe between areas, vertical scroll for entities within an area, tap to toggle.
 
 Files added:
-- [ ] `packages/lvgl-ui.yaml` — board-agnostic LVGL config.
+- [x] `packages/lvgl-ui.yaml` — board-agnostic LVGL config (minimal: just `lvgl:` block + empty `main_page`; widget tree built at runtime by `ha_panel`).
 
 ### UI structure
 
