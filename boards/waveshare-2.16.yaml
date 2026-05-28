@@ -27,6 +27,14 @@ esphome:
     board_build.flash_mode: dio
     board_build.f_flash: 80000000L
     board_build.f_cpu: 240000000L
+    # LVGL widget enables — required because ha_panel builds the widget tree
+    # at runtime via the LVGL C API, so ESPHome's YAML-driven LV_USE_* detection
+    # would otherwise strip these out.
+    build_flags:
+      - "-DLV_USE_FLEX=1"
+      - "-DLV_USE_LABEL=1"
+      - "-DLV_USE_BUTTON=1"
+      - "-DLV_USE_TILEVIEW=1"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -124,11 +132,14 @@ touchscreen:
     # cost of 50ms polling matters more.
     touch_timeout: 50ms
     update_interval: 50ms
-    # Per working Arduino reference (sand-multi project): setSwapXY(true) +
-    # setMirrorXY(true, false). LVGL equivalent below.
+    # P6: with LVGL UI, the P3 transform produced a 90° axis swap — physical
+    # vertical swipes registered as horizontal in the tileview. ESPHome's
+    # mipi_spi display has no rotation, so the touchscreen needs to match the
+    # native framebuffer axes: no swap, no mirror. Adjust mirror_x / mirror_y
+    # individually if a swipe direction comes out reversed.
     transform:
-      swap_xy: true
-      mirror_x: true
+      swap_xy: false
+      mirror_x: false
       mirror_y: false
     on_touch:
       - lambda: |-

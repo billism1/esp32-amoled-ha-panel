@@ -26,7 +26,7 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 | 3 | Touch bring-up (CST9220) | ✅ | press events fire after vendored driver rewrite + power-cycle |
 | 4 | Idle state machine + IMU wake | ✅ | verified on-device 2026-05-28: dim @ 16s, blank @ 45s, touch wakes from blank, motion wakes from dim |
 | 5 | Static HA entity model (MVP) | ✅ | verified 2026-05-28: 88 entity subscriptions arrived within ~1.5 s of HA connect, states match HA |
-| 6 | LVGL UI: area carousel + entity scroller | ⬜ | |
+| 6 | LVGL UI: area carousel + entity scroller | ✅ | verified 2026-05-28: tileview swipe, vertical scroll, tap-toggle, area picker modal all live; touch transform reset to no-swap/no-mirror |
 | 7 | Polish (clock, battery, settings tile) | ⬜ | |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
@@ -274,7 +274,7 @@ ESPHome objects, none of which we'd actually render. Instead:
 
 ## Phase 6 — LVGL UI: area carousel + entity scroller
 
-**Status:** ⬜ not started · target tag: `p6-ui`
+**Status:** ✅ done · target tag: `p6-ui`
 
 **Goal:** The actual feature — horizontal swipe between areas, vertical scroll for entities within an area, tap to toggle.
 
@@ -458,6 +458,21 @@ text_sensor:
 ## Session notes & decisions log
 
 > Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-28 — P6 LVGL UI (verified on-device)
+
+- **Runtime LVGL widget build, not YAML.** With 15 areas × ~6 entities each, declaring tiles + rows in YAML would be a mess. `HAPanel::build_ui_()` now constructs the tree via the LVGL C API on `lv_scr_act()` once setup runs. Plan §P9 was already going to need this approach for dynamic discovery, so starting it in P6 reduces P9 risk.
+- **Widget flags via `build_flags`.** ESPHome's lvgl auto-enables only LVGL widgets referenced in YAML. Runtime builds skip that detection, so `LV_USE_FLEX`, `LV_USE_LABEL`, `LV_USE_BUTTON`, and `LV_USE_TILEVIEW` are forced on via `esphome.platformio_options.build_flags` in the board package. Without those, the runtime calls fail to link (errors like `'lv_label_create' was not declared in this scope`).
+- **No `lv_list` wrapper in ESPHome.** Use `lv_obj_create` + `lv_obj_set_flex_flow(LV_FLEX_FLOW_COLUMN)` + scroll direction `LV_DIR_VER`. Functionally equivalent for vertical entity scrolling. Same pattern for the area-picker modal.
+- **LVGL v9.5 API differences from v8 caught at compile**:
+  - `lv_event_get_target(e)` returns `void *` — use `lv_event_get_target_obj(e)` for `lv_obj_t *`.
+  - `lv_tileview_get_tile_act` → `lv_tileview_get_tile_active`.
+  - `lv_obj_set_tile_id` → `lv_tileview_set_tile_by_index(uint32_t, uint32_t, anim)`.
+  - `lv_btn_*` → `lv_button_*`.
+- **Touch transform reset.** P3 used `swap_xy: true, mirror_x: true` based on a working Arduino reference, but that reference rendered the framebuffer at a different rotation than ESPHome's `mipi_spi` does by default. With the LVGL UI driving directional gestures, physical vertical swipes registered as horizontal in the tileview. Reset to `swap_xy: false, mirror_x: false, mirror_y: false` — directions match the display orientation.
+- **Area picker** addresses a real ergonomic problem: cycling through 15 areas by swiping is tedious. Header tap opens a full-screen modal with all areas in a scrollable flex column; row tap calls `lv_tileview_set_tile_by_index` and closes the modal. Picker bg tap dismisses without jumping.
+- **State badge colour cue**: green for on/open/home/active, grey for off/closed/away/idle, red for unavailable/unknown, white otherwise. Numeric / free-text states render in white as-is.
+- **Long entity names**: friendly_name label uses `LV_LABEL_LONG_DOT` so anything past ~300 px ellipsises rather than overlapping the state badge.
 
 ### 2026-05-28 — P5 static HA entity model (code complete)
 

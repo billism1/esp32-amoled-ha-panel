@@ -1,18 +1,18 @@
 # LVGL UI package — board-agnostic.
-# P2: single "Hello" page proves the framebuffer is wired up.
-# P6: replaced by tileview (area carousel) + per-area entity lists.
+#
+# Phase 6: ha_panel builds the widget tree at runtime (lv_tileview + per-area
+# lv_list + entity rows + area-picker modal) via the LVGL C API. This package
+# only sets up the LVGL component itself and an empty main page; ha_panel
+# attaches everything to lv_scr_act() in its setup().
 
 lvgl:
   displays:
     - amoled_display
   buffer_size: 25%
-  bg_color: 0x000000          # AMOLED black = pixels off (low power, no burn-in)
+  bg_color: 0x000000
+  # Setting default_font to montserrat_18 forces the symbol to link so we can
+  # reference lv_font_montserrat_18 from C++ when constructing widgets.
+  default_font: montserrat_18
   pages:
-    - id: hello_page
+    - id: main_page
       bg_color: 0x000000
-      widgets:
-        - label:
-            align: CENTER
-            text: "Hello"
-            text_color: 0xFFFFFF
-            text_font: montserrat_48
