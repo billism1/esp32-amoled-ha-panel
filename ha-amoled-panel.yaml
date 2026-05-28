@@ -9,10 +9,22 @@ substitutions:
 esphome:
   name: ${node_name}
   friendly_name: ${friendly_name}
+  on_boot:
+    # Fires after wifi/api/display all up. Lets us confirm display bring-up
+    # from HA's event log without needing USB serial.
+    priority: -100
+    then:
+      - delay: 2s
+      - logger.log: "Display bring-up: first frame should be visible"
+      - homeassistant.event:
+          event: esphome.display_first_frame
+          data:
+            device: ${node_name}
 
 # Packages compose the firmware. ESPHome merges them at compile time.
-# Board package first (pins, chip, PSRAM, plus display/touch/IMU as later
-# phases add them); base second (Wi-Fi, HA API, OTA, logger, improv).
+# Board package owns hardware (pins, chip, PSRAM, display, touch as added).
+# base = wifi/api/ota/logger. lvgl-ui = on-screen content.
 packages:
   board: !include boards/waveshare-2.16.yaml
   base: !include packages/base.yaml
+  lvgl_ui: !include packages/lvgl-ui.yaml

@@ -1,0 +1,18 @@
+# LVGL UI package — board-agnostic.
+# P2: single "Hello" page proves the framebuffer is wired up.
+# P6: replaced by tileview (area carousel) + per-area entity lists.
+
+lvgl:
+  displays:
+    - amoled_display
+  buffer_size: 25%
+  bg_color: 0x000000          # AMOLED black = pixels off (low power, no burn-in)
+  pages:
+    - id: hello_page
+      bg_color: 0x000000
+      widgets:
+        - label:
+            align: CENTER
+            text: "Hello"
+            text_color: 0xFFFFFF
+            text_font: montserrat_48

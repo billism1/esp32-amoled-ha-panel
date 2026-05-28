@@ -22,7 +22,7 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 |---|---|---|---|
 | 0 | Repo bootstrap | ✅ | secrets, gitignore, README, plan |
 | 1 | Skeleton (Wi-Fi + HA API, no display) | ✅ | flashed, Wi-Fi up, HA API connected |
-| 2 | Display bring-up (CO5300) | ⬜ | |
+| 2 | Display bring-up (CO5300) | ✅ | Hello label rendering, no edge artifacts |
 | 3 | Touch bring-up (CST9220) | ⬜ | |
 | 4 | Idle state machine + IMU wake | ⬜ | battery-critical, before any real UI |
 | 5 | Static HA entity model (MVP) | ⬜ | |
@@ -97,19 +97,21 @@ Tasks:
 
 ## Phase 2 — Bring up display
 
-**Status:** ⬜ not started · target tag: `p2-display`
+**Status:** ✅ done · target tag: `p2-display`
 
 **Goal:** AMOLED lights up with a solid colour or test pattern.
 
 Files added to `boards/waveshare-2.16.yaml`:
-- [ ] `spi:` block (QSPI, `type: quad`, clk + 4 data pins)
-- [ ] `display:` block (`platform: mipi_spi`, `model: CO5300`, dimensions 480×480, `offset_width: 6` for the known green-edge bug, `auto_clear_enabled: false`)
+- [x] `spi:` block (QSPI, `type: quad`, clk 38, data pins [4,5,6,7])
+- [x] `display:` block (`platform: mipi_spi`, `model: CO5300`, dimensions 480×480, `data_rate: 40MHz`, `invert_colors: true`, `brightness: 0xD0`, `auto_clear_enabled: false`)
 
 Tasks:
-- [ ] **Verify pins against the Waveshare 2.16" schematic.** The 1.75" pins in the guide are a starting point only — board revisions differ. Cross-check by flashing Waveshare's sample Arduino code first if any pin is ambiguous.
-- [ ] Confirm ESPHome version >= the one that closed [#15765](https://github.com/esphome/esphome/issues/15765); leave `offset_width: 6` as belt-and-suspenders.
-- [ ] Add a `homeassistant.event` log when the display draws its first frame, so we can confirm bring-up over the HA log without USB.
-- [ ] Add a single LVGL page with a `lv_label` "Hello" so we know the framebuffer is wired up.
+- [x] Pins verified against working sibling project `esphome-lvgl-dashboard` (same board): CS=12, SCLK=38, D0..D3=4,5,6,7, RST=2. Guide §4 had 1.75 board pins which differ.
+- [x] ESPHome 2026.5.1 has the #15765 fix. No `offset_width` needed when over-drawing to 480.
+- [x] `homeassistant.event: esphome.display_first_frame` fires from top-level `on_boot` after 2s delay. Verified in HA Developer Tools → Events listener.
+- [x] `packages/lvgl-ui.yaml` ships single page with white "Hello" label on black bg.
+
+**Edge-artifact resolution:** Tried (a) native 466x466 → pink strip on right + bottom; (b) 466x466 + offset_width/height: 6 → thin pink ring on all four edges; (c) over-draw 480x480, no offset → clean. Driver appears to apply its own internal offset, so stacking ours shifts the image. Over-draw + AMOLED black bg = invisible bezel rim.
 
 **Exit criteria:** Panel shows "Hello" centred. No green edge line. No crash log on boot.
 
@@ -434,6 +436,13 @@ text_sensor:
 ## Session notes & decisions log
 
 > Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-27 — P2 display up
+
+- **Authoritative pin map** for Waveshare 2.16: CS=12 SCLK=38 D0..D3=4,5,6,7 LCD_RST=2 (shared with TP_RST). Source: `esphome-lvgl-dashboard/device.yaml` cross-referenced with waveshareteam pin_config.h. Guide §4 had 1.75 board pins which differ — do not trust the guide for GPIO numbers.
+- **Panel geometry trap**: CO5300 controller addresses 480x480 but the visible AMOLED is 466x466 inset ~7px. ESPHome's CO5300 driver appears to apply its own offset, so adding `offset_width: 6` per the guide stacked the shift and produced a thin pink ring on all four edges. Fix: declare dimensions as 480x480 (over-draw), no `offset_width`/`offset_height`. AMOLED black bg renders the over-drawn bezel rim invisible.
+- **Pin 2 RST sharing** between display and touch needs `allow_other_uses: true` on *both* claimants. Cannot set it on display alone — P3 will add the touch side and re-enable it.
+- **Perf sdkconfig**: added 5 sdkconfig_options (CPU 240, data cache 64K/64B, SPIRAM fetch instructions + rodata) borrowed from working sibling project. Improves LVGL framerate on PSRAM-backed buffers.
 
 ### 2026-05-27 — P1 skeleton flashed
 

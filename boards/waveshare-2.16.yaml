@@ -1,15 +1,32 @@
 # Board package: Waveshare ESP32-S3-Touch-AMOLED-2.16
 #
-# Phase 1 scope: chip + PSRAM + flash only. No display, no touch, no I2C bus.
-# Those land in P2 / P3 / P4 as separate blocks below.
+# Display:  CO5300 QSPI AMOLED, 466x466 (panel actual; marketing says 480x480)
+# Touch:    CST9220 over I2C @ 0x5A (added P3)
+# IMU:      QMI8658 over I2C (added P4)
+# PMU:      AXP2101 @ 0x34 on I2C (added P4)
+# RTC:      PCF85063 on I2C (added P7)
 #
-# Substitutions (board-level defaults; can be overridden by the top-level YAML).
+# GPIO map — verified from waveshareteam/ESP32-S3-Touch-AMOLED-2.16 pin_config.h
+# and the working sibling esphome-lvgl-dashboard build:
+#   LCD QSPI: CS=12  SCLK=38  D0=4  D1=5  D2=6  D3=7  RST=2 (shared with TP_RST)
+#   Touch:    SDA=15 SCL=14   INT=11 RST=2 (shared with LCD_RST)
+#
+# Substitutions (board-level defaults; overridable by top-level YAML).
 substitutions:
   node_name: ha-amoled-panel
   friendly_name: "HA AMOLED Panel"
-  # Display resolution — used by LVGL layout in later phases.
+  # Panel physical = 466x466; controller addressable = 480x480. Over-draw to
+  # 480 so the LVGL black background fills the bezel region instead of leaving
+  # controller garbage (pink) showing through at the edges.
   disp_width: "480"
   disp_height: "480"
+
+esphome:
+  platformio_options:
+    upload_speed: 921600
+    board_build.flash_mode: dio
+    board_build.f_flash: 80000000L
+    board_build.f_cpu: 240000000L
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -17,9 +34,43 @@ esp32:
   flash_size: 16MB
   framework:
     type: esp-idf
+    sdkconfig_options:
+      # PSRAM perf — required for smooth LVGL framebuffer access on stacked PSRAM.
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: y
+      CONFIG_ESP32S3_DATA_CACHE_64KB: y
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: y
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: y
+      CONFIG_SPIRAM_RODATA: y
 
 # 8 MB stacked PSRAM on the ESP32-S3R8 requires octal mode (guide §1).
-# mipi_spi framebuffer in P2 will not init without this.
+# mipi_spi framebuffer will not init without this.
 psram:
   mode: octal
   speed: 80MHz
+
+# --- Display: CO5300 QSPI ---
+spi:
+  - id: lcd_qspi
+    type: quad
+    clk_pin: 38
+    data_pins: [4, 5, 6, 7]
+
+display:
+  - id: amoled_display
+    platform: mipi_spi
+    model: CO5300
+    spi_id: lcd_qspi
+    bus_mode: quad
+    cs_pin: 12
+    # Pin 2 is shared with CST9220 touch RST; will gain `allow_other_uses: true`
+    # on both sides when touch lands in P3.
+    reset_pin: 2
+    dimensions:
+      width: ${disp_width}
+      height: ${disp_height}
+    data_rate: 40MHz
+    color_order: rgb
+    invert_colors: true
+    brightness: 0xD0           # ~80%; P4 will replace with dynamic control
+    update_interval: never     # LVGL drives flushes
+    auto_clear_enabled: false
