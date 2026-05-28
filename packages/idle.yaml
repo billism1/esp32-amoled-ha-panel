@@ -1,0 +1,94 @@
+# Idle state machine — Phase 4.
+#
+#                          touch / IMU motion
+#       ┌────────────────────────────────────────────────────┐
+#       ▼                                                    │
+#   [active]  ──no input ${dim_timeout_s}s──►  [dim]  ──no input ${blank_timeout_s}s──►  [blank]
+#
+# Brightness only — no LVGL page swap. AMOLED black at brightness 0 = pixels
+# fully off = ~0 mA from the panel.
+#
+# Inputs that count as "user activity":
+#   - touchscreen on_touch  (wired in board package)
+#   - IMU motion binary_sensor on_press (wired in board package)
+# Both call script.execute: notify_input.
+
+substitutions:
+  # Time without input before dimming.
+  dim_timeout_s: "15"
+  # Additional time at dim before fully blanking.
+  blank_timeout_s: "30"
+  # mipi_spi brightness command argument (uint8_t, controller-defined scale).
+  brightness_active: "0xD0"   # ~80%
+  brightness_dim:    "0x20"   # ~12%
+  brightness_blank:  "0x00"   # off
+  # IMU sensitivity. 0.10 g = picking up the device wakes it; setting it on a
+  # table does not. Tune in `secrets.yaml` or top-level YAML if needed.
+  motion_threshold_g: "0.10"
+  imu_update_interval: "100ms"
+
+globals:
+  - id: idle_last_input_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  # 0=active, 1=dim, 2=blank. int (not enum) so substitution lambdas stay simple.
+  - id: idle_state
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+script:
+  # Single entry-point any input source calls. Always restamps the clock;
+  # only fires a wake transition if we'd actually dimmed/blanked.
+  - id: notify_input
+    mode: restart
+    then:
+      - lambda: |-
+          id(idle_last_input_ms) = millis();
+      - if:
+          condition:
+            lambda: "return id(idle_state) != 0;"
+          then:
+            - script.execute: enter_active
+
+  - id: enter_active
+    mode: restart
+    then:
+      - lambda: |-
+          id(idle_state) = 0;
+          id(amoled_display).set_brightness((uint8_t) ${brightness_active});
+          ESP_LOGI("idle", "→ active");
+
+  - id: enter_dim
+    mode: restart
+    then:
+      - lambda: |-
+          id(idle_state) = 1;
+          id(amoled_display).set_brightness((uint8_t) ${brightness_dim});
+          ESP_LOGI("idle", "→ dim");
+
+  - id: enter_blank
+    mode: restart
+    then:
+      - lambda: |-
+          id(idle_state) = 2;
+          id(amoled_display).set_brightness((uint8_t) ${brightness_blank});
+          ESP_LOGI("idle", "→ blank");
+
+interval:
+  # 1 s tick. Cheap; uses millis() rather than ESPHome time so it works before
+  # HA time syncs and survives DST changes.
+  - interval: 1s
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const uint32_t since = now - id(idle_last_input_ms);
+          const int s = id(idle_state);
+          const uint32_t dim_at   = (uint32_t) ${dim_timeout_s} * 1000UL;
+          const uint32_t blank_at = dim_at + (uint32_t) ${blank_timeout_s} * 1000UL;
+          if (s == 0 && since >= dim_at) {
+            id(enter_dim).execute();
+          } else if (s == 1 && since >= blank_at) {
+            id(enter_blank).execute();
+          }

@@ -86,12 +86,31 @@ i2c:
     frequency: 400kHz
     scan: true
 
-# --- Touch: CST9220 (vendored from shelson/esphome-cst9217, adapted) ---
+# --- Touch + IMU (vendored components) ---
 external_components:
   - source:
       type: local
       path: components
-    components: [cst9220]
+    components: [cst9220, qmi8658]
+
+# --- IMU: QMI8658 (P4 — idle wake on motion) ---
+# Hardware INT line is not routed to a free GPIO on this board (verified
+# against waveshareteam pin_config.h). Component polls accel and fires
+# `imu_motion` when frame-to-frame |Δa| exceeds motion_threshold_g.
+qmi8658:
+  id: imu
+  i2c_id: bus_a
+  address: 0x6B
+  update_interval: ${imu_update_interval}
+  motion_threshold: ${motion_threshold_g}
+  motion_hold: 500ms
+  motion:
+    id: imu_motion
+    name: "Panel motion"
+    internal: true
+    on_press:
+      then:
+        - script.execute: notify_input
 
 touchscreen:
   - id: main_touchscreen
@@ -115,3 +134,4 @@ touchscreen:
       - lambda: |-
           ESP_LOGI("touch", "x=%d y=%d  raw x=%d y=%d",
             touch.x, touch.y, touch.x_raw, touch.y_raw);
+      - script.execute: notify_input

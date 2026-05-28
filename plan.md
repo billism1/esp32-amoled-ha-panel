@@ -24,14 +24,14 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 | 1 | Skeleton (Wi-Fi + HA API, no display) | ✅ | flashed, Wi-Fi up, HA API connected |
 | 2 | Display bring-up (CO5300) | ✅ | Hello label rendering, no edge artifacts |
 | 3 | Touch bring-up (CST9220) | ✅ | press events fire after vendored driver rewrite + power-cycle |
-| 4 | Idle state machine + IMU wake | ⬜ | battery-critical, before any real UI |
+| 4 | Idle state machine + IMU wake | ✅ | verified on-device 2026-05-28: dim @ 16s, blank @ 45s, touch wakes from blank, motion wakes from dim |
 | 5 | Static HA entity model (MVP) | ⬜ | |
 | 6 | LVGL UI: area carousel + entity scroller | ⬜ | |
 | 7 | Polish (clock, battery, settings tile) | ⬜ | |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
-**Last updated:** 2026-05-27.
+**Last updated:** 2026-05-28.
 
 ---
 
@@ -147,14 +147,14 @@ Tasks:
 
 ## Phase 4 — Idle state machine + IMU wake (battery-critical)
 
-**Status:** ⬜ not started · target tag: `p4-idle`
+**Status:** ✅ done · target tag: `p4-idle`
 
 **Goal:** Device is usable on a LiPo for more than a few hours. Screen dims, then blanks, then wakes on touch *or* IMU motion. Wired up before any real UI so we catch power regressions in every later phase.
 
 Files added:
-- [ ] `packages/idle.yaml` — global state (`active`/`dim`/`blank`), restart-mode scripts driving transitions, brightness ramp.
-- [ ] `components/qmi8658/` — custom external_component for the QMI8658 IMU (port the one from the SentientCustard 2.41" repo — same chip).
-- [ ] Board package gains the `qmi8658:` block with the I²C address + interrupt pin.
+- [x] `packages/idle.yaml` — global state (`active`/`dim`/`blank`), restart-mode scripts driving transitions, runtime brightness via `mipi_spi::set_brightness(uint8_t)`.
+- [x] `components/qmi8658/` — minimal polling driver (WHO_AM_I check, accel @ 31.25 Hz LP, frame-to-frame |Δa| magnitude). Hardware INT pin not exposed on this board, so software polling is the only path. Verified compile against ESPHome 2026.5.1.
+- [x] Board package gains the `qmi8658:` block. **No interrupt pin** — Waveshare's own pin_config.h does not route IMU INT; their official `04_LVGL_QMI8658_ui` example polls.
 
 ### State machine
 
@@ -175,20 +175,22 @@ Default substitutions (tunable in `secrets.yaml` or top-level overrides):
 
 ### IMU integration
 
-- [ ] Bring up QMI8658 on the I²C bus. Confirm WHO_AM_I register reads expected value.
-- [ ] Configure low-power "any-motion" interrupt on the QMI8658 — chip pulls its INT pin high when accel delta exceeds threshold. Use ESPHome `binary_sensor: gpio` on that interrupt pin so motion wakes the firmware without polling.
-- [ ] Optional fallback: periodic `interval:` lambda reads the accel magnitude as a software fallback if the hardware interrupt path is flaky.
-- [ ] Expose IMU motion as an internal `binary_sensor` — idle state machine listens to both `touchscreen.on_touch` and this sensor.
+- [x] Bring up QMI8658 on the I²C bus. Component reads WHO_AM_I at setup; mark_failed if != 0x05.
+- [~] Hardware "any-motion" interrupt **not used** — Waveshare board does not route the IMU INT pin to a free GPIO (confirmed against waveshareteam pin_config.h, and Waveshare's own `04_LVGL_QMI8658_ui` example polls). Software path is the only path on this board.
+- [x] Software motion detection: poll accel at 100 ms (10 Hz), compute frame-to-frame `|Δa|` magnitude, fire `imu_motion` binary_sensor when delta > `motion_threshold` (default 0.10 g). 500 ms hold-off keeps the sensor latched briefly so the idle script wakes cleanly.
+- [x] `imu_motion` is `internal: true` and its `on_press` calls `script.execute: notify_input` — same entry point the touchscreen on_touch uses.
 
 ### Display blanking strategy
 
-- "Blank" = swap to a fully-black LVGL page **and** set display brightness to 0. AMOLED black pixels emit no light and draw essentially no current, so this is true sleep for the panel.
+- "Blank" = set display brightness to `0x00` via `mipi_spi::set_brightness(uint8_t)`. AMOLED at brightness 0 = pixels emit no light = ~0 mA from the panel. No LVGL page swap needed; the current rendered frame just goes dark.
+- "Dim" = `set_brightness(0x20)` (~12%). Same mechanism — no page swap, no widget teardown.
+- Verified that `mipi_spi.h:103` exposes `set_brightness(uint8_t)` and re-runs `reset_params_()` so the BRIGHTNESS command (0x51) is re-issued. The plan-level "lambda set_brightness is unverified" warning is resolved: it works in ESPHome 2026.5.1.
 - Do **not** put the ESP32 itself into deep sleep in v1 — losing the HA API connection on every wake would make the UX terrible. We rely on the AMOLED panel sleeping and the MCU staying in modem-sleep / light-sleep automatically courtesy of ESP-IDF.
 
 ### Battery readout (best-effort)
 
 - AXP2101 PMIC sits on the I²C bus. No native ESPHome component, but we can read battery voltage register via a `sensor` template + I²C lambda (see guide §9).
-- Show battery in the header / settings tile in Phase 7. No charge-curve mapping in v1 — just raw voltage.
+- **Deferred to P7** — P4 exit criteria don't require a battery readout, and rendering the value needs the header strip we add in polish. Keep P4 scope to dim/blank/wake.
 
 **Exit criteria:**
 - Untouched, motionless device dims after 15s, blanks after 45s total.
@@ -197,9 +199,9 @@ Default substitutions (tunable in `secrets.yaml` or top-level overrides):
 - No noticeable lag re-entering `active` (LVGL page swap < ~100 ms).
 
 **Risks / unknowns:**
-- Touch IC must stay powered during blank to register wake-tap. Confirm CST9220 idle current is acceptable; if not, accept "wake only on motion" and document it.
-- QMI8658 interrupt wiring on the 2.16" board may differ from the 2.41" reference — verify the INT pin on the schematic.
-- Some QMI8658 forks expose accel data but not the any-motion hardware interrupt. If we have to poll, do it at ~10 Hz with a magnitude threshold and accept slightly higher idle current.
+- Touch IC must stay powered during blank to register wake-tap. CST9220 polling at 50 ms continues regardless of idle state. If idle current proves too high, the fallback is "wake only on motion" — drop the touchscreen poll rate (or stop the touchscreen update from board package) on entering blank.
+- ~~QMI8658 interrupt wiring~~ — resolved by polling. Waveshare board does not expose INT.
+- Motion threshold 0.10 g is a guess. Will need on-device calibration. Tune via top-level YAML override of `motion_threshold_g`.
 
 ---
 
@@ -438,6 +440,24 @@ text_sensor:
 ## Session notes & decisions log
 
 > Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-28 — P4 idle state machine + IMU wake (verified on-device)
+
+- **First flash worked.** Boot → dim @ +16s (expected 15s, +1s interval granularity). Touch from `dim` wakes to active. Idle 30s at dim → `blank`. Tap on blank screen → instant wake. Pick up from `dim` → motion wake. All four transitions confirmed.
+- **CST9220 still works through dim/blank** — touch IC stays powered, no current reduction tweaks needed.
+- **`mipi_spi::set_brightness(uint8_t)` confirmed runtime-callable** on this board (CO5300). 0xD0 / 0x20 / 0x00 all behave as expected. AMOLED at 0x00 = truly off-looking, not just very dim.
+- **Motion log defaulted to `ESP_LOGD`** → silent at logger INFO. Bumped to `ESP_LOGI` so the wake-source is visible in the log without changing global verbosity.
+- **No QMI8658 setup banner in first boot log.** Either truncated by serial buffer or component log filter; component clearly initialised since motion-wake fires. Not chasing.
+- **Open tuning**: motion threshold 0.10 g not yet calibrated against false-wakes (e.g. pocket / table-tap). Surface via `motion_threshold_g` substitution in `idle.yaml` for top-level override.
+
+### 2026-05-28 — P4 idle state machine + IMU wake (code complete)
+
+- **IMU INT pin not exposed** on Waveshare 2.16. Confirmed by reading both Waveshare's own pin_config.h (only TP_INT=11 is broken out — no IMU INT) and their `04_LVGL_QMI8658_ui` Arduino example, which polls with `qmi.getDataReady()`. Plan correctly flagged this as a risk; outcome is software polling. Document so future-you doesn't waste a day chasing the INT line on a schematic.
+- **`mipi_spi::set_brightness(uint8_t)` works at runtime** (header at `mipi_spi.h:103`; calls `reset_params_()` which re-sends the BRIGHTNESS controller command 0x51). The plan §P2 warning that "lambda set_brightness is unverified" can be retired for ESPHome 2026.5.1. Brightness goes 0x00–0xFF, with 0x00 = panel dark.
+- **State machine via `interval: 1s` + millis() timestamp**, not LVGL screensaver or per-script delays. Reasoning: only one input timestamp to keep coherent; transitions to dim/blank are idempotent; wake is just `notify_input` from any source, which restamps and runs `enter_active` if we were dimmed/blanked.
+- **QMI8658 polling cadence**: ODR = 31.25 Hz low-power (CTRL2 = 0x1E). Component polls at 100 ms via PollingComponent base. Frame-to-frame `|Δa|` magnitude is the motion signal — robust against gravity (it cancels in the delta) but you need a *recent* baseline, which is why update_interval is set short enough that two consecutive reads always have a frame in between.
+- **Software motion threshold default = 0.10 g.** Tuned by feel for "picking up the device should wake it" vs "tapping the table next to it should not." Not on-device validated yet. Surface via `motion_threshold_g` substitution so the top-level YAML can override.
+- **`auto_clear_enabled: false` + brightness-only blank** = no LVGL teardown, no widget recreate on wake. Page state preserved through dim/blank/active transitions. Cheap.
 
 ### 2026-05-27 — P3 touch up (after 6 false starts)
 

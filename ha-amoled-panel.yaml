@@ -22,9 +22,11 @@ esphome:
             device: ${node_name}
 
 # Packages compose the firmware. ESPHome merges them at compile time.
-# Board package owns hardware (pins, chip, PSRAM, display, touch as added).
-# base = wifi/api/ota/logger. lvgl-ui = on-screen content.
+# Board package owns hardware (pins, chip, PSRAM, display, touch, IMU).
+# base = wifi/api/ota/logger. idle = dim/blank state machine + IMU wake.
+# lvgl-ui = on-screen content.
 packages:
   board: !include boards/waveshare-2.16.yaml
   base: !include packages/base.yaml
+  idle: !include packages/idle.yaml
   lvgl_ui: !include packages/lvgl-ui.yaml

@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(esphome config *)"
+      "Bash(esphome config *)",
+      "Bash(esphome compile *)"
     ]
   }
 }
