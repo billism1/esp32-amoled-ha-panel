@@ -33,8 +33,9 @@ RTC:      PCF85063 — I2C (supported natively in ESPHome)
 PMIC:     AXP2101  — I2C
 ```
 
-> **PSRAM is required** for the display framebuffer. Ensure `psram: mode: ocpi` (or `octal`)
-> is set in your ESPHome config or the screen will not initialise.
+> **PSRAM is required** for the display framebuffer. Ensure `psram: mode: octal` is set in
+> your ESPHome config or the screen will not initialise. Valid `mode` values are `quad`,
+> `octal`, or `hex`; 8 MB stacked PSRAM on the ESP32-S3R8 needs `octal`.
 
 ---
 
@@ -141,7 +142,7 @@ touchscreen:
 |---|---|---|
 | CO5300 display | ✅ Native (`mipi_spi` platform) | `model: CO5300` |
 | QSPI / quad bus | ✅ Native | `bus_mode: quad` |
-| CST9220 touch | ⚠️ Partial | `cst9217` driver is close relative; likely works with minor pin tweaks. Test carefully. |
+| CST9220 touch | ❌ No native driver | No ESPHome platform for CST92xx. Use community `cst9217` external_component (shelson or fuzzybear62 fork); CST9220 may need protocol tweaks (see lewisxhe `SensorLib` `TouchDrvCST92xx`). `cst226` is a different register layout — not drop-in. |
 | PCF85063 RTC | ✅ Native | `platform: pcf85063` |
 | QMI8658 IMU | ⚠️ Custom component | No native driver; use the custom component from the 2.41" repo |
 | AXP2101 PMIC | ⚠️ Limited | Can control via I2C lambda; no dedicated platform |
@@ -150,12 +151,13 @@ touchscreen:
 | Wi-Fi / HA API | ✅ Native | Standard ESPHome |
 | LVGL UI | ✅ Native | Full LVGL support in ESPHome 2024.x+ |
 
-### Known Bug: CO5300 Green Line Artifact
+### Known Bug: CO5300 Green Line Artifact (Fixed Upstream)
 
-There is a documented ESPHome bug ([issue #15765](https://github.com/esphome/esphome/issues/15765))
-where a single green pixel-wide line appears at the panel edge due to a missing
-`esp_lcd_panel_set_gap()` call with a 6-pixel column offset. Monitor this issue for a fix,
-or apply the workaround manually via a lambda in your display init if needed.
+ESPHome [issue #15765](https://github.com/esphome/esphome/issues/15765) (now **CLOSED**)
+documented a single green pixel-wide line at the panel edge caused by a missing
+`esp_lcd_panel_set_gap()` 6-pixel column offset. Confirm your ESPHome version includes the
+fix. As a manual workaround, set `offset_width: 6` under the display `dimensions:` block —
+`mipi_spi` exposes `offset_width` / `offset_height` in YAML.
 
 ---
 
@@ -176,7 +178,7 @@ esp32:
     type: esp-idf
 
 psram:
-  mode: ocpi       # Required for display framebuffer
+  mode: octal      # Required for 8 MB stacked PSRAM on ESP32-S3R8
   speed: 80MHz
 
 # --- Connectivity ---
@@ -226,14 +228,22 @@ display:
     dimensions:
       width: 480
       height: 480
+      offset_width: 6      # Workaround for green-edge artifact (ESPHome #15765)
     color_order: rgb
     invert_colors: false
+    brightness: 200        # Native AMOLED brightness option on mipi_spi (0-255)
     update_interval: never
     auto_clear_enabled: false
 
 # --- Touch ---
+# No native CST92xx driver in ESPHome. Pull in community cst9217 external_component
+# and try it against the CST9220 — register layout is closest match.
+external_components:
+  - source: github://shelson/esphome-cst9217
+    components: [cst9217]
+
 touchscreen:
-  - platform: cst226     # Try cst9217 or cst226 — verify which works for CST9220
+  - platform: cst9217    # External component; CST9220 may need minor protocol tweaks
     display: amoled_display
     id: ts
     interrupt_pin: GPIO11   # Verify
@@ -255,12 +265,18 @@ time:
         - pcf85063.write_time
 
 # --- Brightness control ---
+# NOTE: mipi_spi exposes a native `brightness:` option on the display block (set above).
+# The lambda-driven template-output approach below is unverified for mipi_spi — confirm
+# the C++ method name against ESPHome source before relying on it. Prefer driving the
+# display block's brightness directly, or use AXP2101 PMIC backlight if your board wires it.
 output:
   - platform: template
     id: display_brightness
     type: float
     write_action:
-      - lambda: id(amoled_display).set_brightness(state * 255);
+      - lambda: |-
+          // Verify method name in esphome/components/mipi_spi source before flashing
+          id(amoled_display).set_brightness(state * 255);
 
 light:
   - platform: monochromatic
@@ -376,7 +392,7 @@ script:
       - light.turn_off: backlight
 
 touchscreen:
-  - platform: cst226
+  - platform: cst9217
     on_touch:
       - script.execute: sleep_timer
       - light.turn_on:
@@ -408,8 +424,10 @@ touchscreen:
 
 ## 9. Things That Won't Work (Yet)
 
-- **SD Card** — ESPHome has no support for external file stores; LVGL image assets must be
-  embedded at compile time or loaded from internal flash/SPIFFS
+- **SD Card** — Board has a TF slot; ESPHome added an `sd_mmc_card` component in 2024 so
+  basic read/write works, but LVGL cannot load image assets directly from SD — they must
+  be embedded at compile time or loaded from internal flash (LittleFS; SPIFFS is deprecated
+  on current ESP-IDF)
 - **Audio/microphones** — Possible with `i2s_audio` but complex; not recommended for a first build
 - **AXP2101 battery fuel gauge** — No native ESPHome component; can read voltage via I2C lambda
   as a workaround
