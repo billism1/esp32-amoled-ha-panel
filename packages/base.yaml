@@ -4,8 +4,10 @@
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  fast_connect: false
-  power_save_mode: light
+  # Google Wifi mesh roams aggressively; power-save sleep + roam = drop loop.
+  # Other esp32-amoled board on this network needed both of these to stay up.
+  power_save_mode: NONE
+  fast_connect: true
   ap:
     ssid: "${friendly_name} AP"
     password: !secret ap_password
