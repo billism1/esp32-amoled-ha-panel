@@ -12,15 +12,37 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 
 ---
 
+## Status overview
+
+> **Legend:** ⬜ not started · 🟡 in progress · 🔴 blocked · ✅ done
+>
+> Update the status emoji here AND on the phase's own status line when you start/finish work. Tag the commit that lands phase exit criteria with `git tag pN-<short-name>` so the audit trail lives in git too.
+
+| # | Phase | Status | Notes |
+|---|---|---|---|
+| 0 | Repo bootstrap | ✅ | secrets, gitignore, README, plan |
+| 1 | Skeleton (Wi-Fi + HA API, no display) | ⬜ | next up |
+| 2 | Display bring-up (CO5300) | ⬜ | |
+| 3 | Touch bring-up (CST9220) | ⬜ | |
+| 4 | Idle state machine + IMU wake | ⬜ | battery-critical, before any real UI |
+| 5 | Static HA entity model (MVP) | ⬜ | |
+| 6 | LVGL UI: area carousel + entity scroller | ⬜ | |
+| 7 | Polish (clock, battery, settings tile) | ⬜ | |
+| 8 | Multi-board support | ⬜ | |
+| 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
+
+**Current focus:** Phase 1 — skeleton.
+**Last updated:** 2026-05-27.
+
+---
+
 ## Guiding principles
 
 1. **Ship in vertical slices.** Each phase ends with something flashable that
    does *more* than the previous phase. No big-bang merges.
 2. **Board package isolates hardware.** All pins, display init, touch driver
    live in `boards/<name>.yaml`. UI and HA logic never reference pins.
-3. **HA areas + entities are declarative.** User edits one YAML list to
-   describe their home; firmware reads that list. No runtime HA discovery
-   (ESPHome can't enumerate HA areas — see Phase 3 design notes).
+3. **HA areas + entities start declarative, become dynamic.** MVP (P5) reads a static YAML list; P9 swaps to a single HA template sensor that pushes JSON. Each phase ships a usable panel.
 4. **Battery-first.** Idle dim+blank and IMU wake are in Phase 4 — before any
    real UI. Every later phase is tested with the idle state machine running,
    so we catch power regressions early.
@@ -29,7 +51,9 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 
 ---
 
-## Phase 0 — Repo bootstrap ✅ (this commit)
+## Phase 0 — Repo bootstrap
+
+**Status:** ✅ done · tag: _untagged_
 
 **Goal:** structure + secrets in place; nothing flashable yet.
 
@@ -47,18 +71,20 @@ understand intent from `README.md` alone.
 
 ## Phase 1 — Skeleton ESPHome project, Wi-Fi + HA API only
 
+**Status:** ⬜ not started · target tag: `p1-skeleton`
+
 **Goal:** board boots, connects to Wi-Fi, appears in HA, accepts OTA. No display.
 
 Files added:
-- `ha-amoled-panel.yaml` — top-level device YAML. `!include`s board + base packages.
-- `boards/waveshare-2.16.yaml` — board-specific substitutions and `esp32:` block (PSRAM `mode: octal`, 16 MB flash, ESP-IDF framework). **No display/touch yet.**
-- `packages/base.yaml` — `wifi:`, `api:`, `ota:`, `logger:`, `captive_portal:`, fallback AP. All values pulled from `!secret`.
+- [ ] `ha-amoled-panel.yaml` — top-level device YAML. `!include`s board + base packages.
+- [ ] `boards/waveshare-2.16.yaml` — board-specific substitutions and `esp32:` block (PSRAM `mode: octal`, 16 MB flash, ESP-IDF framework). **No display/touch yet.**
+- [ ] `packages/base.yaml` — `wifi:`, `api:`, `ota:`, `logger:`, `captive_portal:`, fallback AP. All values pulled from `!secret`.
 
 Tasks:
-1. Pick a friendly_name + node name. Make them substitutions so they're easy to override per board.
-2. Add `improv_serial:` for first-flash Wi-Fi onboarding without rebuilding.
-3. Confirm `psram: mode: octal, speed: 80MHz` is in the board package (required by ESP32-S3R8 with 8 MB stacked PSRAM — guide §1).
-4. Set `api.encryption.key: !secret api_encryption_key`.
+- [ ] Pick a friendly_name + node name. Make them substitutions so they're easy to override per board.
+- [ ] Add `improv_serial:` for first-flash Wi-Fi onboarding without rebuilding.
+- [ ] Confirm `psram: mode: octal, speed: 80MHz` is in the board package (required by ESP32-S3R8 with 8 MB stacked PSRAM — guide §1).
+- [ ] Set `api.encryption.key: !secret api_encryption_key`.
 
 **Exit criteria:** Flash over USB, device shows up in HA with no entities, OTA from `esphome run` works wirelessly. Log shows `[psram] heap initialized` with ~8 MB free.
 
@@ -69,17 +95,19 @@ Tasks:
 
 ## Phase 2 — Bring up display
 
+**Status:** ⬜ not started · target tag: `p2-display`
+
 **Goal:** AMOLED lights up with a solid colour or test pattern.
 
 Files added to `boards/waveshare-2.16.yaml`:
-- `spi:` block (QSPI, `type: quad`, clk + 4 data pins)
-- `display:` block (`platform: mipi_spi`, `model: CO5300`, dimensions 480×480, `offset_width: 6` for the known green-edge bug, `auto_clear_enabled: false`)
+- [ ] `spi:` block (QSPI, `type: quad`, clk + 4 data pins)
+- [ ] `display:` block (`platform: mipi_spi`, `model: CO5300`, dimensions 480×480, `offset_width: 6` for the known green-edge bug, `auto_clear_enabled: false`)
 
 Tasks:
-1. **Verify pins against the Waveshare 2.16" schematic.** The 1.75" pins in the guide are a starting point only — board revisions differ. Cross-check by flashing Waveshare's sample Arduino code first if any pin is ambiguous.
-2. Confirm ESPHome version >= the one that closed [#15765](https://github.com/esphome/esphome/issues/15765); leave `offset_width: 6` as belt-and-suspenders.
-3. Add a `homeassistant.event` log when the display draws its first frame, so we can confirm bring-up over the HA log without USB.
-4. Add a single LVGL page with a `lv_label` "Hello" so we know the framebuffer is wired up.
+- [ ] **Verify pins against the Waveshare 2.16" schematic.** The 1.75" pins in the guide are a starting point only — board revisions differ. Cross-check by flashing Waveshare's sample Arduino code first if any pin is ambiguous.
+- [ ] Confirm ESPHome version >= the one that closed [#15765](https://github.com/esphome/esphome/issues/15765); leave `offset_width: 6` as belt-and-suspenders.
+- [ ] Add a `homeassistant.event` log when the display draws its first frame, so we can confirm bring-up over the HA log without USB.
+- [ ] Add a single LVGL page with a `lv_label` "Hello" so we know the framebuffer is wired up.
 
 **Exit criteria:** Panel shows "Hello" centred. No green edge line. No crash log on boot.
 
@@ -91,18 +119,18 @@ Tasks:
 
 ## Phase 3 — Bring up touch
 
+**Status:** ⬜ not started · target tag: `p3-touch`
+
 **Goal:** Touches are logged with correct (x, y) coordinates.
 
 Files added to `boards/waveshare-2.16.yaml`:
-- `external_components:` pulling a `cst9217` driver (community fork — pin to a specific commit SHA).
-- `touchscreen:` block bound to the display, with `interrupt_pin` + `reset_pin`.
+- [ ] `external_components:` pulling a `cst9217` driver (community fork — pin to a specific commit SHA).
+- [ ] `touchscreen:` block bound to the display, with `interrupt_pin` + `reset_pin`.
 
 Tasks:
-1. Try the `shelson/esphome-cst9217` fork first. CST9220 register layout is close enough that a `cst9217` driver often works (guide §3). If not:
-   - Try `fuzzybear62`'s fork next.
-   - Last resort: write a thin external component derived from lewisxhe `SensorLib` `TouchDrvCST92xx`.
-2. Log raw touch events for orientation calibration. Set `transform: mirror_x/mirror_y` based on what we see.
-3. Confirm multi-touch / gesture events fire — needed for swipe detection in Phase 5.
+- [ ] Try the `shelson/esphome-cst9217` fork first. CST9220 register layout is close enough that a `cst9217` driver often works (guide §3). If not: try `fuzzybear62`'s fork next; last resort write a thin external component derived from lewisxhe `SensorLib` `TouchDrvCST92xx`.
+- [ ] Log raw touch events for orientation calibration. Set `transform: mirror_x/mirror_y` based on what we see.
+- [ ] Confirm multi-touch / gesture events fire — needed for swipe detection in Phase 6.
 
 **Exit criteria:** A tap in each corner logs coordinates close to (0,0), (479,0), (0,479), (479,479) after transforms.
 
@@ -113,12 +141,14 @@ Tasks:
 
 ## Phase 4 — Idle state machine + IMU wake (battery-critical)
 
+**Status:** ⬜ not started · target tag: `p4-idle`
+
 **Goal:** Device is usable on a LiPo for more than a few hours. Screen dims, then blanks, then wakes on touch *or* IMU motion. Wired up before any real UI so we catch power regressions in every later phase.
 
 Files added:
-- `packages/idle.yaml` — global state (`active`/`dim`/`blank`), restart-mode scripts driving transitions, brightness ramp.
-- `components/qmi8658/` — custom external_component for the QMI8658 IMU (port the one from the SentientCustard 2.41" repo — same chip).
-- Board package gains the `qmi8658:` block with the I²C address + interrupt pin.
+- [ ] `packages/idle.yaml` — global state (`active`/`dim`/`blank`), restart-mode scripts driving transitions, brightness ramp.
+- [ ] `components/qmi8658/` — custom external_component for the QMI8658 IMU (port the one from the SentientCustard 2.41" repo — same chip).
+- [ ] Board package gains the `qmi8658:` block with the I²C address + interrupt pin.
 
 ### State machine
 
@@ -139,10 +169,10 @@ Default substitutions (tunable in `secrets.yaml` or top-level overrides):
 
 ### IMU integration
 
-1. Bring up QMI8658 on the I²C bus. Confirm WHO_AM_I register reads expected value.
-2. Configure low-power "any-motion" interrupt on the QMI8658 — chip pulls its INT pin high when accel delta exceeds threshold. Use ESPHome `binary_sensor: gpio` on that interrupt pin so motion wakes the firmware without polling.
-3. Optionally: have a periodic `interval:` lambda read the accel magnitude and use that as a software fallback if the hardware interrupt path is flaky.
-4. Expose IMU motion as an internal `binary_sensor` — idle state machine listens to both `touchscreen.on_touch` and this sensor.
+- [ ] Bring up QMI8658 on the I²C bus. Confirm WHO_AM_I register reads expected value.
+- [ ] Configure low-power "any-motion" interrupt on the QMI8658 — chip pulls its INT pin high when accel delta exceeds threshold. Use ESPHome `binary_sensor: gpio` on that interrupt pin so motion wakes the firmware without polling.
+- [ ] Optional fallback: periodic `interval:` lambda reads the accel magnitude as a software fallback if the hardware interrupt path is flaky.
+- [ ] Expose IMU motion as an internal `binary_sensor` — idle state machine listens to both `touchscreen.on_touch` and this sensor.
 
 ### Display blanking strategy
 
@@ -169,10 +199,12 @@ Default substitutions (tunable in `secrets.yaml` or top-level overrides):
 
 ## Phase 5 — HA entity model (static YAML for MVP)
 
+**Status:** ⬜ not started · target tag: `p5-static-entities`
+
 **Goal:** Define how the user describes their home to the panel — **for the MVP only**. Phase 9 replaces this with HA-side dynamic config; Phase 5's job is to get something on screen fast so we can validate the UI, touch, and idle/wake stack against a real home.
 
 Files added:
-- `packages/ha-entities.yaml` — list of areas, each with an ordered list of entity IDs. **User-edited for MVP. Will be replaced by dynamic discovery in Phase 9.**
+- [ ] `packages/ha-entities.yaml` — list of areas, each with an ordered list of entity IDs. **User-edited for MVP. Will be replaced by dynamic discovery in Phase 9.**
 
 ### Why static first, dynamic later
 
@@ -216,10 +248,12 @@ Both are generated per-entity in `ha-entities.yaml`. The UI in Phase 6 reads the
 
 ## Phase 6 — LVGL UI: area carousel + entity scroller
 
+**Status:** ⬜ not started · target tag: `p6-ui`
+
 **Goal:** The actual feature — horizontal swipe between areas, vertical scroll for entities within an area, tap to toggle.
 
 Files added:
-- `packages/lvgl-ui.yaml` — board-agnostic LVGL config.
+- [ ] `packages/lvgl-ui.yaml` — board-agnostic LVGL config.
 
 ### UI structure
 
@@ -268,24 +302,28 @@ substitutions / Jinja, not at runtime.
 
 ## Phase 7 — Polish
 
+**Status:** ⬜ not started · target tag: `p7-polish`
+
 **Goal:** Make it pleasant to live with.
 
-- RTC integration: `pcf85063` + `homeassistant` time sources (guide §4 example).
-- Header clock that shows current time when not interacting.
-- Visual feedback on tap (LVGL `lv_btn` press style — brief colour change).
-- Boot splash with device + HA connection status.
-- A "settings" tile at the end of the area carousel: brightness slider (bound to the `mipi_spi` native brightness), screensaver timeout, version info.
+- [ ] RTC integration: `pcf85063` + `homeassistant` time sources (guide §4 example).
+- [ ] Header clock that shows current time when not interacting.
+- [ ] Visual feedback on tap (LVGL `lv_btn` press style — brief colour change).
+- [ ] Boot splash with device + HA connection status.
+- [ ] Settings tile at the end of the area carousel: brightness slider (bound to the `mipi_spi` native brightness), screensaver timeout, version info.
 
 ---
 
 ## Phase 8 — Multi-board support
 
+**Status:** ⬜ not started · target tag: `p8-multiboard`
+
 **Goal:** Adding a second AMOLED board = adding one board package, nothing else.
 
 Tasks:
-1. Extract anything still board-specific from `ha-amoled-panel.yaml` into the board package.
-2. Add a second board: `boards/waveshare-1.75.yaml`. Same UI YAML, different pins + dimensions.
-3. Document the "add a new board" recipe in `README.md`.
+- [ ] Extract anything still board-specific from `ha-amoled-panel.yaml` into the board package.
+- [ ] Add a second board: `boards/waveshare-1.75.yaml`. Same UI YAML, different pins + dimensions.
+- [ ] Document the "add a new board" recipe in `README.md`.
 
 **Exit criteria:** Switching boards by changing one `!include` line, no other edits, panel works.
 
@@ -296,6 +334,8 @@ Tasks:
 ---
 
 ## Phase 9 — Dynamic area + entity discovery (replaces static YAML)
+
+**Status:** ⬜ not started · target tag: `p9-dynamic`
 
 **Goal:** Move source-of-truth for areas + entities from `packages/ha-entities.yaml` into Home Assistant itself. Re-arranging a home no longer requires a firmware rebuild.
 
@@ -386,3 +426,26 @@ text_sensor:
 4. **Tap-and-hold behaviour:** v1 ignores it. Could later expose a detail page (brightness slider for lights, set-point for climate). OK to defer?
 5. **Touch driver fallback:** if no community CST9220/CST9217 fork works, are we willing to spend the time to write a small external component, or fall back to the Arduino-side touch lib via lambda?
 6. **Phase 9 entity filter:** blacklist by domain (current sketch) vs. label-based opt-in (`label: show_on_panel`). Label-based is cleaner long-term but requires labelling every entity in HA.
+
+---
+
+## Session notes & decisions log
+
+> Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-27 — bootstrap
+
+- **ESPHome version in use: 2026.5.1.** Pin any version-sensitive checks against this baseline (CO5300 green-line fix, `mipi_spi` brightness, LVGL widget API).
+- Decided: native API encryption key only; no HA long-lived access token. ESPHome ↔ HA native API doesn't need one.
+- Decided: idle dim→blank state machine with IMU + touch wake goes in **P4**, before any real UI. Drives every later phase's power test.
+- Decided: static YAML entity model in P5, dynamic HA-template-sensor in P9. Two-step ships fastest.
+- Decided: ESP32 deep sleep **not** used — would break HA API. AMOLED panel blank is the sleep mechanism.
+- Open: idle timeouts (15s dim / 30s further to blank), motion sensitivity, header content, tap-and-hold behaviour, touch driver fallback, P9 filter strategy.
+
+<!--
+### YYYY-MM-DD — phase N
+- Worked on X. Hit issue Y. Workaround Z (see commit SHA).
+- Decision: chose A over B because C.
+- Blocker: D — waiting on E.
+-->
+
