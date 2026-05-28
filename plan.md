@@ -21,7 +21,7 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 0 | Repo bootstrap | ✅ | secrets, gitignore, README, plan |
-| 1 | Skeleton (Wi-Fi + HA API, no display) | 🟡 | files in; awaiting first flash + HA verify |
+| 1 | Skeleton (Wi-Fi + HA API, no display) | ✅ | flashed, Wi-Fi up, HA API connected |
 | 2 | Display bring-up (CO5300) | ⬜ | |
 | 3 | Touch bring-up (CST9220) | ⬜ | |
 | 4 | Idle state machine + IMU wake | ⬜ | battery-critical, before any real UI |
@@ -71,7 +71,7 @@ understand intent from `README.md` alone.
 
 ## Phase 1 — Skeleton ESPHome project, Wi-Fi + HA API only
 
-**Status:** 🟡 in progress · target tag: `p1-skeleton`
+**Status:** ✅ done · target tag: `p1-skeleton`
 
 **Goal:** board boots, connects to Wi-Fi, appears in HA, accepts OTA. No display.
 
@@ -86,7 +86,7 @@ Tasks:
 - [x] Confirm `psram: mode: octal, speed: 80MHz` is in the board package (required by ESP32-S3R8 with 8 MB stacked PSRAM — guide §1).
 - [x] Set `api.encryption.key: !secret api_encryption_key`.
 - [x] `esphome config ha-amoled-panel.yaml` → "Configuration is valid!" against ESPHome 2026.5.1.
-- [ ] **User action:** `esphome run ha-amoled-panel.yaml` over USB. Confirm boot log shows ~8 MB PSRAM free, device appears in HA, second OTA flash works wirelessly.
+- [x] `esphome run ha-amoled-panel.yaml` over USB → boot OK, Wi-Fi connected, HA API client connected, device live in HA ESPHome integration.
 
 **Exit criteria:** Flash over USB, device shows up in HA with no entities, OTA from `esphome run` works wirelessly. Log shows `[psram] heap initialized` with ~8 MB free.
 
@@ -434,6 +434,12 @@ text_sensor:
 ## Session notes & decisions log
 
 > Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-27 — P1 skeleton flashed
+
+- Google Wifi mesh required three wifi tweaks to associate: `power_save_mode: NONE`, `fast_connect: true`, and `manual_ip:` static lease. DHCP alone hit `Association Leave` timeout every time. Carry this forward to any new board package on this network.
+- Static IP `192.168.86.124` reserved for this device. `.123` is the other esp32-amoled (esphome-lvgl-dashboard).
+- First boot logged `safe_mode: Last reset too quick; invoke in 3 restarts` — benign, expected after a fresh USB flash + immediate reboot.
 
 ### 2026-05-27 — bootstrap
 
