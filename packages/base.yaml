@@ -1,0 +1,33 @@
+# Board-agnostic base services: Wi-Fi, HA API, OTA, logger, captive portal,
+# improv serial onboarding. Included from ha-amoled-panel.yaml.
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: false
+  power_save_mode: light
+  ap:
+    ssid: "${friendly_name} AP"
+    password: !secret ap_password
+
+captive_portal:
+
+# First-flash Wi-Fi onboarding over USB serial — no rebuild required to
+# change SSID. Works with the Improv Wi-Fi web installer.
+improv_serial:
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# HA time source so later phases (RTC sync in P7, idle timers) have UTC.
+time:
+  - platform: homeassistant
+    id: ha_time

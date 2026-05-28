@@ -1,0 +1,25 @@
+# Board package: Waveshare ESP32-S3-Touch-AMOLED-2.16
+#
+# Phase 1 scope: chip + PSRAM + flash only. No display, no touch, no I2C bus.
+# Those land in P2 / P3 / P4 as separate blocks below.
+#
+# Substitutions (board-level defaults; can be overridden by the top-level YAML).
+substitutions:
+  node_name: ha-amoled-panel
+  friendly_name: "HA AMOLED Panel"
+  # Display resolution — used by LVGL layout in later phases.
+  disp_width: "480"
+  disp_height: "480"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+# 8 MB stacked PSRAM on the ESP32-S3R8 requires octal mode (guide §1).
+# mipi_spi framebuffer in P2 will not init without this.
+psram:
+  mode: octal
+  speed: 80MHz

@@ -21,7 +21,7 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 | # | Phase | Status | Notes |
 |---|---|---|---|
 | 0 | Repo bootstrap | ✅ | secrets, gitignore, README, plan |
-| 1 | Skeleton (Wi-Fi + HA API, no display) | ⬜ | next up |
+| 1 | Skeleton (Wi-Fi + HA API, no display) | 🟡 | files in; awaiting first flash + HA verify |
 | 2 | Display bring-up (CO5300) | ⬜ | |
 | 3 | Touch bring-up (CST9220) | ⬜ | |
 | 4 | Idle state machine + IMU wake | ⬜ | battery-critical, before any real UI |
@@ -71,20 +71,22 @@ understand intent from `README.md` alone.
 
 ## Phase 1 — Skeleton ESPHome project, Wi-Fi + HA API only
 
-**Status:** ⬜ not started · target tag: `p1-skeleton`
+**Status:** 🟡 in progress · target tag: `p1-skeleton`
 
 **Goal:** board boots, connects to Wi-Fi, appears in HA, accepts OTA. No display.
 
 Files added:
-- [ ] `ha-amoled-panel.yaml` — top-level device YAML. `!include`s board + base packages.
-- [ ] `boards/waveshare-2.16.yaml` — board-specific substitutions and `esp32:` block (PSRAM `mode: octal`, 16 MB flash, ESP-IDF framework). **No display/touch yet.**
-- [ ] `packages/base.yaml` — `wifi:`, `api:`, `ota:`, `logger:`, `captive_portal:`, fallback AP. All values pulled from `!secret`.
+- [x] `ha-amoled-panel.yaml` — top-level device YAML. `packages:` merges board + base.
+- [x] `boards/waveshare-2.16.yaml` — board-specific substitutions and `esp32:` block (PSRAM `mode: octal`, 16 MB flash, ESP-IDF framework). **No display/touch yet.**
+- [x] `packages/base.yaml` — `wifi:`, `api:`, `ota:`, `logger:`, `captive_portal:`, fallback AP, `improv_serial`, HA time source. All values pulled from `!secret`.
 
 Tasks:
-- [ ] Pick a friendly_name + node name. Make them substitutions so they're easy to override per board.
-- [ ] Add `improv_serial:` for first-flash Wi-Fi onboarding without rebuilding.
-- [ ] Confirm `psram: mode: octal, speed: 80MHz` is in the board package (required by ESP32-S3R8 with 8 MB stacked PSRAM — guide §1).
-- [ ] Set `api.encryption.key: !secret api_encryption_key`.
+- [x] Pick a friendly_name + node name. Made substitutions in board package (overridable in top YAML).
+- [x] Add `improv_serial:` for first-flash Wi-Fi onboarding without rebuilding.
+- [x] Confirm `psram: mode: octal, speed: 80MHz` is in the board package (required by ESP32-S3R8 with 8 MB stacked PSRAM — guide §1).
+- [x] Set `api.encryption.key: !secret api_encryption_key`.
+- [x] `esphome config ha-amoled-panel.yaml` → "Configuration is valid!" against ESPHome 2026.5.1.
+- [ ] **User action:** `esphome run ha-amoled-panel.yaml` over USB. Confirm boot log shows ~8 MB PSRAM free, device appears in HA, second OTA flash works wirelessly.
 
 **Exit criteria:** Flash over USB, device shows up in HA with no entities, OTA from `esphome run` works wirelessly. Log shows `[psram] heap initialized` with ~8 MB free.
 

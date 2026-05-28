@@ -1,0 +1,18 @@
+# Top-level device YAML — board-agnostic shell.
+# Swap the `board:` package line to switch hardware.
+# See plan.md for the phased build sequence.
+
+substitutions:
+  node_name: ha-amoled-panel
+  friendly_name: "HA AMOLED Panel"
+
+esphome:
+  name: ${node_name}
+  friendly_name: ${friendly_name}
+
+# Packages compose the firmware. ESPHome merges them at compile time.
+# Board package first (pins, chip, PSRAM, plus display/touch/IMU as later
+# phases add them); base second (Wi-Fi, HA API, OTA, logger, improv).
+packages:
+  board: !include boards/waveshare-2.16.yaml
+  base: !include packages/base.yaml
