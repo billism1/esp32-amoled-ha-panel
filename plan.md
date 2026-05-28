@@ -31,7 +31,6 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
-**Current focus:** Phase 1 — skeleton.
 **Last updated:** 2026-05-27.
 
 ---

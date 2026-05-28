@@ -71,7 +71,9 @@ display:
       height: ${disp_height}
     data_rate: 40MHz
     color_order: rgb
-    invert_colors: true
+    # Note: sibling esphome-lvgl-dashboard used `true` but our LVGL palette
+    # came out inverted (white bg, black text). Set `false` for correct mapping.
+    invert_colors: false
     brightness: 0xD0           # ~80%; P4 will replace with dynamic control
     update_interval: never     # LVGL drives flushes
     auto_clear_enabled: false
