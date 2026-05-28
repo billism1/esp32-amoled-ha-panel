@@ -167,38 +167,39 @@ Default substitutions (tunable in `secrets.yaml` or top-level overrides):
 
 ---
 
-## Phase 5 — HA entity model (declarative, in YAML)
+## Phase 5 — HA entity model (static YAML for MVP)
 
-**Goal:** Define how the user describes their home to the panel.
+**Goal:** Define how the user describes their home to the panel — **for the MVP only**. Phase 9 replaces this with HA-side dynamic config; Phase 5's job is to get something on screen fast so we can validate the UI, touch, and idle/wake stack against a real home.
 
 Files added:
-- `packages/ha-entities.yaml` — list of areas, each with an ordered list of entity IDs. **This is the file the end user edits.**
+- `packages/ha-entities.yaml` — list of areas, each with an ordered list of entity IDs. **User-edited for MVP. Will be replaced by dynamic discovery in Phase 9.**
 
-### Design: why declarative, not auto-discovery
+### Why static first, dynamic later
 
-ESPHome's HA API is bidirectional for *state subscriptions* but does not
-expose HA's area registry or entity registry. There's no
-`homeassistant.list_areas` call. Options considered:
+ESPHome's native HA API has no area-registry or entity-registry calls — those live behind HA's websocket API. Dynamic discovery is therefore a real feature, not a one-liner. Splitting into two phases lets us:
+
+1. Ship a working panel within hours, against a real home, on real hardware.
+2. Lock in UI / domain-behaviour decisions before adding the runtime-LVGL + JSON-parsing complexity that dynamic discovery requires.
+
+Option matrix considered for static-vs-dynamic in Phase 5:
 
 | Option | Verdict |
 |---|---|
-| Hard-code areas + entities in YAML | ✅ Chosen. Simple, compiles fast, no runtime surprises. |
-| HTTP fetch HA `/api/config` at boot | ❌ Adds an HTTP client + parser; HA areas don't actually live in `/api/config` — would need the websocket API; way too much for v1. |
-| `text_sensor` per "area config" key | ❌ Round-trip per entity = startup latency; still need a static list to drive the iteration. |
+| Hard-code areas + entities in YAML | ✅ MVP. Simple, compiles fast, no runtime surprises. |
+| HTTP fetch `/api/states` + filter | ❌ Areas not in state objects; would need websocket. Skip. |
+| HA template sensor pushes JSON via native API attribute | ✅ Chosen for Phase 9 — see below. |
+| Custom websocket external_component | ❌ Multi-weekend C++ build; not worth it. |
 
-### Schema (substitutions + `homeassistant.` text/binary sensors)
+### Schema (static, MVP)
 
 ```yaml
-# packages/ha-entities.yaml — USER EDITS THIS
+# packages/ha-entities.yaml — USER EDITS THIS for MVP
 substitutions:
-  # Areas in carousel order. Comma-separated, parsed at compile time by Jinja.
-  # (We'll likely actually express this as a YAML list via !include rather than
-  #  substitutions — finalised in Phase 5 implementation.)
   areas: "living_room,kitchen,bedroom,office"
 
 # Per entity, one of:
 #   - homeassistant.text_sensor (for state of read-only entities)
-#   - switch (for toggleable entities — uses homeassistant.service: homeassistant.toggle)
+#   - homeassistant.service template button (for toggleable entities)
 ```
 
 Each entity becomes one of:
@@ -207,12 +208,9 @@ Each entity becomes one of:
 
 Both are generated per-entity in `ha-entities.yaml`. The UI in Phase 6 reads the list and renders tiles.
 
-**Open question:** Whether to use ESPHome's `!include` of per-area YAMLs vs.
-one flat file. Recommend one flat file for v1, split later if it grows.
+**File layout:** one flat YAML file for MVP. Split into per-area `!include`s only if it grows unwieldy.
 
-**Exit criteria:** User can add a new entity by appending two lines to
-`ha-entities.yaml`, recompile, see it in HA-side logs as a subscribed
-state.
+**Exit criteria:** User can add a new entity by appending two lines to `ha-entities.yaml`, recompile, see it in HA-side logs as a subscribed state.
 
 ---
 
@@ -297,6 +295,78 @@ Tasks:
 
 ---
 
+## Phase 9 — Dynamic area + entity discovery (replaces static YAML)
+
+**Goal:** Move source-of-truth for areas + entities from `packages/ha-entities.yaml` into Home Assistant itself. Re-arranging a home no longer requires a firmware rebuild.
+
+### Mechanism
+
+Single HA template sensor exposes the full area→entity map as a JSON attribute. Device subscribes to that attribute, parses, and builds LVGL tiles at runtime.
+
+**HA side** (lives in HA's `configuration.yaml`, not in this repo — but we'll ship a sample snippet in `docs/ha-template-sensor.yaml`):
+
+```yaml
+template:
+  - sensor:
+      - name: "AMOLED Panel Config"
+        unique_id: amoled_panel_config
+        state: "ok"
+        attributes:
+          # Areas in carousel order. Override by sorting via labels or a manual list.
+          areas: >
+            {{ areas() | map('area_name') | list | tojson }}
+          # { "Living Room": ["light.lamp", "switch.fan", ...], ... }
+          entities_by_area: >
+            {%- set ns = namespace(out={}) -%}
+            {%- for a in areas() -%}
+              {%- set ents = area_entities(a)
+                  | reject('match', '^(sun|zone|person|device_tracker|update)\\.')
+                  | list -%}
+              {%- set ns.out = dict(ns.out, **{area_name(a): ents}) -%}
+            {%- endfor -%}
+            {{ ns.out | tojson }}
+```
+
+User can refine the reject/include filter to taste. Optionally support a `label` ("show_on_panel") on entities and filter to only labelled ones — cleaner than blacklist.
+
+**Device side:**
+
+```yaml
+text_sensor:
+  - platform: homeassistant
+    id: panel_config_json
+    entity_id: sensor.amoled_panel_config
+    attribute: entities_by_area
+    on_value:
+      - lambda: |-
+          // 1. Parse x via ArduinoJson
+          // 2. Diff against currently-rendered area/entity set
+          // 3. Rebuild LVGL tiles via lv_obj_create / lv_label_create / lv_btn_create
+          // 4. Subscribe to per-entity states for the new set
+```
+
+### Hard parts (call out so we don't kid ourselves)
+
+1. **Runtime LVGL widget creation.** ESPHome's YAML LVGL is declarative; building tiles in a lambda means calling the underlying LVGL C API directly. Works, but examples are sparse — budget a real spike. Pre-build by Phase 6 a small lambda that creates one tile programmatically as a proof.
+2. **Runtime per-entity state subscriptions.** `homeassistant.text_sensor` is declared at compile time. Workaround: declare a *pool* of N (say 64) generic subscriptions at compile time, bind each one to whichever entity_id we currently care about via the C++ `set_entity_id()` setter. Confirm that ESPHome's native API client supports re-subscribing on `set_entity_id()` change — if not, a Phase 9 blocker.
+3. **JSON payload size.** Native API protobuf message limit isn't tiny but isn't infinite. A 50-entity home is fine; a 500-entity home may overflow. Filter on the HA side aggressively.
+4. **Domain → behaviour map stays in firmware.** Even with dynamic entity lists, knowing that `light.*` toggles and `sensor.*` is read-only is still a compile-time table. Acceptable.
+
+### Migration
+
+- Keep `packages/ha-entities.yaml` schema working. Add a top-level `discovery_mode: static | dynamic` substitution. `dynamic` ignores the static file; `static` keeps the MVP path. Lets us flip per board / per install without deleting code.
+
+**Exit criteria:**
+- Adding a new HA area + light + flashing nothing → panel reflects the change within a few seconds.
+- Removing an entity from HA → panel drops the tile.
+- Reordering areas via the HA template → panel carousel order updates.
+
+**Risks / unknowns:**
+- Re-subscription via `set_entity_id()` at runtime is the single biggest unknown. If it doesn't work, fallback: at boot, read the JSON once, restart device with state cached, declare subscriptions on next boot via generated config — much worse UX, only as a backstop.
+- LVGL teardown on reconfigure must not leak memory. Track widget pointers and delete cleanly when an entity disappears.
+
+---
+
 ## Out-of-scope for this plan (parking lot)
 
 - ESP32 deep sleep between interactions — would break the live HA API link; rely on AMOLED panel sleep + ESP-IDF auto modem/light sleep instead.
@@ -312,7 +382,7 @@ Tasks:
 
 1. **Idle timeouts:** proposed `dim_timeout: 15s`, `blank_timeout: 30s` (45s total to blank). Too aggressive? Too lazy?
 2. **Motion sensitivity:** pick-up should wake, but a tap on the nightstand probably shouldn't. Calibrate empirically — any preference for false-wake vs missed-wake?
-3. **Area + entity definition syntax:** flat substitutions list vs. structured YAML (`!include` of per-area files). Recommend structured YAML.
-4. **Header content:** clock + battery, clock + battery + weather, or area name only?
-5. **Tap-and-hold behaviour:** v1 ignores it. Could later expose a detail page (brightness slider for lights, set-point for climate). OK to defer?
-6. **Touch driver fallback:** if no community CST9220/CST9217 fork works, are we willing to spend the time to write a small external component, or fall back to the Arduino-side touch lib via lambda?
+3. **Header content:** clock + battery, clock + battery + weather, or area name only?
+4. **Tap-and-hold behaviour:** v1 ignores it. Could later expose a detail page (brightness slider for lights, set-point for climate). OK to defer?
+5. **Touch driver fallback:** if no community CST9220/CST9217 fork works, are we willing to spend the time to write a small external component, or fall back to the Arduino-side touch lib via lambda?
+6. **Phase 9 entity filter:** blacklist by domain (current sketch) vs. label-based opt-in (`label: show_on_panel`). Label-based is cleaner long-term but requires labelling every entity in HA.

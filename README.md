@@ -105,6 +105,7 @@ esphome run ha-amoled-panel.yaml
 - ✅ Tap to toggle for: `light`, `switch`, `fan`, `input_boolean`, `automation`, `script`, `cover`
 - ✅ Read-only status display for unsupported types (`sensor`, `binary_sensor`, `climate`, `media_player`, etc.)
 - ✅ Battery voltage readout via AXP2101 (best-effort — no native ESPHome component)
+- 🔜 **Dynamic area/entity discovery** via a single HA-side template sensor — re-arrange your home in HA, panel updates without a firmware rebuild. MVP ships with static YAML; dynamic comes in Phase 9 (see [plan.md](plan.md)).
 
 ### Out of scope for v1
 
