@@ -29,4 +29,5 @@ packages:
   board: !include boards/waveshare-2.16.yaml
   base: !include packages/base.yaml
   idle: !include packages/idle.yaml
+  ha_entities: !include packages/ha-entities.yaml
   lvgl_ui: !include packages/lvgl-ui.yaml

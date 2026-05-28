@@ -91,7 +91,7 @@ external_components:
   - source:
       type: local
       path: components
-    components: [cst9220, qmi8658]
+    components: [cst9220, qmi8658, ha_panel]
 
 # --- IMU: QMI8658 (P4 — idle wake on motion) ---
 # Hardware INT line is not routed to a free GPIO on this board (verified

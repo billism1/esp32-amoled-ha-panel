@@ -25,7 +25,7 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 | 2 | Display bring-up (CO5300) | ✅ | Hello label rendering, no edge artifacts |
 | 3 | Touch bring-up (CST9220) | ✅ | press events fire after vendored driver rewrite + power-cycle |
 | 4 | Idle state machine + IMU wake | ✅ | verified on-device 2026-05-28: dim @ 16s, blank @ 45s, touch wakes from blank, motion wakes from dim |
-| 5 | Static HA entity model (MVP) | ⬜ | |
+| 5 | Static HA entity model (MVP) | ✅ | verified 2026-05-28: 88 entity subscriptions arrived within ~1.5 s of HA connect, states match HA |
 | 6 | LVGL UI: area carousel + entity scroller | ⬜ | |
 | 7 | Polish (clock, battery, settings tile) | ⬜ | |
 | 8 | Multi-board support | ⬜ | |
@@ -207,7 +207,7 @@ Default substitutions (tunable in `secrets.yaml` or top-level overrides):
 
 ## Phase 5 — HA entity model (static YAML for MVP)
 
-**Status:** ⬜ not started · target tag: `p5-static-entities`
+**Status:** ✅ done · target tag: `p5-static-entities`
 
 **Goal:** Define how the user describes their home to the panel — **for the MVP only**. Phase 9 replaces this with HA-side dynamic config; Phase 5's job is to get something on screen fast so we can validate the UI, touch, and idle/wake stack against a real home.
 
@@ -234,24 +234,41 @@ Option matrix considered for static-vs-dynamic in Phase 5:
 ### Schema (static, MVP)
 
 ```yaml
-# packages/ha-entities.yaml — USER EDITS THIS for MVP
-substitutions:
-  areas: "living_room,kitchen,bedroom,office"
-
-# Per entity, one of:
-#   - homeassistant.text_sensor (for state of read-only entities)
-#   - homeassistant.service template button (for toggleable entities)
+# packages/ha-entities.yaml (gitignored; copy from ha-entities.example.yaml)
+ha_panel:
+  areas:
+    - name: "Living Room"
+      entities:
+        - entity_id: light.couch_lamp
+          friendly_name: "Couch lamp"        # optional; falls back to entity_id
+        - entity_id: switch.tv_power
 ```
 
-Each entity becomes one of:
-- A `text_sensor` for read-only display, subscribed to the HA entity's state.
-- A `homeassistant.service` template button that calls `homeassistant.toggle` for the entity_id when pressed.
+The schema is consumed by a custom `ha_panel` external_component (see
+[components/ha_panel/](components/ha_panel/)). It is **not** a list of
+per-entity `text_sensor` / button declarations — that would be hundreds of
+ESPHome objects, none of which we'd actually render. Instead:
 
-Both are generated per-entity in `ha-entities.yaml`. The UI in Phase 6 reads the list and renders tiles.
+- `ha_panel` is a single `Component` + `api::CustomAPIDevice` that owns a flat
+  `std::vector<Entity>` and a `std::vector<Area>` (areas hold indices into the
+  entity vector).
+- At codegen, Python `to_code` iterates `areas:` and emits one
+  `add_area(name)` per area + one `add_entity(entity_id, friendly_name)` per
+  entity. No per-entity ESPHome objects are created.
+- At runtime, `setup()` calls `subscribe_homeassistant_state(&HAPanel::on_state_, entity_id)`
+  once per entity. The 2-arg callback form passes `entity_id` back so a single
+  dispatcher updates the model.
+- `tap(area_idx, entity_idx)` parses the domain from `entity_id` and calls
+  `call_homeassistant_service` with the right action (toggle / script.turn_on /
+  automation.trigger). Read-only domains (sensor, binary_sensor, climate,
+  media_player, …) log and return false. Domain → action map mirrors P6 table.
+- Requires `homeassistant_states: true` and `homeassistant_services: true` on
+  the `api:` block. Both flags added in `packages/base.yaml`.
 
-**File layout:** one flat YAML file for MVP. Split into per-area `!include`s only if it grows unwieldy.
+**File layout:** `packages/ha-entities.example.yaml` (tracked, sanitized) +
+`packages/ha-entities.yaml` (gitignored, real). User copies example → real.
 
-**Exit criteria:** User can add a new entity by appending two lines to `ha-entities.yaml`, recompile, see it in HA-side logs as a subscribed state.
+**Exit criteria:** User can add a new entity by appending three lines to `ha-entities.yaml`, recompile, see `[ha_panel] <entity_id> = <state>  (first state)` in the firmware log within ~1 s of HA connect, and see `[ha_panel] tap <entity_id> → homeassistant.toggle` when `tap()` is called.
 
 ---
 
@@ -441,6 +458,15 @@ text_sensor:
 ## Session notes & decisions log
 
 > Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-28 — P5 static HA entity model (code complete)
+
+- **Architecture:** single `ha_panel` external_component, not per-entity text_sensors. Reasoning: declaring 100+ `homeassistant.text_sensor` blocks would balloon compile time, eat heap for HA Entity object overhead we don't need (no `name:`, no HA discovery), and force a separate path for tap-toggle. One C++ class with a flat entity vector + N `subscribe_homeassistant_state` calls is cheaper and unifies state + service dispatch.
+- **API flags required:** `homeassistant_states: true` (for `subscribe_homeassistant_state`) and `homeassistant_services: true` (for `call_homeassistant_service`). Without them, `custom_api_device.h` static_asserts at compile time with a clear message. Both added to `packages/base.yaml`.
+- **Callback form:** 2-arg `subscribe_homeassistant_state(&HAPanel::on_state_, entity_id)` — ESPHome's variant captures `entity_id` by value in the per-subscription lambda, so a single dispatcher knows which entity fired. Cleaner than declaring N methods or capturing index.
+- **Domain table** (mirrors plan §P6): `light/switch/fan/input_boolean/cover` → `homeassistant.toggle`; `script` → `script.turn_on`; `automation` → `automation.trigger`; everything else (sensor, binary_sensor, climate, media_player, select, …) → read-only, log + return false.
+- **Schema migration:** users' real `ha-entities.yaml` is now wrapped under a top-level `ha_panel:` key (was naked `areas:`). Same change applied to the committed `ha-entities.example.yaml`. Two-line refactor for anyone updating from the pre-P5 shape.
+- **Open**: state subscription is live but no LVGL rendering yet — that's P6. Verified flash next; on-device check confirms first-state logs land in serial console.
 
 ### 2026-05-28 — P4 idle state machine + IMU wake (verified on-device)
 

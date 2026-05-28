@@ -17,35 +17,36 @@
 # number, select, button — they clutter the carousel without adding value.
 #
 # Friendly names are optional but recommended; the panel falls back to the
-# entity_id prefix if not provided.
+# entity_id if not provided.
 
-areas:
-  - name: "Living Room"
-    entities:
-      - entity_id: light.living_room_lamp
-        friendly_name: "Couch lamp"
-      - entity_id: switch.tv_power
-        friendly_name: "TV"
-      - entity_id: sensor.living_room_temperature
-        friendly_name: "Temperature"
+ha_panel:
+  areas:
+    - name: "Living Room"
+      entities:
+        - entity_id: light.living_room_lamp
+          friendly_name: "Couch lamp"
+        - entity_id: switch.tv_power
+          friendly_name: "TV"
+        - entity_id: sensor.living_room_temperature
+          friendly_name: "Temperature"
 
-  - name: "Kitchen"
-    entities:
-      - entity_id: light.kitchen_ceiling
-        friendly_name: "Ceiling"
-      - entity_id: binary_sensor.dishwasher_running
-        friendly_name: "Dishwasher"
+    - name: "Kitchen"
+      entities:
+        - entity_id: light.kitchen_ceiling
+          friendly_name: "Ceiling"
+        - entity_id: binary_sensor.dishwasher_running
+          friendly_name: "Dishwasher"
 
-  - name: "Bedroom"
-    entities:
-      - entity_id: light.bedside_lamp
-        friendly_name: "Bedside"
-      - entity_id: cover.bedroom_blinds
-        friendly_name: "Blinds"
+    - name: "Bedroom"
+      entities:
+        - entity_id: light.bedside_lamp
+          friendly_name: "Bedside"
+        - entity_id: cover.bedroom_blinds
+          friendly_name: "Blinds"
 
-  - name: "Office"
-    entities:
-      - entity_id: script.start_focus_lighting
-        friendly_name: "Focus mode"
-      - entity_id: automation.morning_routine
-        friendly_name: "Morning routine"
+    - name: "Office"
+      entities:
+        - entity_id: script.start_focus_lighting
+          friendly_name: "Focus mode"
+        - entity_id: automation.morning_routine
+          friendly_name: "Morning routine"

@@ -29,6 +29,10 @@ logger:
 api:
   encryption:
     key: !secret api_encryption_key
+  # Phase 5: ha_panel component subscribes to HA entity state + calls HA
+  # services. Both require explicit opt-in flags on the api block.
+  homeassistant_states: true
+  homeassistant_services: true
 
 ota:
   - platform: esphome
