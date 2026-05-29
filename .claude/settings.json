@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(esphome config *)",
-      "Bash(esphome compile *)"
+      "Bash(esphome compile *)",
+      "Bash(python -c \"import esphome, os; print\\(os.path.dirname\\(esphome.__file__\\)\\)\")",
+      "Bash(pip show *)",
+      "Bash(findstr Location)"
     ]
   }
 }
