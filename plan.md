@@ -800,183 +800,332 @@ Action confirm sheet slots between 3 and 4 — same `move_foreground` pattern. O
 **Status:** ⬜ not started · target tag: `p8-power`
 
 **Goal:** Survive an overnight (and ideally multi-day) idle on the LiPo without a
-charger. Use case is **nightstand, not wrist**: set it down at night, leave it,
+charger. Use case is **nightstand**: set it down at night, leave it,
 pick it up / tap it in the morning and have it usable within a couple of
 seconds. The existing P4 idle machine (active → dim → blank) only turns the
 *panel* off — the ESP32 + Wi-Fi stay fully awake keeping the HA API link, which
 is tens of mA and drains a small cell in a night. P8 adds a real low-power state
 below `blank` and the wake plumbing to leave it.
 
-> **Reverses a parking-lot decision.** The original plan put "ESP32 deep sleep"
-> out of scope because losing the HA API link on every wake makes an
-> *interactive* panel feel terrible. That logic still holds for a hand-held
-> remote you poke constantly. It does **not** hold for a nightstand device that
-> sits untouched for hours — there, a 2–4 s reconnect on the few times a day you
-> pick it up is a fine trade for not killing the battery overnight. P8 is the
-> nightstand answer; the setting (below) lets the hand-held use case keep the
-> old always-connected behaviour.
+> **Reverses a parking-lot decision.** The original plan put low-power sleep out
+> of scope because losing the HA API link on every wake makes an *interactive*
+> panel feel terrible. That logic still holds for a hand-held remote you poke
+> constantly. It does **not** hold for a nightstand device that sits untouched
+> for hours — there, a 2–4 s reconnect on the few times a day you pick it up is a
+> fine trade for not killing the battery overnight. P8 is the nightstand answer;
+> the setting (below) lets the hand-held use case keep the old always-connected
+> behaviour.
+>
+> **Chosen approach: light sleep with Wi-Fi dropped** (default), deep sleep as an
+> option. Both turn the radio fully off while idle — which is what actually saves
+> the battery on this `power_save_mode: NONE` mesh — but light sleep retains RAM
+> so the screen resumes instantly where you left it, while deep sleep cold-boots
+> for a bit more battery. Full reasoning in the section below.
 
 ### Hardware wake-source reality on this board (verified 2026-05-29)
 
-Researched against `waveshareteam/ESP32-S3-Touch-AMOLED-2.16` `pin_config.h` +
-Waveshare docs. ESP32-S3 RTC-capable GPIOs are **0–21**, so any INT/button on
-those can wake deep sleep via `ext0`/`ext1`.
+Researched against `waveshareteam/ESP32-S3-Touch-AMOLED-2.16` `pin_config.h`,
+the official schematic, and the board GPIO table. ESP32-S3 RTC-capable GPIOs are
+**0–21**, so any INT/button on those can wake deep sleep via `ext0`/`ext1`.
 
 | Wake source | Routing | Deep-sleep wake? | Light-sleep / awake wake? |
 |---|---|---|---|
 | **Touch (CST9220 INT)** | **GPIO11**, RTC-capable, active-low | ✅ `ext0`/`ext1` on GPIO11 — *if touch rail kept powered* | ✅ (already polled today) |
-| **Custom button** | **GPIO18**, RTC-capable | ✅ | ✅ |
-| **BOOT button** | **GPIO0**, RTC-capable | ✅ (but BOOT-hold also = flash mode) | ✅ |
-| **PWR button** | **AXP2101 PWRON** (not a GPIO) | ✅ via PMIC power-on (full cold boot) | ✅ via PMIC IRQ |
+| **Custom button** | **GPIO18**, RTC-capable, active-low (pull-up) | ✅ **best button** — `ext0` low on GPIO18, hold internal pull-up | ✅ |
+| **BOOT button** | **GPIO0**, RTC-capable | ⚠️ works but GPIO0 is a strapping/download pin — compromised for runtime wake | ✅ |
+| **RTC alarm (PCF85063 INT)** | **GPIO13** (`RTC_INT`), RTC-capable; RTC domain kept alive by AXP (VBAT2 = `CHG_RTC`) | ✅ scheduled alarm via `ext0`/`ext1` on GPIO13 | ✅ |
+| **PWR button** | **AXP2101 PWRON** → PMU `PWROK` → ESP `CHIP_PU`. **IRQ pin unrouted** (pin 38 → net `AXP_IRQ`, 10 K pull-up to VCC-RTC, terminates there — not on any GPIO) | ⚠️ **cold boot only** (long-press = PMU off → next press powers rails + releases `CHIP_PU` = fresh boot, *not* `esp_deep_sleep` resume) | ⚠️ short-press only sets an AXP IRQ flag; readable solely by I²C poll (GPIO14/15), never as a wake edge |
 | **Motion (QMI8658 INT)** | **NOT routed to any GPIO** | ❌ **impossible** — no pin to wake on | ✅ only via software accel polling (CPU must run) |
 
-**The load-bearing constraint:** the IMU interrupt line is not broken out
-(confirmed at P4 — Waveshare's own example polls). So **motion cannot wake the
-device from deep sleep on this hardware, full stop.** Deep-sleep wake = tap the
-screen or press a button. Motion-wake (the P4 pickup-to-wake behaviour) only
-survives in light sleep / awake, where the CPU still ticks to poll the accel.
-This difference is the main UX input to the default choice below.
+**Load-bearing constraint #1 — motion can't wake deep sleep.** The IMU interrupt
+line is not broken out (confirmed at P4 — Waveshare's own example polls). So
+**motion cannot wake the device from deep sleep on this hardware, full stop.**
+Motion-wake (the P4 pickup-to-wake behaviour) only survives in light sleep /
+awake, where the CPU still ticks to poll the accel.
 
-### Why light sleep saves little *on this network* (the other constraint)
+**Load-bearing constraint #2 — the PWR button can't wake deep sleep either**
+(researched 2026-05-29 against the schematic + GPIO table). The AXP2101 IRQ pin
+(chip pin 38) goes to net `AXP_IRQ`, gets a 10 K pull-up to the always-on
+VCC-RTC rail, and **terminates there — it is wired to no ESP32 GPIO** (there is
+no AXP column in the board GPIO table). The AXP is reachable only over the shared
+I²C bus (GPIO14/15), useless during deep sleep because the CPU is off. So the
+`AXP_IRQ → RTC GPIO → ext0/ext1` path does **not physically exist** here. The PWR
+button works the laptop way: PWRON drives the PMU, PMU `PWROK` gates the ESP
+`CHIP_PU`. Long-press = PMU power-off (rails drop); a subsequent press powers
+rails back and releases `CHIP_PU` = **cold boot**, not a deep-sleep resume. A
+short press during deep sleep just sets an AXP flag the dead CPU never reads.
 
-The P1 session note records that this device only associates to the user's
-**Google Wifi mesh** with `power_save_mode: NONE`. That disables Wi-Fi
-modem-sleep (DTIM beacon skipping), which is exactly the mechanism automatic
-light sleep relies on to drop average current while keeping the link. With
-`power_save_mode: NONE`, light sleep's radio stays near full-power, so the
-overnight saving is small. **Therefore deep sleep is the only state that
-meaningfully preserves battery overnight on this setup.** Light sleep is offered
-as an option (keeps API + motion-wake, instant) but flagged as "saves little
-here unless `power_save_mode` can be relaxed."
+**What this leaves for deep-sleep wake:** tap the screen (**GPIO11**, touch rail
+must stay powered), the **GPIO18 user button** (best — clean RTC GPIO, active-low
+with internal pull-up: `esp_sleep_enable_ext0_wakeup(GPIO_NUM_18, 0)`), the BOOT
+button (**GPIO0**, works but it's a strapping pin so not ideal), or a **scheduled
+PCF85063 RTC alarm** (**GPIO13**, RTC domain kept alive by the AXP — genuinely
+usable for timed wake-ups even though *button-via-PMU* wake is not). These two
+"not routed" constraints are the main UX input to the default choice below.
+
+### Why "light sleep with Wi-Fi OFF" is the chosen state (the reasoning that drives P8)
+
+**Earlier draft was wrong about light sleep.** It argued light sleep saved
+little because the P1 `power_save_mode: NONE` on the Google Wifi mesh disables
+modem-sleep (DTIM beacon skipping), so an *associated* radio stays near
+full-power during light sleep. That is true — **but only matters if we keep
+Wi-Fi associated while sleeping.** We don't need to.
+
+**Key decision: drop Wi-Fi entirely before sleeping.** A nightstand panel that's
+been idle for a minute has no reason to hold the HA link — nothing is looking at
+it. So on sleep-enter we `esp_wifi_stop()` (radio fully off, not modem-sleep) and
+on wake we bring Wi-Fi + the HA API back up. With the radio *off*, the
+`power_save_mode: NONE` problem **completely disappears** — there's no associated
+radio to keep hot. Light-sleep current collapses to the **core RAM-retention
+band (~240–800 µA)** plus board peripherals, instead of the tens-of-mA an
+associated radio would cost.
+
+**Why light sleep over deep sleep, given both now drop Wi-Fi:** because both pay
+the *same* ~2–4 s HA-reconnect on wake (radio was off either way), the HA-link
+delay is a wash. What light sleep keeps that deep sleep throws away is **RAM** —
+so the UI resumes **exactly** where it was (open modal/sheet/sub-tile intact, no
+splash, no LVGL rebuild, instant visual wake). Deep sleep cold-boots back to the
+home view. Light sleep costs ~10–30× more sleep current (hundreds of µA vs tens),
+which on a 100 mAh cell is roughly **~a week vs several weeks** — and a week of
+nightstand idle between charges is plenty.
+
+**Therefore P8 targets light sleep with Wi-Fi off as the default power-saver
+state.** Deep sleep stays available for anyone who wants maximum multi-week
+battery and tolerates a cold-boot wake.
+
+> **Motion-wake still gone in light sleep too.** Don't expect pickup-wake back.
+> The IMU INT isn't routed (constraint #1), so even light sleep can only wake on
+> a GPIO edge (touch GPIO11 / button GPIO18) or a timer — waking on motion would
+> require periodically waking the CPU to poll the accel, which burns the very
+> current we're sleeping to save. Light sleep buys UI-state retention, **not**
+> motion-wake on this board.
 
 ### Power-state tiers (extends P4, doesn't replace it)
 
 ```
 [active] --dim_timeout--> [dim] --blank_timeout--> [blank] --sleep_timeout--> [sleep]
    ▲ panel 80%             panel ~12%               panel off                 chosen mode
-   │ MCU+Wi-Fi awake       MCU+Wi-Fi awake          MCU+Wi-Fi awake           ↓
+   │ MCU+Wi-Fi awake       MCU+Wi-Fi awake          MCU+Wi-Fi awake           │ Wi-Fi OFF
    └──────────────────── touch / button / motion wake (P4) ──────────────────┘
                                                                               │
-                          [sleep] wake: touch (GPIO11) or button only;        │
-                          motion CANNOT wake deep sleep (no INT pin) ─────────┘
+                          [sleep] wake: touch (GPIO11) / button (GPIO18) /    │
+                          RTC alarm (GPIO13). NO motion, NO PWR button. ──────┘
+                          On wake: restore UI, then reconnect Wi-Fi + HA.
 ```
 
-- `active` / `dim` / `blank` are unchanged from P4.
-- New `sleep` tier entered after a further **`sleep_timeout`** of no input while
-  already `blank`. Default `sleep_timeout: 10min` (long, so ordinary interactive
-  use never trips it — only a genuinely-idle nightstand does).
+- `active` / `dim` / `blank` are unchanged from P4. In all three the MCU + Wi-Fi
+  stay awake and the HA link is live.
+- New `sleep` tier entered after **`sleep_timeout` = 1 min** of no input
+  (measured from last input; the device has already passed through `dim`/`blank`
+  by then). This is aggressive on purpose — the panel sleeps fast to save battery,
+  and because the default is *light* sleep the cost of over-eager sleeping is
+  low (wake is an instant RAM resume, only the background HA reconnect lags). If
+  Deep sleep is selected, 1 min is more noticeable (cold boot on every re-poke);
+  a user who picks Deep may want to raise it. **Wi-Fi is dropped on entry to
+  every sleep state** (see reasoning above).
 - What `sleep` does depends on the **Power saver** setting:
-  - **Off** — never enter `sleep`; behave exactly as today (P4). For the
-    hand-held / always-connected use case, or when on a charger.
-  - **Light sleep** — `esp_light_sleep` / ESP-IDF automatic light sleep. Keeps
-    RAM, keeps the HA API link, motion-wake still works, wake is instant. Lowest
-    UX cost, but (see above) small power win on the `power_save_mode: NONE` mesh.
-  - **Deep sleep** — ESP32 deep sleep (~µA core). Wakes on touch GPIO11 or a
-    button via `ext1`. Full reboot + Wi-Fi reassociate + HA reconnect + re-sub on
-    wake (~2–4 s, possibly more on this mesh). No motion-wake. Biggest power win.
+  - **Off** — never enter `sleep`; behave exactly as today (P4). Wi-Fi stays up,
+    HA link never drops. For the hand-held / always-connected use case, or when
+    on a charger.
+  - **Light sleep (Wi-Fi off)** — *the default.* `esp_wifi_stop()` then
+    `esp_light_sleep_start()`. **Keeps RAM**, so the UI resumes exactly where it
+    was (no splash, no rebuild); wake is an instant visual resume followed by a
+    background Wi-Fi + HA reconnect (~2–4 s). Sleep current ~hundreds of µA. No
+    motion-wake (see note above).
+  - **Deep sleep** — ESP32 deep sleep (~tens of µA, biggest battery win). RAM
+    lost → cold boot: splash + LVGL rebuild + Wi-Fi reassociate + HA reconnect on
+    wake. Wakes on touch GPIO11 / button GPIO18 / RTC alarm GPIO13 via
+    `ext0`/`ext1`. No motion-wake, no PWR-button wake.
 
 ### Default choice (mine, per the brief)
 
-**Default = Deep sleep, `sleep_timeout: 10 min`.** Reasoning for "what most
-people in *this* scenario want":
-1. The stated goal is explicitly "don't drain the battery overnight" — deep
-   sleep is the only tier that delivers that here (light sleep undercut by
-   `power_save_mode: NONE`).
-2. It's a nightstand, not a wrist device, so losing motion/pickup-wake costs
-   little — you reach over and tap the screen anyway, and tap *does* wake deep
-   sleep (GPIO11 is routed).
-3. The 10-minute pre-sleep window means casual "glance and poke" sessions never
-   hit deep sleep; only a truly-abandoned device sleeps, so the 2–4 s reconnect
-   is paid only when you've genuinely walked away.
+**Default = Light sleep (Wi-Fi off), `sleep_timeout: 1 min`.** Reasoning for
+"what most people in *this* nightstand scenario want":
+1. The stated goal is "don't drain the battery overnight." With Wi-Fi dropped,
+   light sleep is ~hundreds of µA → roughly a **week** on a 100 mAh cell, which
+   comfortably clears any overnight (and multi-night) idle. The original
+   objection (`power_save_mode: NONE` keeping the radio hot) only applied to an
+   *associated* radio; turning Wi-Fi off removes it entirely.
+2. Light sleep keeps RAM, so picking the panel up after it slept resumes the
+   **exact** screen — open modal, current sub-tile, no splash flash, no rebuild.
+   That "it's just instantly back" feel is the nightstand win deep sleep can't
+   give without extra cold-boot-suppression work.
+3. Both light and deep drop Wi-Fi, so both pay the same ~2–4 s HA reconnect on
+   wake — light sleep is strictly the nicer UX for an equal link delay, at the
+   cost of ~10–30× more sleep current (still a week+, so fine).
+4. The 1-minute window sleeps quickly after you set the panel down. With light
+   sleep that's the point — fast battery savings with a near-free instant resume;
+   a brief glance-and-poke that ends just re-wakes from RAM. (For Deep sleep the
+   short window trades battery for more frequent cold-boots — raise it if that
+   mode is chosen.)
 
-Anyone who wants instant always-connected behaviour (or runs on a charger) flips
-the setting to **Off**; anyone on a mesh that tolerates modem-sleep picks
-**Light sleep**.
+**Deep sleep** is the pick for someone who wants **multi-week** battery and
+accepts a cold-boot wake (splash + home view). **Off** is for hand-held /
+always-connected use or on a charger.
 
 ### Settings UI (extends the P7a/P7b settings tile)
 
-- Add a **Power saver** `lv_dropdown` to the settings tile: `Off` / `Light
-  sleep` / `Deep sleep`. Reuse the existing Apply/Cancel staging + dirty-flag
-  recipe from P7b (so changing the mode stages, commits on Apply, reverts on
-  navigate-away).
-- Persist via a `restore_value: yes` global (e.g. `power_saver_mode_g`, uint8
-  0/1/2), same pattern as `active_brightness_g`. Read at boot to decide whether
-  the idle machine arms the `sleep` transition.
-- Optional second control: **Sleep after** (the `sleep_timeout`) as a small set
-  of presets (5 / 10 / 30 min / Never) rather than a free slider — keeps the
-  tile simple. `Never` is equivalent to `Off` for the timer but leaves the mode
-  selected. Decide during build whether this is worth the tile space; default
-  10 min is fine to ship without exposing it.
-- `LV_USE_DROPDOWN` is already enabled (P7d), so no new build flag for the mode
-  picker.
+Sleep is **opt-out, not opt-in** — on by default, user can disable it.
+
+- **Sleep master toggle (`lv_switch`), default ON.** Labelled e.g. "Sleep when
+  idle". ON = the idle machine is allowed to enter the `sleep` tier; OFF = never
+  sleep, behave exactly as P4 (Wi-Fi stays up, HA link never drops). This is the
+  single control most users touch. Default **ON** per the brief.
+- **Mode `lv_dropdown`, shown when the toggle is ON:** `Light sleep` (default) /
+  `Deep sleep`. Light = Wi-Fi-off light sleep (instant UI resume); Deep = ESP
+  deep sleep (max battery, cold-boot wake). When the master toggle is OFF the
+  dropdown is greyed/disabled (its value is irrelevant).
+- Reuse the existing P7b Apply/Cancel staging + dirty-flag recipe (toggle + mode
+  stage together, commit on Apply, revert on navigate-away).
+- Persist via two `restore_value: yes` globals, same pattern as
+  `active_brightness_g`:
+  - `sleep_enabled_g` (bool, **default `true`**) — the master toggle.
+  - `power_saver_mode_g` (uint8, `0` = light, `1` = deep, default `0`) — the
+    mode, only consulted when `sleep_enabled_g` is true.
+  Read both at boot to decide whether/how the idle machine arms the `sleep`
+  transition.
+- Optional third control: **Sleep after** (the `sleep_timeout`) as a small set
+  of presets (1 / 5 / 10 / 30 min) rather than a free slider — keeps the tile
+  simple. Decide during build whether this is worth the tile space; default
+  **1 min** is fine to ship without exposing it (more relevant to expose once
+  Deep sleep is in play, where a longer window is friendlier). (The master toggle already covers "never
+  sleep", so a `Never` preset is redundant.)
+- `LV_USE_DROPDOWN` / `LV_USE_SWITCH` are already enabled (P7d / P7a), so no new
+  build flag for these controls.
 
 ### Architecture / implementation notes
 
-- **ESPHome `deep_sleep:` component** drives deep sleep. Wake config is the open
-  question: need touch (GPIO11, active-low) **and** a button (GPIO18) to both
-  wake. ESPHome exposes `wakeup_pin` (single, ext0) and `esp32_ext1_wakeup`
-  (multiple pins + `ANY_HIGH` / `ALL_LOW` mode). Both our sources are active-low,
-  which wants an "any low" trigger — **verify ESP32-S3 supports `ANY_LOW` for
-  ext1** (classic ESP32 only had `ANY_HIGH`/`ALL_LOW`; S3 added more). If S3 ext1
-  can't do any-low across two pins, fall back to: ext0 on touch GPIO11 (the
-  primary wake) + rely on the **PWR/AXP2101 button** as the hardware button-wake
-  (PMIC power-on path, independent of the GPIO wake mask). Resolve this on real
-  silicon before committing the wake design.
+- **ESPHome `deep_sleep:` component** drives deep sleep. Wake sources are now
+  pinned (the PWR-button fallback is dead — AXP IRQ unrouted, see constraint #2
+  above): the wake set is **touch GPIO11** + **button GPIO18**, both active-low,
+  optionally **+ RTC-alarm GPIO13** for timed wake. ESPHome exposes `wakeup_pin`
+  (single, ext0) and `esp32_ext1_wakeup` (multiple pins + `ANY_HIGH` / `ALL_LOW`
+  mode). All our sources are active-low, which wants an "any low" trigger —
+  **verify ESP32-S3 supports `ANY_LOW` for ext1** (classic ESP32 only had
+  `ANY_HIGH`/`ALL_LOW`; S3 added more). If S3 ext1 can't do any-low across
+  multiple pins, fall back to `ext0` on touch GPIO11 as the single primary wake
+  and accept GPIO18 not waking deep sleep (the user reaches for the screen
+  anyway). **There is no PMIC-button safety net** — the PWR button only
+  cold-boots from a full PMU power-off, not from `esp_deep_sleep`. Resolve the
+  ext1 question on real silicon before committing the wake design.
 - **Enter sleep from the idle machine, not at boot.** The P4 `interval: 1s` +
   millis state machine gains one more transition: when `blank` and idle past
-  `sleep_timeout` and mode != Off, call `deep_sleep.enter` (deep) or the
-  light-sleep entry. `notify_input` (touch/button/motion) restamps and, for
-  light sleep, returns to `active` with no reconnect.
+  `sleep_timeout` **and `sleep_enabled_g` is true**, enter the configured mode —
+  light-sleep entry or `deep_sleep.enter`. `notify_input` (touch / button)
+  restamps. If `sleep_enabled_g` is false the machine stops at `blank` exactly
+  like P4.
+- **Drop Wi-Fi on sleep-enter, restore on wake (the core of this design).** This
+  applies to **both** sleep modes — it's what makes light sleep cheap on the
+  `power_save_mode: NONE` mesh.
+  - *On sleep-enter:* `esp_wifi_stop()` (radio fully off, not modem-sleep). For
+    deep sleep this is implicit in the reboot; for light sleep it's an explicit
+    call before `esp_light_sleep_start()`.
+  - *On wake (light sleep):* the CPU resumes mid-function after
+    `esp_light_sleep_start()` returns. Re-enable the panel, **restore the UI
+    instantly from retained RAM** (no rebuild), then kick Wi-Fi + the HA API
+    reconnect in the background — the dashboard is visible immediately and live
+    data repopulates a few seconds later as the link comes back. ESPHome's
+    `wifi`/`api` components must be told to reconnect; verify whether
+    `esp_wifi_stop()` + restart cooperates cleanly with ESPHome's wifi component
+    or whether the cleaner lever is `wifi.disable` / `wifi.enable` actions (test
+    both on hardware — ESPHome may fight a raw `esp_wifi_stop`).
+  - *On wake (deep sleep):* full boot brings Wi-Fi + API up the normal way; no
+    special restore code, but the UI cold-boots (see splash note below).
+- **Light sleep is custom, not the ESPHome `deep_sleep:` component.** ESPHome has
+  no first-class light-sleep component, so the light path is a lambda/custom
+  component: gate the panel, `esp_wifi_stop()`, arm the GPIO11/GPIO18 (and
+  optional RTC) wake sources via `gpio_wakeup` / `esp_sleep_enable_ext1_wakeup`,
+  call `esp_light_sleep_start()`, then on return restore. Needs
+  `CONFIG_PM_ENABLE` / `CONFIG_FREERTOS_USE_TICKLESS_IDLE` considered, but since
+  we sleep explicitly (not automatic tickless) the manual `esp_light_sleep_start`
+  path is the simpler, more predictable route. Build this as the default mode;
+  the `deep_sleep:` component is the alternate mode.
 - **Never sleep before the device is usable / updatable.** Call
   `deep_sleep.prevent` during boot until the HA API has connected at least once,
   and provide an escape hatch for OTA: ESPHome's `deep_sleep` already cooperates
   with OTA, but confirm the device stays awake long enough after boot to accept
   an OTA push (a `run_duration` floor or "prevent for first 30 s" guard). Without
   this, a deep-sleeping device can become very annoying to reflash.
-- **AXP2101 rail gating for lower sleep current (optimization).** In deep sleep
-  the AMOLED is dark via brightness 0, but its rail still draws. The AXP2101 can
-  cut the display rail entirely on sleep-enter and restore on wake — bigger
-  saving. **Touch rail must stay powered** for the GPIO11 wake-tap to fire, so
-  gate display only, never touch. This is a follow-up optimization, not required
-  for the first working version (get deep sleep + wake correct first, then chase
-  µA via rail control).
-- **Clock after deep-sleep wake.** Deep sleep loses system time; the HA time
-  source re-syncs a few seconds after API reconnect, so the header clock is blank
-  / stale briefly on wake. If that's annoying, integrate the on-board
-  **PCF85063 RTC** (deferred at P7a) to hold time across sleep — optional, folds
-  naturally in here if pursued.
-- **Light-sleep path** is mostly an ESP-IDF config concern (`CONFIG_PM_ENABLE`,
-  `CONFIG_FREERTOS_USE_TICKLESS_IDLE`) plus accepting the `power_save_mode`
-  tension. May be cheap enough to ship as "available but not recommended on this
-  mesh" with a one-line doc note.
+- **AXP2101 rail gating for lower sleep current (optimization, both modes).** The
+  AMOLED is dark via brightness 0, but its rail still draws. The AXP2101 can cut
+  the display rail entirely on sleep-enter and restore on wake — a bigger saving
+  and useful for *light* sleep too (where the RAM-retention current is otherwise
+  the floor). **Touch rail must stay powered** for the GPIO11 wake-tap to fire,
+  so gate display only, never touch. Follow-up optimization, not required for the
+  first working version (get sleep + wake correct first, then chase µA via rail
+  control).
+- **Cold-boot UX on deep-sleep wake (deep mode only).** Light sleep resumes RAM
+  so it doesn't apply there. For deep sleep: check `esp_sleep_get_wakeup_cause()`
+  at boot — if it's an `ext0`/`ext1`/RTC wake (not a real power-on), **skip the
+  splash** and jump straight to the dashboard; optionally stash the last
+  tile/page index in `RTC_DATA_ATTR` before sleeping and restore it on boot
+  (modals/sheets are transient — fine to drop, just land on the right tile).
+  Worthwhile polish so deep-sleep wake doesn't feel like a full reboot.
+- **Clock after deep-sleep wake (deep mode only).** Deep sleep loses system time;
+  the HA time source re-syncs a few seconds after API reconnect, so the header
+  clock is blank/stale briefly on wake. Light sleep keeps the clock running (CPU
+  state retained), so this is a deep-sleep-only wart. If annoying, integrate the
+  on-board **PCF85063 RTC** (deferred at P7a) to hold time across deep sleep —
+  optional, and it pairs naturally with the RTC-alarm wake source.
+- **Light-sleep entry/exit checklist** (the default mode): gate panel →
+  `esp_wifi_stop()` → arm GPIO11/GPIO18 (+ optional GPIO13) wake →
+  `esp_light_sleep_start()` → *(on wake)* re-enable panel, restore UI from RAM,
+  restart Wi-Fi + HA reconnect in background. Because we sleep explicitly rather
+  than via automatic tickless idle, `CONFIG_PM_ENABLE` /
+  `CONFIG_FREERTOS_USE_TICKLESS_IDLE` aren't strictly required — keep the manual
+  `esp_light_sleep_start` path for predictability.
 
 ### Exit criteria
 
-- With **Power saver = Deep sleep**, an idle device enters deep sleep after
-  `blank` + `sleep_timeout`; measured current drops to the µA range (verify with
-  a USB power meter or the AXP2101 reading if it can self-report at that level).
-- Tapping the screen **or** pressing the configured button wakes the device from
-  deep sleep, it reconnects to HA, and the dashboard is usable within a few
-  seconds.
-- Motion (pickup) does **not** wake from deep sleep — documented as expected, not
-  a bug.
-- With **Power saver = Off**, behaviour is identical to P4 (no regression):
-  motion + touch + button all wake from `blank`, HA link never drops.
-- The Power saver setting persists across reboot and is changeable from the
-  settings tile with Apply/Cancel.
-- A deep-sleeping device can still be reflashed (OTA window honoured, or
-  documented USB/BOOT recovery path).
+- **Default (sleep ON, Light sleep):** an idle device enters Wi-Fi-off light
+  sleep after `blank` + `sleep_timeout`. Wi-Fi is confirmed *off* during sleep
+  (radio down, not modem-sleep). Measured current is in the hundreds-of-µA range
+  (verify with a USB power meter / AXP reading).
+- **Light-sleep wake:** tapping the screen (GPIO11) or pressing GPIO18 resumes
+  the device; **the UI is restored instantly from RAM to the exact prior screen**
+  (no splash, no rebuild), and Wi-Fi + HA reconnect in the background within a few
+  seconds (live data repopulates).
+- **Deep sleep (mode = Deep):** idle device enters deep sleep after `blank` +
+  `sleep_timeout`; current drops to the tens-of-µA range. Tap (GPIO11) or GPIO18
+  wakes it; it cold-boots (splash suppressed on wake-cause if that polish landed),
+  reconnects to HA, and the dashboard is usable within a few seconds.
+- **Master toggle OFF:** behaviour is identical to P4 (no regression) — device
+  stops at `blank`, never sleeps, Wi-Fi stays up, HA link never drops.
+- Motion (pickup) and the PWR button do **not** wake from either sleep mode —
+  documented as expected, not bugs.
+- Both settings (`sleep_enabled_g` default **true**, `power_saver_mode_g` default
+  **light**) persist across reboot and are changeable from the settings tile with
+  Apply/Cancel; the mode dropdown disables when the master toggle is off.
+- A sleeping device can still be reflashed (OTA window honoured, or documented
+  USB/BOOT recovery path).
 
 ### Risks / unknowns
 
 - **ext1 any-low on ESP32-S3 for two active-low pins.** The single biggest
-  unknown — if unsupported, the touch+button combined wake needs the ext0 +
-  PMIC-button fallback. Verify on hardware early.
-- **Reconnect time on the Google Wifi mesh.** P1 needed static IP + `fast_connect`
-  just to associate; cold-boot reassociation after deep sleep may be slower than
-  the "few seconds" target. Measure; if bad, lean toward Light sleep as the
-  recommended default instead, or keep the Wi-Fi creds/BSSID pinned for faster
-  reassoc.
+  unknown — if unsupported, combined touch+button wake collapses to **ext0 on
+  touch GPIO11 alone** (no PMIC-button fallback exists; see constraint #2). Verify
+  on hardware early.
+- **GPIO13 touch-IC / RTC-INT pin sharing.** Before wiring RTC-alarm wake on
+  GPIO13, confirm GPIO13 isn't multiplexed with another live function on this
+  board (the GPIO table lists it as `RTC_INT`, but verify it's free at runtime).
+- **ESPHome vs raw `esp_wifi_stop()` cooperation (light sleep, the default).**
+  Biggest light-sleep unknown. ESPHome's `wifi` component owns the radio and may
+  fight a raw `esp_wifi_stop()` / restart (auto-reconnect logic, watchdog,
+  state-machine assumptions). Test whether `wifi.disable` / `wifi.enable` actions
+  (or the API `reboot_timeout`/connection callbacks) are the cleaner lever before
+  reaching for the IDF call directly. If ESPHome can't be made to cleanly drop
+  and re-raise the link in-process, the light-sleep design may need to lean on
+  ESPHome primitives rather than manual IDF Wi-Fi control.
+- **Reconnect time on the Google Wifi mesh (both modes).** P1 needed static IP +
+  `fast_connect` just to associate; reassociation after Wi-Fi-off (light) or a
+  cold boot (deep) may be slower than the "few seconds" target. Measure; keep the
+  Wi-Fi creds/BSSID pinned for faster reassoc. Light sleep masks this better
+  because the UI is already up while the link returns.
+- **OTA reachability while sleeping.** A sleeping device (Wi-Fi off, either mode)
+  is unreachable for OTA until it wakes. Keep an awake/connected window after boot
+  before the first sleep (`prevent`/`run_duration` floor or "no sleep for first
+  30 s"), and document that pushing OTA means waking the device first (tap it,
+  then push within the active window).
 - **Touch-IC state after deep-sleep wake.** P3 documented the CST9220 needing a
   power-cycle after a *flash* to respond. A deep-sleep wake is a softer reset than
   a flash, but verify the touch IC comes back live on first wake without a manual
