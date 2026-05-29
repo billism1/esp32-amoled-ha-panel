@@ -59,13 +59,14 @@ firmware when HA is the one silently rejecting calls.
 | 7a | Polish round 1 (clock, settings tile, splash, tap feedback) | ✅ | verified 2026-05-28; battery + RTC deferred |
 | 7b | Polish round 2 (header layout, battery + Wi-Fi icons, Apply/Cancel in settings) | ✅ | verified on-device 2026-05-29 |
 | 7c | Entity control: explicit on/off + per-domain update operations | ✅ | verified on-device 2026-05-29 (tap-toggle live after the P7d attr-sub burst was disabled) |
-| 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | ✅ | verified on-device 2026-05-29; live-attr modal preload parked → P9 (see Post-P7 TODO) |
-| 7e | Per-entity icons (left of friendly name) | ✅ | v1: YAML override → domain default → fallback (zero new subs); baked MDI subset. HA `icon` attr deferred to P9 batched sensor. On-device verified |
+| 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | ✅ | verified on-device 2026-05-29; live-attr modal preload parked → P10 (see Post-P7 TODO) |
+| 7e | Per-entity icons (left of friendly name) | ✅ | v1: YAML override → domain default → fallback (zero new subs); baked MDI subset. HA `icon` attr deferred to P10 batched sensor. On-device verified |
 | 7f | Per-entity tap-confirmation guard | ✅ | verified on-device 2026-05-29. `confirm: true` → short-tap opens confirm sheet (action/lock/cover/switch) or detail modal (light/climate/…). switch/input_boolean use action sheet (no P7d modal exists for binary domains) |
-| 8 | Multi-board support | ⬜ | |
-| 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
+| 8 | Power management (sleep/wake for nightstand) | ⬜ | deep/light sleep, wake on touch + buttons; setting-toggled |
+| 9 | Multi-board support | ⬜ | |
+| 10 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
-**Last updated:** 2026-05-29 (P7b–P7f verified on-device; next: P8 multi-board support).
+**Last updated:** 2026-05-29 (P7b–P7f verified on-device; next: P8 power management).
 
 ---
 
@@ -75,7 +76,7 @@ firmware when HA is the one silently rejecting calls.
    does *more* than the previous phase. No big-bang merges.
 2. **Board package isolates hardware.** All pins, display init, touch driver
    live in `boards/<name>.yaml`. UI and HA logic never reference pins.
-3. **HA areas + entities start declarative, become dynamic.** MVP (P5) reads a static YAML list; P9 swaps to a single HA template sensor that pushes JSON. Each phase ships a usable panel.
+3. **HA areas + entities start declarative, become dynamic.** MVP (P5) reads a static YAML list; P10 swaps to a single HA template sensor that pushes JSON. Each phase ships a usable panel.
 4. **Battery-first.** Idle dim+blank and IMU wake are in Phase 4 — before any
    real UI. Every later phase is tested with the idle state machine running,
    so we catch power regressions early.
@@ -243,11 +244,11 @@ Default substitutions (tunable in `secrets.yaml` or top-level overrides):
 
 **Status:** ✅ done · target tag: `p5-static-entities`
 
-**Goal:** Define how the user describes their home to the panel — **for the MVP only**. Phase 9 replaces this with HA-side dynamic config; Phase 5's job is to get something on screen fast so we can validate the UI, touch, and idle/wake stack against a real home.
+**Goal:** Define how the user describes their home to the panel — **for the MVP only**. Phase 10 replaces this with HA-side dynamic config; Phase 5's job is to get something on screen fast so we can validate the UI, touch, and idle/wake stack against a real home.
 
 Files added:
 - [x] `packages/ha-entities.example.yaml` — committed template (sanitized placeholder areas/entities) so cloners see the schema.
-- [x] `packages/ha-entities.yaml` — **gitignored**, user-edited per-install copy of the example. Contains real entity_ids and friendly names, so it never gets pushed. Will be replaced by dynamic discovery in Phase 9.
+- [x] `packages/ha-entities.yaml` — **gitignored**, user-edited per-install copy of the example. Contains real entity_ids and friendly names, so it never gets pushed. Will be replaced by dynamic discovery in Phase 10.
 
 ### Why static first, dynamic later
 
@@ -262,7 +263,7 @@ Option matrix considered for static-vs-dynamic in Phase 5:
 |---|---|
 | Hard-code areas + entities in YAML | ✅ MVP. Simple, compiles fast, no runtime surprises. |
 | HTTP fetch `/api/states` + filter | ❌ Areas not in state objects; would need websocket. Skip. |
-| HA template sensor pushes JSON via native API attribute | ✅ Chosen for Phase 9 — see below. |
+| HA template sensor pushes JSON via native API attribute | ✅ Chosen for Phase 10 — see below. |
 | Custom websocket external_component | ❌ Multi-weekend C++ build; not worth it. |
 
 ### Schema (static, MVP)
@@ -503,7 +504,7 @@ Anything that needs a value picker, slider, dropdown, or multi-button transport 
 
 ## Phase 7d — Per-entity detail / popup view
 
-**Status:** ✅ done · verified on-device 2026-05-29 (live-attr preload parked → P9) · target tag: `p7d-detail`
+**Status:** ✅ done · verified on-device 2026-05-29 (live-attr preload parked → P10) · target tag: `p7d-detail`
 
 **Goal:** Give domains that need more than a binary tap their own control surface. Long-press an entity row → a shared modal opens, populated by a per-domain builder. Short-tap stays as the P7c row-level action (dispatch for binaries + action domains, no-op-with-log for the P7d-bound domains); the modal is strictly opt-in via long-press.
 
@@ -596,7 +597,7 @@ Already on, no flag change needed:
 
 **Goal:** Show the entity's chosen icon to the left of `friendly_name` on every row. Sourced from a YAML override or a compile-time domain default. **No live HA `icon` attribute subscription in v1** — see the connect-time TX-saturation lesson below.
 
-> **⚠️ Dependency — do NOT subscribe to the HA `icon` attribute at connect.** The 2026-05-29 P7d post-mortem (§Session notes) proved that bursting ~100+ per-entity attribute subscriptions at connect saturates the native-API TX path, drops HA's `SubscribeHomeassistantServicesRequest`, and makes **every firmware-initiated service call silently fail** (taps log but nothing happens; HA eventually disconnects). P7e's original "subscribe to `icon` on every entity" would re-trigger exactly that. v1 therefore resolves icons with **zero new subscriptions**. The live HA-`icon` source is deferred to the P9 HA-side batched template sensor (one sub, JSON payload) — same path that unparks the P7d live-attrs modal.
+> **⚠️ Dependency — do NOT subscribe to the HA `icon` attribute at connect.** The 2026-05-29 P7d post-mortem (§Session notes) proved that bursting ~100+ per-entity attribute subscriptions at connect saturates the native-API TX path, drops HA's `SubscribeHomeassistantServicesRequest`, and makes **every firmware-initiated service call silently fail** (taps log but nothing happens; HA eventually disconnects). P7e's original "subscribe to `icon` on every entity" would re-trigger exactly that. v1 therefore resolves icons with **zero new subscriptions**. The live HA-`icon` source is deferred to the P10 HA-side batched template sensor (one sub, JSON payload) — same path that unparks the P7d live-attrs modal.
 
 ### Icon resolution chain (per entity, evaluated each render) — v1
 
@@ -604,7 +605,7 @@ Already on, no flag change needed:
 2. **Domain default** — compile-time map (`light` → `mdi:lightbulb`, `switch` → `mdi:toggle-switch`, `cover` → `mdi:window-shutter`, `lock` → `mdi:lock`, `fan` → `mdi:fan`, `climate` → `mdi:thermostat`, `media_player` → `mdi:speaker`, `scene` → `mdi:palette`, `script` → `mdi:script-text-play`, `automation` → `mdi:robot`, `button` → `mdi:gesture-tap-button`, `sensor` → `mdi:gauge`, `binary_sensor` → `mdi:checkbox-marked-circle-outline`).
 3. **Generic fallback** — `LV_SYMBOL_REFRESH` (already in default LVGL font) when the resolved MDI name isn't in the baked subset. Logs once per missing icon name so we know what to bake next.
 
-**Deferred to P9 (HA `icon` attribute, batched):** slots between YAML override and domain default once the P9 template sensor lands. Single startup subscription to one HA entity whose attribute payload carries every entity's icon as JSON — no per-entity sub multiplier. Until then, domain default covers the common case and YAML override handles the rest.
+**Deferred to P10 (HA `icon` attribute, batched):** slots between YAML override and domain default once the P10 template sensor lands. Single startup subscription to one HA entity whose attribute payload carries every entity's icon as JSON — no per-entity sub multiplier. Until then, domain default covers the common case and YAML override handles the rest.
 
 ### YAML schema change
 
@@ -620,13 +621,13 @@ ha_panel:
           icon: mdi:desk-lamp      # optional override
 ```
 
-`components/ha_panel/__init__.py` adds `cv.Optional("icon", default="")`. Codegen passes it into `add_entity(entity_id, friendly_name, icon_override)`. Stored as `Entity::icon_override`. Empty string = "fall through to domain default → fallback" (HA-attr tier inserted at P9).
+`components/ha_panel/__init__.py` adds `cv.Optional("icon", default="")`. Codegen passes it into `add_entity(entity_id, friendly_name, icon_override)`. Stored as `Entity::icon_override`. Empty string = "fall through to domain default → fallback" (HA-attr tier inserted at P10).
 
 ### Attribute subscription path — NOT used in P7e v1
 
 P7e v1 adds **no** attribute subscriptions. Icons resolve from YAML override + compile-time domain map only, so there is no connect-time sub burst. This is the deliberate fix for the 2026-05-29 TX-saturation failure (see warning above and §Session notes).
 
-The live HA-`icon` source folds into P9's batched template-sensor work: one startup subscription to a single HA entity whose JSON attribute payload carries all icons. At that point `on_attr_` parses the payload and re-resolves affected rows — re-using the `ensure_attrs_subscribed_` / `on_attr_` scaffolding left in source. No per-entity icon subscription, ever.
+The live HA-`icon` source folds into P10's batched template-sensor work: one startup subscription to a single HA entity whose JSON attribute payload carries all icons. At that point `on_attr_` parses the payload and re-resolves affected rows — re-using the `ensure_attrs_subscribed_` / `on_attr_` scaffolding left in source. No per-entity icon subscription, ever.
 
 ### Baked MDI font subset
 
@@ -678,16 +679,16 @@ P7e row:
 
 ### Architecture additions
 
-- `Entity` struct gains `std::string icon_override;`. (`icon_attr` deferred — populated by P9 batched payload, not a per-entity sub.)
-- `HAPanel::resolve_icon_(const Entity &e) -> const char *` returns the codepoint string for the row. Implements the v1 chain (override → domain default → fallback). Caches the resolution (`mutable std::string icon_resolved_` per Entity) so we're not re-walking the chain every redraw. P9 inserts the HA-`icon` tier into this same function.
-- `icons_by_entity_` parallel vector (matches `widgets_by_entity_`) for the icon label widgets so the rebuild path can update them in place (needed when P9 pushes live icon updates).
+- `Entity` struct gains `std::string icon_override;`. (`icon_attr` deferred — populated by P10 batched payload, not a per-entity sub.)
+- `HAPanel::resolve_icon_(const Entity &e) -> const char *` returns the codepoint string for the row. Implements the v1 chain (override → domain default → fallback). Caches the resolution (`mutable std::string icon_resolved_` per Entity) so we're not re-walking the chain every redraw. P10 inserts the HA-`icon` tier into this same function.
+- `icons_by_entity_` parallel vector (matches `widgets_by_entity_`) for the icon label widgets so the rebuild path can update them in place (needed when P10 pushes live icon updates).
 
 ### Risks / unknowns
 
 - **MDI font flash cost.** 60 glyphs × ~1 KB each = ~60 KB. Acceptable on 16 MB flash. If subset grows past ~200 icons, revisit.
 - **Codepoint maintenance.** Hand-typing `\U000F0335` is error-prone. Build the helper script before the first icon lands.
 - **Missing-icon log spam.** If a user has an unusual `mdi:foo-bar` set in HA, we'll log it once and fall back to the domain default. Throttle to once-per-name to avoid log floods.
-- **~~Attribute subscription overhead.~~ RESOLVED by dropping HA-`icon` subs from v1.** Original plan (~100 icon subs on top of ~100 state subs) would have re-triggered the 2026-05-29 TX-saturation failure that silently kills service calls. v1 adds zero subs; live HA icons deferred to P9 batched sensor. See warning at top of phase.
+- **~~Attribute subscription overhead.~~ RESOLVED by dropping HA-`icon` subs from v1.** Original plan (~100 icon subs on top of ~100 state subs) would have re-triggered the 2026-05-29 TX-saturation failure that silently kills service calls. v1 adds zero subs; live HA icons deferred to P10 batched sensor. See warning at top of phase.
 - **Icon != state widget.** Don't try to encode state in the icon (e.g. swap `lightbulb` → `lightbulb-off` on state change). State is the *right-side* widget's job. Keep the icon static per entity to avoid jumpy visual.
 
 **Exit criteria:**
@@ -794,9 +795,201 @@ Action confirm sheet slots between 3 and 4 — same `move_foreground` pattern. O
 
 ---
 
-## Phase 8 — Multi-board support
+## Phase 8 — Power management (sleep / wake for nightstand use)
 
-**Status:** ⬜ not started · target tag: `p8-multiboard`
+**Status:** ⬜ not started · target tag: `p8-power`
+
+**Goal:** Survive an overnight (and ideally multi-day) idle on the LiPo without a
+charger. Use case is **nightstand, not wrist**: set it down at night, leave it,
+pick it up / tap it in the morning and have it usable within a couple of
+seconds. The existing P4 idle machine (active → dim → blank) only turns the
+*panel* off — the ESP32 + Wi-Fi stay fully awake keeping the HA API link, which
+is tens of mA and drains a small cell in a night. P8 adds a real low-power state
+below `blank` and the wake plumbing to leave it.
+
+> **Reverses a parking-lot decision.** The original plan put "ESP32 deep sleep"
+> out of scope because losing the HA API link on every wake makes an
+> *interactive* panel feel terrible. That logic still holds for a hand-held
+> remote you poke constantly. It does **not** hold for a nightstand device that
+> sits untouched for hours — there, a 2–4 s reconnect on the few times a day you
+> pick it up is a fine trade for not killing the battery overnight. P8 is the
+> nightstand answer; the setting (below) lets the hand-held use case keep the
+> old always-connected behaviour.
+
+### Hardware wake-source reality on this board (verified 2026-05-29)
+
+Researched against `waveshareteam/ESP32-S3-Touch-AMOLED-2.16` `pin_config.h` +
+Waveshare docs. ESP32-S3 RTC-capable GPIOs are **0–21**, so any INT/button on
+those can wake deep sleep via `ext0`/`ext1`.
+
+| Wake source | Routing | Deep-sleep wake? | Light-sleep / awake wake? |
+|---|---|---|---|
+| **Touch (CST9220 INT)** | **GPIO11**, RTC-capable, active-low | ✅ `ext0`/`ext1` on GPIO11 — *if touch rail kept powered* | ✅ (already polled today) |
+| **Custom button** | **GPIO18**, RTC-capable | ✅ | ✅ |
+| **BOOT button** | **GPIO0**, RTC-capable | ✅ (but BOOT-hold also = flash mode) | ✅ |
+| **PWR button** | **AXP2101 PWRON** (not a GPIO) | ✅ via PMIC power-on (full cold boot) | ✅ via PMIC IRQ |
+| **Motion (QMI8658 INT)** | **NOT routed to any GPIO** | ❌ **impossible** — no pin to wake on | ✅ only via software accel polling (CPU must run) |
+
+**The load-bearing constraint:** the IMU interrupt line is not broken out
+(confirmed at P4 — Waveshare's own example polls). So **motion cannot wake the
+device from deep sleep on this hardware, full stop.** Deep-sleep wake = tap the
+screen or press a button. Motion-wake (the P4 pickup-to-wake behaviour) only
+survives in light sleep / awake, where the CPU still ticks to poll the accel.
+This difference is the main UX input to the default choice below.
+
+### Why light sleep saves little *on this network* (the other constraint)
+
+The P1 session note records that this device only associates to the user's
+**Google Wifi mesh** with `power_save_mode: NONE`. That disables Wi-Fi
+modem-sleep (DTIM beacon skipping), which is exactly the mechanism automatic
+light sleep relies on to drop average current while keeping the link. With
+`power_save_mode: NONE`, light sleep's radio stays near full-power, so the
+overnight saving is small. **Therefore deep sleep is the only state that
+meaningfully preserves battery overnight on this setup.** Light sleep is offered
+as an option (keeps API + motion-wake, instant) but flagged as "saves little
+here unless `power_save_mode` can be relaxed."
+
+### Power-state tiers (extends P4, doesn't replace it)
+
+```
+[active] --dim_timeout--> [dim] --blank_timeout--> [blank] --sleep_timeout--> [sleep]
+   ▲ panel 80%             panel ~12%               panel off                 chosen mode
+   │ MCU+Wi-Fi awake       MCU+Wi-Fi awake          MCU+Wi-Fi awake           ↓
+   └──────────────────── touch / button / motion wake (P4) ──────────────────┘
+                                                                              │
+                          [sleep] wake: touch (GPIO11) or button only;        │
+                          motion CANNOT wake deep sleep (no INT pin) ─────────┘
+```
+
+- `active` / `dim` / `blank` are unchanged from P4.
+- New `sleep` tier entered after a further **`sleep_timeout`** of no input while
+  already `blank`. Default `sleep_timeout: 10min` (long, so ordinary interactive
+  use never trips it — only a genuinely-idle nightstand does).
+- What `sleep` does depends on the **Power saver** setting:
+  - **Off** — never enter `sleep`; behave exactly as today (P4). For the
+    hand-held / always-connected use case, or when on a charger.
+  - **Light sleep** — `esp_light_sleep` / ESP-IDF automatic light sleep. Keeps
+    RAM, keeps the HA API link, motion-wake still works, wake is instant. Lowest
+    UX cost, but (see above) small power win on the `power_save_mode: NONE` mesh.
+  - **Deep sleep** — ESP32 deep sleep (~µA core). Wakes on touch GPIO11 or a
+    button via `ext1`. Full reboot + Wi-Fi reassociate + HA reconnect + re-sub on
+    wake (~2–4 s, possibly more on this mesh). No motion-wake. Biggest power win.
+
+### Default choice (mine, per the brief)
+
+**Default = Deep sleep, `sleep_timeout: 10 min`.** Reasoning for "what most
+people in *this* scenario want":
+1. The stated goal is explicitly "don't drain the battery overnight" — deep
+   sleep is the only tier that delivers that here (light sleep undercut by
+   `power_save_mode: NONE`).
+2. It's a nightstand, not a wrist device, so losing motion/pickup-wake costs
+   little — you reach over and tap the screen anyway, and tap *does* wake deep
+   sleep (GPIO11 is routed).
+3. The 10-minute pre-sleep window means casual "glance and poke" sessions never
+   hit deep sleep; only a truly-abandoned device sleeps, so the 2–4 s reconnect
+   is paid only when you've genuinely walked away.
+
+Anyone who wants instant always-connected behaviour (or runs on a charger) flips
+the setting to **Off**; anyone on a mesh that tolerates modem-sleep picks
+**Light sleep**.
+
+### Settings UI (extends the P7a/P7b settings tile)
+
+- Add a **Power saver** `lv_dropdown` to the settings tile: `Off` / `Light
+  sleep` / `Deep sleep`. Reuse the existing Apply/Cancel staging + dirty-flag
+  recipe from P7b (so changing the mode stages, commits on Apply, reverts on
+  navigate-away).
+- Persist via a `restore_value: yes` global (e.g. `power_saver_mode_g`, uint8
+  0/1/2), same pattern as `active_brightness_g`. Read at boot to decide whether
+  the idle machine arms the `sleep` transition.
+- Optional second control: **Sleep after** (the `sleep_timeout`) as a small set
+  of presets (5 / 10 / 30 min / Never) rather than a free slider — keeps the
+  tile simple. `Never` is equivalent to `Off` for the timer but leaves the mode
+  selected. Decide during build whether this is worth the tile space; default
+  10 min is fine to ship without exposing it.
+- `LV_USE_DROPDOWN` is already enabled (P7d), so no new build flag for the mode
+  picker.
+
+### Architecture / implementation notes
+
+- **ESPHome `deep_sleep:` component** drives deep sleep. Wake config is the open
+  question: need touch (GPIO11, active-low) **and** a button (GPIO18) to both
+  wake. ESPHome exposes `wakeup_pin` (single, ext0) and `esp32_ext1_wakeup`
+  (multiple pins + `ANY_HIGH` / `ALL_LOW` mode). Both our sources are active-low,
+  which wants an "any low" trigger — **verify ESP32-S3 supports `ANY_LOW` for
+  ext1** (classic ESP32 only had `ANY_HIGH`/`ALL_LOW`; S3 added more). If S3 ext1
+  can't do any-low across two pins, fall back to: ext0 on touch GPIO11 (the
+  primary wake) + rely on the **PWR/AXP2101 button** as the hardware button-wake
+  (PMIC power-on path, independent of the GPIO wake mask). Resolve this on real
+  silicon before committing the wake design.
+- **Enter sleep from the idle machine, not at boot.** The P4 `interval: 1s` +
+  millis state machine gains one more transition: when `blank` and idle past
+  `sleep_timeout` and mode != Off, call `deep_sleep.enter` (deep) or the
+  light-sleep entry. `notify_input` (touch/button/motion) restamps and, for
+  light sleep, returns to `active` with no reconnect.
+- **Never sleep before the device is usable / updatable.** Call
+  `deep_sleep.prevent` during boot until the HA API has connected at least once,
+  and provide an escape hatch for OTA: ESPHome's `deep_sleep` already cooperates
+  with OTA, but confirm the device stays awake long enough after boot to accept
+  an OTA push (a `run_duration` floor or "prevent for first 30 s" guard). Without
+  this, a deep-sleeping device can become very annoying to reflash.
+- **AXP2101 rail gating for lower sleep current (optimization).** In deep sleep
+  the AMOLED is dark via brightness 0, but its rail still draws. The AXP2101 can
+  cut the display rail entirely on sleep-enter and restore on wake — bigger
+  saving. **Touch rail must stay powered** for the GPIO11 wake-tap to fire, so
+  gate display only, never touch. This is a follow-up optimization, not required
+  for the first working version (get deep sleep + wake correct first, then chase
+  µA via rail control).
+- **Clock after deep-sleep wake.** Deep sleep loses system time; the HA time
+  source re-syncs a few seconds after API reconnect, so the header clock is blank
+  / stale briefly on wake. If that's annoying, integrate the on-board
+  **PCF85063 RTC** (deferred at P7a) to hold time across sleep — optional, folds
+  naturally in here if pursued.
+- **Light-sleep path** is mostly an ESP-IDF config concern (`CONFIG_PM_ENABLE`,
+  `CONFIG_FREERTOS_USE_TICKLESS_IDLE`) plus accepting the `power_save_mode`
+  tension. May be cheap enough to ship as "available but not recommended on this
+  mesh" with a one-line doc note.
+
+### Exit criteria
+
+- With **Power saver = Deep sleep**, an idle device enters deep sleep after
+  `blank` + `sleep_timeout`; measured current drops to the µA range (verify with
+  a USB power meter or the AXP2101 reading if it can self-report at that level).
+- Tapping the screen **or** pressing the configured button wakes the device from
+  deep sleep, it reconnects to HA, and the dashboard is usable within a few
+  seconds.
+- Motion (pickup) does **not** wake from deep sleep — documented as expected, not
+  a bug.
+- With **Power saver = Off**, behaviour is identical to P4 (no regression):
+  motion + touch + button all wake from `blank`, HA link never drops.
+- The Power saver setting persists across reboot and is changeable from the
+  settings tile with Apply/Cancel.
+- A deep-sleeping device can still be reflashed (OTA window honoured, or
+  documented USB/BOOT recovery path).
+
+### Risks / unknowns
+
+- **ext1 any-low on ESP32-S3 for two active-low pins.** The single biggest
+  unknown — if unsupported, the touch+button combined wake needs the ext0 +
+  PMIC-button fallback. Verify on hardware early.
+- **Reconnect time on the Google Wifi mesh.** P1 needed static IP + `fast_connect`
+  just to associate; cold-boot reassociation after deep sleep may be slower than
+  the "few seconds" target. Measure; if bad, lean toward Light sleep as the
+  recommended default instead, or keep the Wi-Fi creds/BSSID pinned for faster
+  reassoc.
+- **Touch-IC state after deep-sleep wake.** P3 documented the CST9220 needing a
+  power-cycle after a *flash* to respond. A deep-sleep wake is a softer reset than
+  a flash, but verify the touch IC comes back live on first wake without a manual
+  power-cycle — if not, that breaks tap-to-wake and forces button-only wake.
+- **AXP2101 + ESP32 deep sleep interaction.** Confirm the PMIC doesn't itself cut
+  the ESP32 rail or reset state in a way that interferes with `ext1` wake. Read
+  the XPowersLib sleep path before gating any rails.
+
+---
+
+## Phase 9 — Multi-board support
+
+**Status:** ⬜ not started · target tag: `p9-multiboard`
 
 **Goal:** Adding a second AMOLED board = adding one board package, nothing else.
 
@@ -813,9 +1006,9 @@ Tasks:
 
 ---
 
-## Phase 9 — Dynamic area + entity discovery (replaces static YAML)
+## Phase 10 — Dynamic area + entity discovery (replaces static YAML)
 
-**Status:** ⬜ not started · target tag: `p9-dynamic`
+**Status:** ⬜ not started · target tag: `p10-dynamic`
 
 **Goal:** Move source-of-truth for areas + entities from `packages/ha-entities.yaml` into Home Assistant itself. Re-arranging a home no longer requires a firmware rebuild.
 
@@ -868,7 +1061,7 @@ text_sensor:
 ### Hard parts (call out so we don't kid ourselves)
 
 1. **Runtime LVGL widget creation.** ESPHome's YAML LVGL is declarative; building tiles in a lambda means calling the underlying LVGL C API directly. Works, but examples are sparse — budget a real spike. Pre-build by Phase 6 a small lambda that creates one tile programmatically as a proof.
-2. **Runtime per-entity state subscriptions.** `homeassistant.text_sensor` is declared at compile time. Workaround: declare a *pool* of N (say 64) generic subscriptions at compile time, bind each one to whichever entity_id we currently care about via the C++ `set_entity_id()` setter. Confirm that ESPHome's native API client supports re-subscribing on `set_entity_id()` change — if not, a Phase 9 blocker.
+2. **Runtime per-entity state subscriptions.** `homeassistant.text_sensor` is declared at compile time. Workaround: declare a *pool* of N (say 64) generic subscriptions at compile time, bind each one to whichever entity_id we currently care about via the C++ `set_entity_id()` setter. Confirm that ESPHome's native API client supports re-subscribing on `set_entity_id()` change — if not, a Phase 10 blocker.
 3. **JSON payload size.** Native API protobuf message limit isn't tiny but isn't infinite. A 50-entity home is fine; a 500-entity home may overflow. Filter on the HA side aggressively.
 4. **Domain → behaviour map stays in firmware.** Even with dynamic entity lists, knowing that `light.*` toggles and `sensor.*` is read-only is still a compile-time table. Acceptable.
 
@@ -889,7 +1082,10 @@ text_sensor:
 
 ## Out-of-scope for this plan (parking lot)
 
-- ESP32 deep sleep between interactions — would break the live HA API link; rely on AMOLED panel sleep + ESP-IDF auto modem/light sleep instead.
+- ~~ESP32 deep sleep between interactions~~ — **moved into scope at P8** for the
+  nightstand use case (sleep/wake, setting-toggled, default deep sleep). The
+  "breaks the live HA API link" objection still applies to the *hand-held*
+  always-connected use case, which P8's `Off` setting preserves.
 - AXP2101 charge-curve battery % — raw voltage only in v1.
 - Audio / dual microphone / wake-word — entire vertical not addressed.
 - Light brightness / colour control — toggle only in v1.
@@ -907,7 +1103,7 @@ Tried twice on 2026-05-29:
 
 Possible paths to retry later:
 
-- **HA-side template sensor that batches per-entity attributes into one entity's attribute payload.** Sub once at startup → no per-modal fetch dance. Closest in spirit to P9's dynamic discovery sensor; would naturally fold into that work.
+- **HA-side template sensor that batches per-entity attributes into one entity's attribute payload.** Sub once at startup → no per-modal fetch dance. Closest in spirit to P10's dynamic discovery sensor; would naturally fold into that work.
 - **Upstream a public method on `APIConnection` that extends `state_subs_at_` to "start of new entries"** instead of restarting from 0. Avoids the re-walk cost. ESPHome PR.
 - **Increase the safety timeout to 4 s and accept the cost** of re-walking all subs every modal open. Cheapest by code change but worst by network traffic.
 
@@ -922,7 +1118,7 @@ Modal infrastructure (per-domain widget builders, Apply dispatch, sticky-edit se
 3. **Header content:** clock + battery, clock + battery + weather, or area name only?
 4. **Tap-and-hold behaviour:** v1 ignores it. Could later expose a detail page (brightness slider for lights, set-point for climate). OK to defer?
 5. **Touch driver fallback:** if no community CST9220/CST9217 fork works, are we willing to spend the time to write a small external component, or fall back to the Arduino-side touch lib via lambda?
-6. **Phase 9 entity filter:** blacklist by domain (current sketch) vs. label-based opt-in (`label: show_on_panel`). Label-based is cleaner long-term but requires labelling every entity in HA.
+6. **Phase 10 entity filter:** blacklist by domain (current sketch) vs. label-based opt-in (`label: show_on_panel`). Label-based is cleaner long-term but requires labelling every entity in HA.
 
 ---
 
@@ -932,13 +1128,13 @@ Modal infrastructure (per-domain widget builders, Apply dispatch, sticky-edit se
 
 ### 2026-05-29 — P7e per-entity icons (on-device verified ✅)
 
-- **Shipped v1 with ZERO new subscriptions** — deliberately dropped the HA `icon` attribute tier the original plan called for. Subscribing `icon` per entity at connect would re-trigger the exact TX-saturation failure logged below (P7d): ~100 icon subs on top of 88 state subs, silent service-call death. Icons resolve from YAML `icon: mdi:foo` override → compile-time domain default → fallback glyph, all client-side. Live HA-sourced icons deferred to the P9 batched template sensor (one sub, JSON payload).
+- **Shipped v1 with ZERO new subscriptions** — deliberately dropped the HA `icon` attribute tier the original plan called for. Subscribing `icon` per entity at connect would re-trigger the exact TX-saturation failure logged below (P7d): ~100 icon subs on top of 88 state subs, silent service-call death. Icons resolve from YAML `icon: mdi:foo` override → compile-time domain default → fallback glyph, all client-side. Live HA-sourced icons deferred to the P10 batched template sensor (one sub, JSON payload).
 - **Glyphs are generated, never hand-typed.** `tools/build-mdi-glyphs.py` fetches `@mdi/font@7.4.47` CSS, resolves names→PUA codepoints, and emits BOTH `components/ha_panel/mdi_icons.h` (C++ name→cp table + domain-default map + fallback) and `packages/mdi-font.yaml` (the `font:` block with the baked glyph list). Both from the same `ICON_NAMES`/`DOMAIN_ICON` source so the lookup table and the baked glyphs can't drift. Script aborts if any name doesn't exist in MDI — 72 glyphs resolved clean.
 - **Font→C++ bridge gotcha.** An ESPHome `font::Font` only exposes `get_lv_font()` (and populates its `lv_font_`) when `USE_LVGL_FONT` is defined, which only happens if the font is *referenced in lvgl config*. Our UI is built in C++, so nothing referenced it → would not compile. Fix: a hidden 0-size anchor label in `packages/lvgl-ui.yaml` with `text_font: mdi_icons`. That forces the define + links the glyph data; ha_panel reads the font back via a `set_mdi_font()` setter (codegen `cv.use_id(font.Font)`), no symbol-name guessing.
 - **Layout:** icon `lv_label` (MDI font, white) at `LEFT_MID +12`; friendly name shifts `+12→+48`, width `280→240`. If no `mdi_font` configured, `resolve_icon_` returns empty and the row keeps the pre-P7e flush-left layout — graceful degrade.
 - **Flash cost:** firmware 14.7 % (1.20 MB / 8 MB) with 72 glyphs baked at size 24, bpp 4. Comfortable headroom.
 - **Build flake (not P7e):** first link died on `libwpa_supplicant.a ... cannot read contents of section .xtensa.info` — a corrupt prebuilt IDF archive from a *concurrent build in another CLI*, not a code error (C++ had already compiled clean). Clean re-link succeeded. Watch for this any time two builds touch `.pioenvs` at once.
-- **On-device: confirmed ✅** — glyphs render clean (no tofu), icon column reads well. Phase done. Live HA-`icon` source still the one parked item, intentionally deferred to P9.
+- **On-device: confirmed ✅** — glyphs render clean (no tofu), icon column reads well. Phase done. Live HA-`icon` source still the one parked item, intentionally deferred to P10.
 
 ### 2026-05-29 — P7d on-device: attribute-sub burst saturates TX path
 
@@ -947,7 +1143,7 @@ Modal infrastructure (per-domain widget builders, Apply dispatch, sticky-edit se
 - **Diagnostic / fix:** disabled the entire P7d attr-sub loop in `setup()` (single block comment, no logic deleted). Reflashed — toggle taps started working immediately, no buffer-full warning, status dot stays green. Confirms the attribute-flood path is the culprit.
 - **Follow-up attempt #1 (one-shot `get_home_assistant_state`) — DID NOT WORK.** Switched to one-shot fetch at modal open expecting it to bypass the connect-time flood. On-device logs showed every modal hitting the 1500 ms safety timeout with all 6 requests still pending. **Reason: ESPHome only transmits state subscriptions while the per-client `state_subs_at_` cursor in `api_connection.cpp:2435` is `>= 0`. HA arms it once via `SubscribeHomeAssistantStatesRequest` at connect; after the cursor walks past the end (`state_subs_at_ = -1`) any subs added later — including `get_home_assistant_state` requests, which under the hood are just sub entries with `once=true` — sit silently in `state_subs_` and never go out over the wire.** Same root cause is why the original P7d burst at connect didn't itself crash the link, it just over-saturated TX while the cursor *was* walking.
 - **Follow-up attempt #2 (lazy persistent sub + cursor re-arm) — ALSO FAILED.** Reasoning held: `on_subscribe_home_assistant_states_request()` resets the cursor to 0, forcing a full re-walk that includes the new entries. But on-device confirmed the re-walk takes ~2.5 s for 88+6 entries at one message per loop tick (~30 ms each), and HA round-trips its state push on top of that. Every modal open still hit the 1500 ms timeout. Tested 4 modal opens in a row — all timed out, all built with defaults.
-- **Parked the live-attr fetch entirely** per user direction (TODO logged in plan §"Post-P7 TODO: live attrs in modal"). Stripped the Loading placeholder and the `request_detail_attrs_` call from `open_detail_` — modal now builds immediately with whatever's already in `Entity::attrs` (typically empty on first open), so sliders show defaults. Apply still commits the user's chosen values; the only thing missing is "show me where this entity *currently* is." Scaffolding (`ensure_attrs_subscribed_`, `request_detail_attrs_`, `attrs_subscribed_`, `pending_attr_responses_`) left in source for the next attempt — likely will end up folded into a HA-side template-sensor batched-attrs payload when P9 dynamic discovery lands.
+- **Parked the live-attr fetch entirely** per user direction (TODO logged in plan §"Post-P7 TODO: live attrs in modal"). Stripped the Loading placeholder and the `request_detail_attrs_` call from `open_detail_` — modal now builds immediately with whatever's already in `Entity::attrs` (typically empty on first open), so sliders show defaults. Apply still commits the user's chosen values; the only thing missing is "show me where this entity *currently* is." Scaffolding (`ensure_attrs_subscribed_`, `request_detail_attrs_`, `attrs_subscribed_`, `pending_attr_responses_`) left in source for the next attempt — likely will end up folded into a HA-side template-sensor batched-attrs payload when P10 dynamic discovery lands.
 - **Ellipsis fix.** Replaced the single `…` glyph (U+2026) with three literal dots `...` in every user-visible label (`make_entity_row`'s "no state yet" placeholder, the LOCK_TEXT / COVER_TEXT / SUMMARY_TEXT / READ_ONLY_TEXT rebuild path, the detail modal "Loading..." line). LVGL's default Montserrat font doesn't include U+2026; the glyph rendered as the missing-character box.
 - **Side-note (operator paranoia):** HA permission flag ("Allow the device to perform Home Assistant actions") is still the first thing to check on any "taps log but nothing happens" report, but in this case the user had already verified it ON twice — the silent failure mode is distinct from the permission-rejection mode (which would have produced an HA log line per call).
 
@@ -1005,7 +1201,7 @@ Modal infrastructure (per-domain widget builders, Apply dispatch, sticky-edit se
 
 ### 2026-05-28 — P6 LVGL UI (verified on-device)
 
-- **Runtime LVGL widget build, not YAML.** With 15 areas × ~6 entities each, declaring tiles + rows in YAML would be a mess. `HAPanel::build_ui_()` now constructs the tree via the LVGL C API on `lv_scr_act()` once setup runs. Plan §P9 was already going to need this approach for dynamic discovery, so starting it in P6 reduces P9 risk.
+- **Runtime LVGL widget build, not YAML.** With 15 areas × ~6 entities each, declaring tiles + rows in YAML would be a mess. `HAPanel::build_ui_()` now constructs the tree via the LVGL C API on `lv_scr_act()` once setup runs. Plan §P10 was already going to need this approach for dynamic discovery, so starting it in P6 reduces P10 risk.
 - **Widget flags via `build_flags`.** ESPHome's lvgl auto-enables only LVGL widgets referenced in YAML. Runtime builds skip that detection, so `LV_USE_FLEX`, `LV_USE_LABEL`, `LV_USE_BUTTON`, and `LV_USE_TILEVIEW` are forced on via `esphome.platformio_options.build_flags` in the board package. Without those, the runtime calls fail to link (errors like `'lv_label_create' was not declared in this scope`).
 - **No `lv_list` wrapper in ESPHome.** Use `lv_obj_create` + `lv_obj_set_flex_flow(LV_FLEX_FLOW_COLUMN)` + scroll direction `LV_DIR_VER`. Functionally equivalent for vertical entity scrolling. Same pattern for the area-picker modal.
 - **LVGL v9.5 API differences from v8 caught at compile**:
@@ -1074,9 +1270,9 @@ Modal infrastructure (per-domain widget builders, Apply dispatch, sticky-edit se
 - **ESPHome version in use: 2026.5.1.** Pin any version-sensitive checks against this baseline (CO5300 green-line fix, `mipi_spi` brightness, LVGL widget API).
 - Decided: native API encryption key only; no HA long-lived access token. ESPHome ↔ HA native API doesn't need one.
 - Decided: idle dim→blank state machine with IMU + touch wake goes in **P4**, before any real UI. Drives every later phase's power test.
-- Decided: static YAML entity model in P5, dynamic HA-template-sensor in P9. Two-step ships fastest.
+- Decided: static YAML entity model in P5, dynamic HA-template-sensor in P10. Two-step ships fastest.
 - Decided: ESP32 deep sleep **not** used — would break HA API. AMOLED panel blank is the sleep mechanism.
-- Open: idle timeouts (15s dim / 30s further to blank), motion sensitivity, header content, tap-and-hold behaviour, touch driver fallback, P9 filter strategy.
+- Open: idle timeouts (15s dim / 30s further to blank), motion sensitivity, header content, tap-and-hold behaviour, touch driver fallback, P10 filter strategy.
 
 <!--
 ### YYYY-MM-DD — phase N
