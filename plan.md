@@ -61,6 +61,7 @@ firmware when HA is the one silently rejecting calls.
 | 7c | Entity control: explicit on/off + per-domain update operations | 🟡 | code complete 2026-05-28; awaiting on-device verification |
 | 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | 🟡 | code complete 2026-05-29; awaiting on-device verification |
 | 7e | Per-entity icons (left of friendly name) | ⬜ | HA `icon` attr → YAML override → domain default → fallback; baked MDI subset |
+| 7f | Per-entity tap-confirmation guard | ⬜ | `confirm: true` in YAML → short-tap opens modal instead of firing action |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
