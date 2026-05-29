@@ -59,12 +59,12 @@ firmware when HA is the one silently rejecting calls.
 | 7a | Polish round 1 (clock, settings tile, splash, tap feedback) | ✅ | verified 2026-05-28; battery + RTC deferred |
 | 7b | Polish round 2 (header layout, battery + Wi-Fi icons, Apply/Cancel in settings) | 🟡 | code complete 2026-05-28; awaiting on-device verification |
 | 7c | Entity control: explicit on/off + per-domain update operations | 🟡 | code complete 2026-05-28; awaiting on-device verification |
-| 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | ⬜ | long-press → shared modal with per-domain widgets |
+| 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | 🟡 | code complete 2026-05-29; awaiting on-device verification |
 | 7e | Per-entity icons (left of friendly name) | ⬜ | HA `icon` attr → YAML override → domain default → fallback; baked MDI subset |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
-**Last updated:** 2026-05-28 (P7c code complete).
+**Last updated:** 2026-05-29 (P7d code complete).
 
 ---
 
@@ -502,7 +502,7 @@ Anything that needs a value picker, slider, dropdown, or multi-button transport 
 
 ## Phase 7d — Per-entity detail / popup view
 
-**Status:** ⬜ not started · target tag: `p7d-detail`
+**Status:** 🟡 code complete 2026-05-29 · target tag: `p7d-detail`
 
 **Goal:** Give domains that need more than a binary tap their own control surface. Long-press an entity row → a shared modal opens, populated by a per-domain builder. Short-tap stays as the P7c row-level action (dispatch for binaries + action domains, no-op-with-log for the P7d-bound domains); the modal is strictly opt-in via long-press.
 
@@ -800,6 +800,23 @@ text_sensor:
 - Climate / thermostat / media transport control — read-only in v1.
 - SD card asset loading for icons — embed icons at compile time instead.
 
+### Post-P7 TODO — live attrs in modal
+
+The P7d detail modal currently opens with **default** slider values (brightness slider at 100 %, climate target at mid-range, etc.) instead of the entity's current HA attribute values. Apply still commits whatever the user dials in — usable, just not pre-populated.
+
+Tried twice on 2026-05-29:
+
+1. **One-shot `api::global_api_server->get_home_assistant_state(eid, attr, lambda)` at modal open.** Failed: post-connect entries land in `state_subs_` but ESPHome's per-client `state_subs_at_` cursor (`api_connection.cpp:2435`) is already at -1 by then, so the sub message never goes out. Every modal hit the 1500 ms safety timeout with all 6 attrs pending.
+2. **Lazy persistent subscribe + cursor re-arm via `on_subscribe_home_assistant_states_request()`.** Failed: re-arm restarts the walk at 0 and re-sends the full subs vector (88 state + 6 new) at one message per loop tick (~30 ms), so the new entries don't actually go out until ~2.5 s after modal open — past the 1500 ms timeout, plus a lot of repeat traffic for HA to dedupe on every modal open.
+
+Possible paths to retry later:
+
+- **HA-side template sensor that batches per-entity attributes into one entity's attribute payload.** Sub once at startup → no per-modal fetch dance. Closest in spirit to P9's dynamic discovery sensor; would naturally fold into that work.
+- **Upstream a public method on `APIConnection` that extends `state_subs_at_` to "start of new entries"** instead of restarting from 0. Avoids the re-walk cost. ESPHome PR.
+- **Increase the safety timeout to 4 s and accept the cost** of re-walking all subs every modal open. Cheapest by code change but worst by network traffic.
+
+Modal infrastructure (per-domain widget builders, Apply dispatch, sticky-edit semantics) is all in place — only the value-preload step is parked. See `ha_panel::ensure_attrs_subscribed_` and `ha_panel::request_detail_attrs_` for the scaffolding left in source.
+
 ---
 
 ## Open decisions (need user input before / during Phase 4–6)
@@ -816,6 +833,32 @@ text_sensor:
 ## Session notes & decisions log
 
 > Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-29 — P7d on-device: attribute-sub burst saturates TX path
+
+- **First flash of P7d + P7c stacked** showed taps dispatching in firmware logs (`tap light.X → homeassistant.turn_off`) but the corresponding light never reacted, and HA log had no rejection message (permission already ON, verified). ~60 s after connect: `[W][api.connection]: Buffer full, ping queued`, then `Home Assistant 2026.5.4 (192.168.86.97): is unresponsive; disconnecting`. Header status dot flipped green → red and stayed red.
+- **Root cause: attribute-subscription burst.** ~30 lights × 6 attrs + 2 climates × 6 attrs + a cover ≈ 193 extra `subscribe_homeassistant_state` calls sent at connect, on top of 88 state subs. TX path never settles. `api_connection::send_homeassistant_action` returns early when `flags_.service_call_subscription` is false; under sustained burst pressure HA's `SubscribeHomeassistantServicesRequest` (sent during HA-side init) appears to land in a dropped/late state, so every later firmware-initiated service call silently disappears. No firmware error; no HA-side log.
+- **Diagnostic / fix:** disabled the entire P7d attr-sub loop in `setup()` (single block comment, no logic deleted). Reflashed — toggle taps started working immediately, no buffer-full warning, status dot stays green. Confirms the attribute-flood path is the culprit.
+- **Follow-up attempt #1 (one-shot `get_home_assistant_state`) — DID NOT WORK.** Switched to one-shot fetch at modal open expecting it to bypass the connect-time flood. On-device logs showed every modal hitting the 1500 ms safety timeout with all 6 requests still pending. **Reason: ESPHome only transmits state subscriptions while the per-client `state_subs_at_` cursor in `api_connection.cpp:2435` is `>= 0`. HA arms it once via `SubscribeHomeAssistantStatesRequest` at connect; after the cursor walks past the end (`state_subs_at_ = -1`) any subs added later — including `get_home_assistant_state` requests, which under the hood are just sub entries with `once=true` — sit silently in `state_subs_` and never go out over the wire.** Same root cause is why the original P7d burst at connect didn't itself crash the link, it just over-saturated TX while the cursor *was* walking.
+- **Follow-up attempt #2 (lazy persistent sub + cursor re-arm) — ALSO FAILED.** Reasoning held: `on_subscribe_home_assistant_states_request()` resets the cursor to 0, forcing a full re-walk that includes the new entries. But on-device confirmed the re-walk takes ~2.5 s for 88+6 entries at one message per loop tick (~30 ms each), and HA round-trips its state push on top of that. Every modal open still hit the 1500 ms timeout. Tested 4 modal opens in a row — all timed out, all built with defaults.
+- **Parked the live-attr fetch entirely** per user direction (TODO logged in plan §"Post-P7 TODO: live attrs in modal"). Stripped the Loading placeholder and the `request_detail_attrs_` call from `open_detail_` — modal now builds immediately with whatever's already in `Entity::attrs` (typically empty on first open), so sliders show defaults. Apply still commits the user's chosen values; the only thing missing is "show me where this entity *currently* is." Scaffolding (`ensure_attrs_subscribed_`, `request_detail_attrs_`, `attrs_subscribed_`, `pending_attr_responses_`) left in source for the next attempt — likely will end up folded into a HA-side template-sensor batched-attrs payload when P9 dynamic discovery lands.
+- **Ellipsis fix.** Replaced the single `…` glyph (U+2026) with three literal dots `...` in every user-visible label (`make_entity_row`'s "no state yet" placeholder, the LOCK_TEXT / COVER_TEXT / SUMMARY_TEXT / READ_ONLY_TEXT rebuild path, the detail modal "Loading..." line). LVGL's default Montserrat font doesn't include U+2026; the glyph rendered as the missing-character box.
+- **Side-note (operator paranoia):** HA permission flag ("Allow the device to perform Home Assistant actions") is still the first thing to check on any "taps log but nothing happens" report, but in this case the user had already verified it ON twice — the silent failure mode is distinct from the permission-rejection mode (which would have produced an HA log line per call).
+
+### 2026-05-29 — P7d per-entity detail modal (code complete, compile clean)
+
+- **Long-press → modal** wired via `LV_EVENT_LONG_PRESSED` on every entity row whose domain has a detail modal (`light` / `climate` / `media_player` / `number` / `select` / `fan` / `cover`). Short-tap kept the P7c dispatch by switching row registration from `LV_EVENT_CLICKED` to `LV_EVENT_SHORT_CLICKED` — otherwise the click bubbling on release would double-fire after a long press. Verified at compile, on-device confirmation pending.
+- **Attribute subscription path** uses `api::global_api_server->subscribe_home_assistant_state(eid, optional<string>(attr), lambda)` directly, not the `CustomAPIDevice` template wrapper. The wrapper only accepts a member function pointer, which would mean writing N near-identical setter methods (one per attribute name). Going through the api_server lets one lambda capture `(entity_idx, attr_name)` and dispatch into a single `on_attr_` sink. Shared scaffolding with P7e (HA `icon` attribute).
+- **Subscription count is the main risk.** A `light` adds 6 attrs (brightness, color_temp_kelvin, min/max_color_temp_kelvin, supported_color_modes, color_mode); `climate` adds 6; `media_player` 3; etc. For an 88-entity config with ~30 controllable entities, that's roughly 80–120 extra subscriptions on top of the 88 state subs. Within HA native API limits but logged at `setup()` so a regression is visible.
+- **Sticky modal during edit.** `on_attr_` updates `Entity::attrs` but deliberately does not re-render the open detail modal. Values are snapshotted at `open_detail_` time, so a mid-edit HA push doesn't yank the slider out from under the user. Apply / Cancel / bg-tap ends the edit; the next open picks up the latest attrs.
+- **No spinbox/roller/arc.** All numeric controls are `lv_slider` and all option pickers are `lv_dropdown`. Single new LVGL widget enable (`LV_USE_DROPDOWN=1`). Sliders fake non-integer ranges by scaling: store as `int = value / step`, draw the scaled label, send `value * step` on Apply. Climate target temp / number value use this for 0.1 / 0.5 step values.
+- **Service-call data is `map<string, string>`.** `volume_level` → `"0.45"`, `temperature` → `"21.5"`, etc. — formatted via `snprintf("%.2f"/"%.1f")`. HA service handlers coerce strings to numerics on their side; no client-side type juggling.
+- **Apply pattern per domain.** Light: switch off → `light.turn_off`; switch on → `light.turn_on { brightness_pct, color_temp_kelvin }` with both keys only if their sliders are present. Climate: unconditionally fires both `climate.set_hvac_mode` and `climate.set_temperature` — HA tolerates redundant calls, and tracking "did the user touch this widget" added complexity for no real win. Media: volume_set on Apply. Number / select / fan / cover: one service each.
+- **Immediate (non-Apply) buttons** for media transport (prev / play_pause / next / mute), cover transport (open / stop / close), fan off. These fire on `LV_EVENT_CLICKED` directly — no Apply commit needed. Mute reads `is_volume_muted` attribute and inverts so a single tap toggles.
+- **Cover position slider is conditional** on `current_position` being non-null. If the cover only reports `open/closed`, the slider is replaced by a "Position not reported" label and only the three transport buttons are usable.
+- **`-fno-exceptions` in ESP-IDF** broke an initial `try { std::stof } catch` pair in the attribute helpers. Replaced with `strtof` + `end == start` failure check. Worth remembering for any future helper that parses HA-supplied numerics.
+- **Build flag added**: `-DLV_USE_DROPDOWN=1` in `boards/waveshare-2.16.yaml`. Runtime widget construction skips ESPHome's YAML-driven LV_USE_* detection (P6 pattern). Flash impact ~5 KB.
+- **Compile clean** against ESPHome 2026.5.1; firmware 1173 KB / 14.4 % flash, 50 KB / 15.4 % RAM. On-device verification owed before flipping the P7d status to ✅ in the table.
 
 ### 2026-05-28 — P7c entity control + per-domain rendering (code complete, compile clean)
 
