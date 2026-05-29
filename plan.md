@@ -57,15 +57,15 @@ firmware when HA is the one silently rejecting calls.
 | 5 | Static HA entity model (MVP) | ✅ | verified 2026-05-28: 88 entity subscriptions arrived within ~1.5 s of HA connect, states match HA |
 | 6 | LVGL UI: area carousel + entity scroller | ✅ | verified 2026-05-28: tileview swipe, vertical scroll, tap-toggle, area picker modal all live; touch transform reset to no-swap/no-mirror |
 | 7a | Polish round 1 (clock, settings tile, splash, tap feedback) | ✅ | verified 2026-05-28; battery + RTC deferred |
-| 7b | Polish round 2 (header layout, battery + Wi-Fi icons, Apply/Cancel in settings) | 🟡 | code complete 2026-05-28; awaiting on-device verification |
-| 7c | Entity control: explicit on/off + per-domain update operations | 🟡 | code complete 2026-05-28; awaiting on-device verification |
-| 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | 🟡 | code complete 2026-05-29; awaiting on-device verification |
-| 7e | Per-entity icons (left of friendly name) | ⬜ | v1: YAML override → domain default → fallback (zero new subs); baked MDI subset. HA `icon` attr deferred to P9 batched sensor |
+| 7b | Polish round 2 (header layout, battery + Wi-Fi icons, Apply/Cancel in settings) | ✅ | verified on-device 2026-05-29 |
+| 7c | Entity control: explicit on/off + per-domain update operations | ✅ | verified on-device 2026-05-29 (tap-toggle live after the P7d attr-sub burst was disabled) |
+| 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | ✅ | verified on-device 2026-05-29; live-attr modal preload parked → P9 (see Post-P7 TODO) |
+| 7e | Per-entity icons (left of friendly name) | ✅ | v1: YAML override → domain default → fallback (zero new subs); baked MDI subset. HA `icon` attr deferred to P9 batched sensor. On-device verified |
 | 7f | Per-entity tap-confirmation guard | ⬜ | `confirm: true` in YAML → short-tap opens modal instead of firing action |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
-**Last updated:** 2026-05-29 (P7d code complete).
+**Last updated:** 2026-05-29 (P7b–P7e verified on-device; next: P7f tap-confirm guard).
 
 ---
 
@@ -377,7 +377,7 @@ substitutions / Jinja, not at runtime.
 
 ## Phase 7b — Polish round 2 (header reflow + status icons + settings buttons)
 
-**Status:** 🟡 code complete 2026-05-28 · target tag: `p7b-polish`
+**Status:** ✅ done · verified on-device 2026-05-29 · target tag: `p7b-polish`
 
 **Goal:** Rework the header strip into a useful status bar and give the settings tile real commit semantics.
 
@@ -420,7 +420,7 @@ Target (P7b):
 
 ## Phase 7c — Entity control: explicit on/off + per-domain rendering + per-domain dispatch
 
-**Status:** 🟡 code complete 2026-05-28 · target tag: `p7c-controls`
+**Status:** ✅ done · verified on-device 2026-05-29 · target tag: `p7c-controls`
 
 **Goal:** Two things in one phase, both row-scoped:
 1. **Dispatch:** tighten the tap action per domain — explicit on/off where state is known, real services for action domains (scene/script/automation/button) and lock.
@@ -503,7 +503,7 @@ Anything that needs a value picker, slider, dropdown, or multi-button transport 
 
 ## Phase 7d — Per-entity detail / popup view
 
-**Status:** 🟡 code complete 2026-05-29 · target tag: `p7d-detail`
+**Status:** ✅ done · verified on-device 2026-05-29 (live-attr preload parked → P9) · target tag: `p7d-detail`
 
 **Goal:** Give domains that need more than a binary tap their own control surface. Long-press an entity row → a shared modal opens, populated by a per-domain builder. Short-tap stays as the P7c row-level action (dispatch for binaries + action domains, no-op-with-log for the P7d-bound domains); the modal is strictly opt-in via long-press.
 
@@ -592,7 +592,7 @@ Already on, no flag change needed:
 
 ## Phase 7e — Per-entity icons (left of friendly name)
 
-**Status:** ⬜ not started · target tag: `p7e-icons`
+**Status:** ✅ done · on-device verified · target tag: `p7e-icons`
 
 **Goal:** Show the entity's chosen icon to the left of `friendly_name` on every row. Sourced from a YAML override or a compile-time domain default. **No live HA `icon` attribute subscription in v1** — see the connect-time TX-saturation lesson below.
 
@@ -929,6 +929,16 @@ Modal infrastructure (per-domain widget builders, Apply dispatch, sticky-edit se
 ## Session notes & decisions log
 
 > Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-29 — P7e per-entity icons (on-device verified ✅)
+
+- **Shipped v1 with ZERO new subscriptions** — deliberately dropped the HA `icon` attribute tier the original plan called for. Subscribing `icon` per entity at connect would re-trigger the exact TX-saturation failure logged below (P7d): ~100 icon subs on top of 88 state subs, silent service-call death. Icons resolve from YAML `icon: mdi:foo` override → compile-time domain default → fallback glyph, all client-side. Live HA-sourced icons deferred to the P9 batched template sensor (one sub, JSON payload).
+- **Glyphs are generated, never hand-typed.** `tools/build-mdi-glyphs.py` fetches `@mdi/font@7.4.47` CSS, resolves names→PUA codepoints, and emits BOTH `components/ha_panel/mdi_icons.h` (C++ name→cp table + domain-default map + fallback) and `packages/mdi-font.yaml` (the `font:` block with the baked glyph list). Both from the same `ICON_NAMES`/`DOMAIN_ICON` source so the lookup table and the baked glyphs can't drift. Script aborts if any name doesn't exist in MDI — 72 glyphs resolved clean.
+- **Font→C++ bridge gotcha.** An ESPHome `font::Font` only exposes `get_lv_font()` (and populates its `lv_font_`) when `USE_LVGL_FONT` is defined, which only happens if the font is *referenced in lvgl config*. Our UI is built in C++, so nothing referenced it → would not compile. Fix: a hidden 0-size anchor label in `packages/lvgl-ui.yaml` with `text_font: mdi_icons`. That forces the define + links the glyph data; ha_panel reads the font back via a `set_mdi_font()` setter (codegen `cv.use_id(font.Font)`), no symbol-name guessing.
+- **Layout:** icon `lv_label` (MDI font, white) at `LEFT_MID +12`; friendly name shifts `+12→+48`, width `280→240`. If no `mdi_font` configured, `resolve_icon_` returns empty and the row keeps the pre-P7e flush-left layout — graceful degrade.
+- **Flash cost:** firmware 14.7 % (1.20 MB / 8 MB) with 72 glyphs baked at size 24, bpp 4. Comfortable headroom.
+- **Build flake (not P7e):** first link died on `libwpa_supplicant.a ... cannot read contents of section .xtensa.info` — a corrupt prebuilt IDF archive from a *concurrent build in another CLI*, not a code error (C++ had already compiled clean). Clean re-link succeeded. Watch for this any time two builds touch `.pioenvs` at once.
+- **On-device: confirmed ✅** — glyphs render clean (no tofu), icon column reads well. Phase done. Live HA-`icon` source still the one parked item, intentionally deferred to P9.
 
 ### 2026-05-29 — P7d on-device: attribute-sub burst saturates TX path
 

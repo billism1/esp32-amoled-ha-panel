@@ -9,6 +9,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/string_ref.h"
 #include "esphome/components/api/custom_api_device.h"
+#include "esphome/components/font/font.h"
 
 #include "lvgl.h"
 
@@ -38,6 +39,14 @@ struct Entity {
   // seen string). Populated as HA pushes updates via attribute subscriptions.
   // Shared scaffolding with P7e (HA icon attribute).
   std::map<std::string, std::string> attrs;
+  // P7e: optional "mdi:foo" override from YAML. Empty = resolve from domain.
+  std::string icon_override;
+  // Cached UTF-8 glyph for the icon column. v1 resolution (override → domain
+  // default → fallback) never changes at runtime, so resolve once on first
+  // render. The HA-`icon` attribute tier (P9 batched sensor) will invalidate
+  // this when live icons land.
+  mutable std::string icon_resolved_;
+  mutable bool icon_cached_{false};
 };
 
 struct Area {
@@ -54,7 +63,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
 
   // Codegen-time API.
   void add_area(const std::string &name);
-  void add_entity(const std::string &entity_id, const std::string &friendly_name);
+  void add_entity(const std::string &entity_id, const std::string &friendly_name,
+                  const std::string &icon_override = "");
+  // P7e: MDI glyph font for the per-entity icon column. nullptr → icons off,
+  // rows fall back to the pre-P7e name-at-left layout.
+  void set_mdi_font(font::Font *f) { this->mdi_font_ = f; }
 
   // Programmatic action (tests / future automations).
   bool tap(size_t area_idx, size_t entity_idx);
@@ -91,6 +104,17 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   bool tap_entity_(size_t entity_idx);
   static std::string extract_domain_(const std::string &entity_id);
   static RenderClass render_class_for_(const std::string &domain);
+
+  // P7e icon resolution. resolve_icon_ implements the v1 chain (override →
+  // domain default → fallback) and caches the UTF-8 glyph on the Entity.
+  // Returns empty string when no MDI font is configured (icons disabled).
+  const std::string &resolve_icon_(const Entity &e) const;
+  // mdi name (no "mdi:" prefix) → codepoint, 0 if not in the baked subset.
+  static uint32_t mdi_codepoint_(const std::string &name);
+  // domain → default mdi name, nullptr if domain has no default.
+  static const char *domain_default_icon_(const std::string &domain);
+  // Encode a Unicode codepoint as a UTF-8 std::string (MDI glyphs are 4-byte).
+  static std::string utf8_encode_(uint32_t cp);
   // P7d: which domains expose a long-press detail modal.
   static bool has_detail_(const std::string &domain);
 
@@ -191,10 +215,16 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // for everything else. Renamed from badges_by_entity_ since it's no longer
   // always a label.
   std::vector<lv_obj_t *> widgets_by_entity_;    // [entity_idx]
+  // P7e: per-entity left-side icon label (mdi_font glyph). nullptr when icons
+  // are disabled (no mdi_font) or for the rare row that skipped one.
+  std::vector<lv_obj_t *> icons_by_entity_;      // [entity_idx]
   // P7c follow-up: BINARY_SWITCH rows only. When state == unavailable/unknown
   // we hide the switch (which would otherwise look like a normal "off") and
   // show this red text label in its slot. nullptr for non-binary rows.
   std::vector<lv_obj_t *> unavail_labels_by_entity_;
+
+  // P7e: MDI glyph font for the icon column. nullptr → icons disabled.
+  font::Font *mdi_font_{nullptr};
 
   std::function<void(uint8_t)> brightness_setter_;
   std::function<void(uint8_t)> brightness_committer_;

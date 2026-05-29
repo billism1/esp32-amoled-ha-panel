@@ -18,14 +18,22 @@
 #
 # Friendly names are optional but recommended; the panel falls back to the
 # entity_id if not provided.
+#
+# Icons (P7e): each row shows an icon left of the friendly name. By default it
+# comes from the entity's domain (light → bulb, lock → lock, etc). Add an
+# optional `icon: mdi:foo` to override per entity. The glyph must be in the
+# baked subset — see tools/build-mdi-glyphs.py to add new ones. Unknown names
+# fall back to a generic glyph and log once.
 
 ha_panel:
   id: ha_panel_id      # referenced by id(ha_panel_id) in lambdas (clock, api triggers, brightness setter)
+  mdi_font: mdi_icons  # P7e: font id from packages/mdi-font.yaml (icon column)
   areas:
     - name: "Living Room"
       entities:
         - entity_id: light.living_room_lamp
           friendly_name: "Couch lamp"
+          icon: mdi:floor-lamp   # optional per-entity override
         - entity_id: switch.tv_power
           friendly_name: "TV"
         - entity_id: sensor.living_room_temperature

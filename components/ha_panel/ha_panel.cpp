@@ -1,10 +1,13 @@
 #include "ha_panel.h"
+#include "mdi_icons.h"
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
+#include <set>
 
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
@@ -24,7 +27,8 @@ void HAPanel::add_area(const std::string &name) {
   this->areas_.push_back(std::move(a));
 }
 
-void HAPanel::add_entity(const std::string &entity_id, const std::string &friendly_name) {
+void HAPanel::add_entity(const std::string &entity_id, const std::string &friendly_name,
+                         const std::string &icon_override) {
   if (this->areas_.empty()) {
     ESP_LOGE(TAG, "add_entity called before any area — codegen bug");
     return;
@@ -34,6 +38,7 @@ void HAPanel::add_entity(const std::string &entity_id, const std::string &friend
   e.friendly_name = friendly_name.empty() ? entity_id : friendly_name;
   e.domain = HAPanel::extract_domain_(entity_id);
   e.render_class = HAPanel::render_class_for_(e.domain);
+  e.icon_override = icon_override;
   size_t idx = this->entities_.size();
   this->entities_.push_back(std::move(e));
   this->areas_.back().entity_indices.push_back(idx);
@@ -154,6 +159,85 @@ RenderClass HAPanel::render_class_for_(const std::string &d) {
   return RenderClass::READ_ONLY_TEXT;
 }
 
+// ---------- P7e icon resolution ----------
+
+uint32_t HAPanel::mdi_codepoint_(const std::string &name) {
+  for (int i = 0; i < MDI_GLYPH_COUNT; i++) {
+    if (name == MDI_GLYPHS[i].name)
+      return MDI_GLYPHS[i].codepoint;
+  }
+  return 0;
+}
+
+const char *HAPanel::domain_default_icon_(const std::string &domain) {
+  for (int i = 0; i < MDI_DOMAIN_DEFAULT_COUNT; i++) {
+    if (domain == MDI_DOMAIN_DEFAULTS[i].domain)
+      return MDI_DOMAIN_DEFAULTS[i].icon;
+  }
+  return nullptr;
+}
+
+std::string HAPanel::utf8_encode_(uint32_t cp) {
+  std::string out;
+  if (cp < 0x80) {
+    out.push_back((char) cp);
+  } else if (cp < 0x800) {
+    out.push_back((char) (0xC0 | (cp >> 6)));
+    out.push_back((char) (0x80 | (cp & 0x3F)));
+  } else if (cp < 0x10000) {
+    out.push_back((char) (0xE0 | (cp >> 12)));
+    out.push_back((char) (0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back((char) (0x80 | (cp & 0x3F)));
+  } else {
+    out.push_back((char) (0xF0 | (cp >> 18)));
+    out.push_back((char) (0x80 | ((cp >> 12) & 0x3F)));
+    out.push_back((char) (0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back((char) (0x80 | (cp & 0x3F)));
+  }
+  return out;
+}
+
+const std::string &HAPanel::resolve_icon_(const Entity &e) const {
+  if (e.icon_cached_)
+    return e.icon_resolved_;
+  e.icon_cached_ = true;
+
+  // No MDI font configured → icons disabled. Empty result, caller skips the
+  // icon column and keeps the legacy name-at-left layout.
+  if (this->mdi_font_ == nullptr) {
+    e.icon_resolved_.clear();
+    return e.icon_resolved_;
+  }
+
+  // Step 1: YAML override. Accept "mdi:foo" or bare "foo".
+  std::string name;
+  if (!e.icon_override.empty()) {
+    name = e.icon_override;
+    if (name.rfind("mdi:", 0) == 0)
+      name.erase(0, 4);
+  } else {
+    // Step 2: domain default.
+    const char *d = HAPanel::domain_default_icon_(e.domain);
+    if (d != nullptr)
+      name = d;
+  }
+
+  uint32_t cp = name.empty() ? 0 : HAPanel::mdi_codepoint_(name);
+  if (cp == 0) {
+    // Step 3: fallback glyph. Log once per unresolved name so the baked subset
+    // can be grown (rerun tools/build-mdi-glyphs.py) without flooding the log.
+    static std::set<std::string> logged;
+    std::string key = name.empty() ? e.domain : name;
+    if (logged.insert(key).second) {
+      ESP_LOGW(TAG, "no baked MDI glyph for '%s' (%s) — using fallback",
+               key.c_str(), e.entity_id.c_str());
+    }
+    cp = MDI_FALLBACK_CP;
+  }
+  e.icon_resolved_ = HAPanel::utf8_encode_(cp);
+  return e.icon_resolved_;
+}
+
 // ---------- setup / dump ----------
 
 void HAPanel::setup() {
@@ -186,6 +270,9 @@ void HAPanel::setup() {
   this->attrs_subscribed_.assign(this->entities_.size(), false);
   this->widgets_by_entity_.assign(this->entities_.size(), nullptr);
   this->unavail_labels_by_entity_.assign(this->entities_.size(), nullptr);
+  this->icons_by_entity_.assign(this->entities_.size(), nullptr);
+  ESP_LOGCONFIG(TAG, "P7e icon column %s",
+                this->mdi_font_ != nullptr ? "enabled (mdi_font set)" : "disabled (no mdi_font)");
   this->build_ui_();
 }
 
@@ -442,8 +529,12 @@ bool HAPanel::tap(size_t area_idx, size_t entity_idx) {
 static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_data,
                                  lv_event_cb_t cb, uintptr_t entity_idx,
                                  lv_obj_t **out_widget,
-                                 lv_obj_t **out_unavail_label) {
+                                 lv_obj_t **out_unavail_label,
+                                 const char *icon_utf8,
+                                 const lv_font_t *mdi_lv_font,
+                                 lv_obj_t **out_icon) {
   *out_unavail_label = nullptr;
+  *out_icon = nullptr;
   lv_obj_t *btn = lv_button_create(parent);
   lv_obj_set_width(btn, LV_PCT(100));
   lv_obj_set_height(btn, 60);
@@ -462,13 +553,28 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
   // release; SHORT_CLICKED only fires when released before long_press_time.
   lv_obj_add_event_cb(btn, cb, LV_EVENT_SHORT_CLICKED, user_data);
 
+  // P7e: per-entity icon at the left edge, drawn in the MDI font. Only when a
+  // glyph resolved AND the font is available — otherwise the row keeps the
+  // pre-P7e layout (name flush left, full 280 px width).
+  const bool have_icon = icon_utf8 != nullptr && icon_utf8[0] != '\0' &&
+                         mdi_lv_font != nullptr;
+  if (have_icon) {
+    lv_obj_t *icon = lv_label_create(btn);
+    lv_label_set_text(icon, icon_utf8);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(icon, mdi_lv_font, 0);
+    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 12, 0);
+    *out_icon = icon;
+  }
+
   lv_obj_t *name = lv_label_create(btn);
   lv_label_set_text(name, e.friendly_name.c_str());
   lv_obj_set_style_text_color(name, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_style_text_font(name, &lv_font_montserrat_18, 0);
-  lv_obj_align(name, LV_ALIGN_LEFT_MID, 12, 0);
-  // Trim name width to 280 px (was 300) to leave room for a ~50 px switch.
-  lv_obj_set_width(name, 280);
+  // With an icon: shift name right (+48) and trim width to 240 so the ellipsis
+  // still lands before the right-side widget. Without: legacy +12 / 280 px.
+  lv_obj_align(name, LV_ALIGN_LEFT_MID, have_icon ? 48 : 12, 0);
+  lv_obj_set_width(name, have_icon ? 240 : 280);
   lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
 
   // P7c: right-side widget varies by render class.
@@ -774,12 +880,19 @@ void HAPanel::build_ui_() {
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
 
+    // P7e: resolve the MDI font once (get_lv_font is cheap but the null check
+    // belongs out of the per-row loop). nullptr when no mdi_font configured.
+    const lv_font_t *mdi_lv_font =
+        this->mdi_font_ != nullptr ? this->mdi_font_->get_lv_font() : nullptr;
     for (size_t ei : this->areas_[ai].entity_indices) {
       Entity &e = this->entities_[ei];
       lv_obj_t *widget = nullptr;
       lv_obj_t *unavail = nullptr;
+      lv_obj_t *icon = nullptr;
+      const std::string &glyph = this->resolve_icon_(e);
       lv_obj_t *btn = make_entity_row(list, e, this, &HAPanel::on_entity_row_clicked_,
-                                      (uintptr_t) ei, &widget, &unavail);
+                                      (uintptr_t) ei, &widget, &unavail,
+                                      glyph.c_str(), mdi_lv_font, &icon);
       // P7d: long-press → detail modal, only for domains that have one.
       if (HAPanel::has_detail_(e.domain)) {
         lv_obj_add_event_cb(btn, &HAPanel::on_entity_row_long_pressed_,
@@ -787,6 +900,7 @@ void HAPanel::build_ui_() {
       }
       this->widgets_by_entity_[ei] = widget;
       this->unavail_labels_by_entity_[ei] = unavail;
+      this->icons_by_entity_[ei] = icon;
       this->rebuild_entity_row_(ei);
     }
   }

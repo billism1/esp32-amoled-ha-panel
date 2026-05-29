@@ -63,4 +63,7 @@ packages:
   base: !include packages/base.yaml
   idle: !include packages/idle.yaml
   ha_entities: !include packages/ha-entities.yaml
+  # P7e: baked MDI glyph subset (GENERATED — tools/build-mdi-glyphs.py). Must
+  # load before lvgl-ui so the mdi_icons font id exists for the anchor label.
+  mdi_font: !include packages/mdi-font.yaml
   lvgl_ui: !include packages/lvgl-ui.yaml
