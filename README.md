@@ -21,6 +21,29 @@ behaviour live in shared packages.
 > **Status:** scaffolding stage. See [plan.md](plan.md) for the phased build
 > plan and what is/isn't working yet.
 
+> ### ⚠️ Required HA setup after first flash
+>
+> When the panel registers in Home Assistant, HA defaults the per-device
+> permission **"Allow the device to perform Home Assistant actions"** to
+> **OFF** for security (since HA 2024.6). With it off, every tap on the
+> panel will appear to work on-device (you'll see `tap … → homeassistant.…`
+> in the firmware log) but **nothing will happen in HA**, and the HA log
+> will show one rejection line per tap:
+>
+> ```
+> AMOLED Panel: Service call homeassistant.turn_on: with data
+> {'entity_id': 'light.foo'} rejected; If you trust this device …
+> enable this functionality in the options flow
+> ```
+>
+> To enable it: **HA → Settings → Devices & Services → ESPHome →**
+> click the `ha-amoled-panel` device → **Configure** (gear icon) →
+> toggle **"Allow the device to perform Home Assistant actions" ON** →
+> Submit.
+>
+> Per-device, per-config-entry. Re-add or migrating to a new HA install
+> resets it. Any other ESPHome device in this repo will need the same flip.
+
 ---
 
 ## Target hardware (first board)
@@ -90,7 +113,11 @@ pipx install esphome
 # 5. Compile + flash over USB (first time)
 esphome run ha-amoled-panel.yaml
 
-# 6. Subsequent updates flash OTA automatically over Wi-Fi
+# 6. In HA: Settings → Devices & Services → ESPHome → ha-amoled-panel
+#    → Configure → enable "Allow the device to perform Home Assistant actions"
+#    Without this every tap is rejected silently by HA. See the warning above.
+
+# 7. Subsequent updates flash OTA automatically over Wi-Fi
 ```
 
 ---

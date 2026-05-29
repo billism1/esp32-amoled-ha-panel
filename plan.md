@@ -12,6 +12,35 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 
 ---
 
+## ⚠️ HA permission flag — flip this or nothing works
+
+**Every time** the panel is added to a Home Assistant install (first flash,
+HA migration, device re-add), HA defaults the per-device permission
+**"Allow the device to perform Home Assistant actions"** to **OFF**
+(default since HA 2024.6). With it off, the panel's firmware log shows
+taps dispatching correctly (`tap … → homeassistant.turn_on`) but
+**nothing happens in HA**. HA log shows one rejection per tap:
+
+```
+AMOLED Panel: Service call homeassistant.turn_on: with data
+{'entity_id': 'light.foo'} rejected; If you trust this device and want
+to allow access for it to make Home Assistant service calls, you can
+enable this functionality in the options flow
+```
+
+Fix: **HA → Settings → Devices & Services → ESPHome →** click the
+`ha-amoled-panel` device → **Configure** → toggle the permission **ON** →
+Submit. Per-device, per-config-entry — has to be done for each ESPHome
+device on the install.
+
+Discovered after P7c verify (2026-05-28): P6's earlier on-device tap
+verification stopped working without any code change. Permission had been
+flipped on once and silently reset, probably by a HA update or re-add.
+Capturing here so future-me doesn't waste another half-hour chasing the
+firmware when HA is the one silently rejecting calls.
+
+---
+
 ## Status overview
 
 > **Legend:** ⬜ not started · 🟡 in progress · 🔴 blocked · ✅ done
