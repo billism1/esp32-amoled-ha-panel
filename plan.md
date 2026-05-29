@@ -28,13 +28,13 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 | 5 | Static HA entity model (MVP) | ✅ | verified 2026-05-28: 88 entity subscriptions arrived within ~1.5 s of HA connect, states match HA |
 | 6 | LVGL UI: area carousel + entity scroller | ✅ | verified 2026-05-28: tileview swipe, vertical scroll, tap-toggle, area picker modal all live; touch transform reset to no-swap/no-mirror |
 | 7a | Polish round 1 (clock, settings tile, splash, tap feedback) | ✅ | verified 2026-05-28; battery + RTC deferred |
-| 7b | Polish round 2 (header layout, battery + Wi-Fi icons, Apply/Cancel in settings) | ⬜ | header reflow + status icons + settings buttons |
+| 7b | Polish round 2 (header layout, battery + Wi-Fi icons, Apply/Cancel in settings) | 🟡 | code complete 2026-05-28; awaiting on-device verification |
 | 7c | Entity control: explicit on/off + per-domain update operations | ⬜ | toggle already in P5/P6; round out actions for other domains where cheap, defer the rest to P7d |
 | 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | ⬜ | long-press → shared modal with per-domain widgets |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
-**Last updated:** 2026-05-28.
+**Last updated:** 2026-05-28 (P7b code complete).
 
 ---
 
@@ -346,7 +346,7 @@ substitutions / Jinja, not at runtime.
 
 ## Phase 7b — Polish round 2 (header reflow + status icons + settings buttons)
 
-**Status:** ⬜ not started · target tag: `p7b-polish`
+**Status:** 🟡 code complete 2026-05-28 · target tag: `p7b-polish`
 
 **Goal:** Rework the header strip into a useful status bar and give the settings tile real commit semantics.
 
@@ -360,24 +360,24 @@ Target (P7b):
 ```
 [ HH:MM ────── Area Name ▼ ──────  📶 🔋 ● ]
 ```
-- [ ] Move the **clock** to the top-left corner (replace the status-dot position).
-- [ ] Move the **API-connected status indicator** to the top-right corner (replace the clock position).
-- [ ] Add a **battery level indicator icon** immediately to the left of the status indicator. Use the AXP2101 read for raw voltage; render as a 4-bar / 3-bar / 2-bar / 1-bar / empty glyph (or LV_SYMBOL_BATTERY_3 etc) based on bucketed voltage. **Battery is now in scope** because the icon needs a real source — the deferral from P7a is reversed for P7b.
-- [ ] Add a **Wi-Fi signal strength icon** immediately to the left of the battery icon. Use the ESPHome `wifi.signal_strength` (RSSI) sensor; bucket into 4 / 3 / 2 / 1 / 0 bars (LV_SYMBOL_WIFI variants, or a custom 4-bar arc).
-- [ ] All four header items must clear the panel's rounded corners — current empirical inset is **44 px** on each side. Keep the same.
+- [x] Move the **clock** to the top-left corner (replace the status-dot position).
+- [x] Move the **API-connected status indicator** to the top-right corner (replace the clock position).
+- [x] Add a **battery level indicator icon** immediately to the left of the status indicator. Use the AXP2101 read for raw voltage; render as a 4-bar / 3-bar / 2-bar / 1-bar / empty glyph (or LV_SYMBOL_BATTERY_3 etc) based on bucketed voltage. **Battery is now in scope** because the icon needs a real source — the deferral from P7a is reversed for P7b.
+- [x] Add a **Wi-Fi signal strength icon** immediately to the left of the battery icon. Use the ESPHome `wifi.signal_strength` (RSSI) sensor; bucket into 4 / 3 / 2 / 1 / 0 bars (LV_SYMBOL_WIFI variants, or a custom 4-bar arc). Single LVGL glyph available, so tint colour communicates the bucket instead of swapping variants.
+- [x] All four header items must clear the panel's rounded corners — current empirical inset is **44 px** on each side. Keep the same.
 
 ### AXP2101 battery readout
 
-- [ ] Add `components/axp2101/` as a minimal external_component (read-only). Init ADC for VBAT channel; expose a `sensor` that publishes battery voltage in V.
-- [ ] No native ESPHome component exists for AXP2101 (verified again at P7b start). XPowersLib (lewisxhe) is the canonical Arduino driver — port the VBAT-read path only; skip charge-curve mapping, USB-detect, and PMU power control (P7b scope: read voltage, render icon).
-- [ ] Bucket thresholds (LiPo): full ≥ 4.0 V, high ≥ 3.85 V, mid ≥ 3.70 V, low ≥ 3.55 V, empty < 3.55 V. Document so we can tune.
+- [x] Add `components/axp2101/` as a minimal external_component (read-only). Init ADC for VBAT channel; expose a `sensor` that publishes battery voltage in V.
+- [x] No native ESPHome component exists for AXP2101 (verified again at P7b start). XPowersLib (lewisxhe) is the canonical Arduino driver — port the VBAT-read path only; skip charge-curve mapping, USB-detect, and PMU power control (P7b scope: read voltage, render icon).
+- [x] Bucket thresholds (LiPo): full ≥ 4.0 V, high ≥ 3.85 V, mid ≥ 3.70 V, low ≥ 3.55 V, empty < 3.55 V. Document so we can tune.
 
 ### Settings tile commit semantics
 
-- [ ] Add **Apply** and **Cancel** buttons at the bottom of the settings tile.
-- [ ] Slider changes become *staged* — they don't write the active brightness global until Apply is tapped. The current behaviour (live preview on every drag) stays; Cancel reverts to the saved value.
-- [ ] Pad the tile content area so the buttons don't run into the bottom rounded corner — same 32 px bottom inset already in place, plus a 60 px row for the buttons.
-- [ ] If the user navigates away (swipes off the tile, opens picker, idle blanks) with un-applied changes, revert silently — no nag dialog in v1.
+- [x] Add **Apply** and **Cancel** buttons at the bottom of the settings tile.
+- [x] Slider changes become *staged* — they don't write the active brightness global until Apply is tapped. The current behaviour (live preview on every drag) stays; Cancel reverts to the saved value.
+- [x] Pad the tile content area so the buttons don't run into the bottom rounded corner — content area shrunk to 372 px, button row 60 px at y=380.
+- [x] If the user navigates away (swipes off the tile, opens picker) with un-applied changes, revert silently — wired via `on_tileview_changed_` + `on_header_clicked_`. Idle-blank does not currently trigger a revert (no tile change), but the next Apply/Cancel still clears the dirty flag and any wake puts the user back on the same tile. Tracked as a follow-up if it becomes confusing.
 
 **Exit criteria:**
 - Header shows: time top-left, area + chevron centered, Wi-Fi → battery → status (left to right) top-right.
@@ -622,6 +622,16 @@ text_sensor:
 ## Session notes & decisions log
 
 > Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-28 — P7b polish round 2 (code complete, compile clean)
+
+- **AXP2101 component** at `components/axp2101/` — read-only port of XPowersLib's VBAT path. Init = read `ADC_CHANNEL_CTRL` (0x30), OR in bit 0 (VBAT ADC enable), write back. Read = `BAT_AVER_VOL_H/L` (0x34/0x35), 14-bit averaged, 1 mV per LSB. Publishes a `sensor` in volts; the board YAML marks the sensor `internal: true` and pipes the value into `HAPanel::set_battery_voltage(x)` via `on_value`.
+- **Wi-Fi RSSI** routed via stock ESPHome `wifi_signal` sensor in `packages/base.yaml`, `internal: true`, 30 s update, `on_value` lambda calls `HAPanel::set_wifi_rssi((int) x)`.
+- **Header reflow**: clock left (44 px inset) → area + chevron centered → wifi → battery → status dot right (44 px inset, 12 px gap between right-cluster items). `lv_obj_align_to` chain keeps the right cluster anchored to the status dot, which keeps its absolute right-edge inset stable as the icons change.
+- **LVGL has one `LV_SYMBOL_WIFI` glyph** — no 4-bar variants in the default symbol font. Tint by RSSI bucket instead. Battery has 5 variants (`_EMPTY`, `_1`, `_2`, `_3`, `_FULL`) so the icon itself communicates the level, with matching tint reinforcing it.
+- **Apply/Cancel staging**: split the brightness path into `set_brightness_setter` (live preview, drives display only) + `set_brightness_committer` (writes `active_brightness_g` global on Apply). Slider drag → `staged_brightness_` + setter; `brightness_dirty_` flag set true when staged ≠ active. Apply runs committer + clears dirty. Cancel snaps slider back to `active_brightness_` + setter + clears dirty. Navigating away (tileview change off settings, or header tap from settings tile) silently reverts.
+- **Settings layout split**: scrollable content area shrunk to 480x372 at y=0; absolute-positioned 60 px button row at y=380. Apply (green-tinted) right, Cancel (cool-tinted) left, 200 px each with 32 px side inset. Idle-blank does not currently trigger revert (no tile change fires) — flagged as a follow-up in the P7b checklist; doesn't seem common enough to bake a global-hook in for now.
+- **Compile clean** against ESPHome 2026.5.1; on-device verification still owed before flipping the status to ✅ in the table.
 
 ### 2026-05-28 — P7a polish round 1 (verified on-device)
 

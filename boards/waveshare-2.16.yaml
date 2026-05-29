@@ -96,12 +96,12 @@ i2c:
     frequency: 400kHz
     scan: true
 
-# --- Touch + IMU (vendored components) ---
+# --- Touch + IMU + PMU (vendored components) ---
 external_components:
   - source:
       type: local
       path: components
-    components: [cst9220, qmi8658, ha_panel]
+    components: [cst9220, qmi8658, axp2101, ha_panel]
 
 # --- IMU: QMI8658 (P4 — idle wake on motion) ---
 # Hardware INT line is not routed to a free GPIO on this board (verified
@@ -121,6 +121,21 @@ qmi8658:
     on_press:
       then:
         - script.execute: notify_input
+
+# --- PMU: AXP2101 (P7b — header battery icon) ---
+# Read-only VBAT via the averaged 14-bit voltage register. Sensor is internal
+# (no HA entity) — feeds the on-panel header icon via on_value lambda.
+axp2101:
+  id: pmu
+  i2c_id: bus_a
+  address: 0x34
+  update_interval: 30s
+  battery_voltage:
+    id: vbat_v
+    internal: true
+    on_value:
+      then:
+        - lambda: "id(ha_panel_id).set_battery_voltage(x);"
 
 touchscreen:
   - id: main_touchscreen

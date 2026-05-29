@@ -16,8 +16,12 @@ esphome:
     - priority: -100
       then:
         - lambda: |-
+            // P7b: preview setter drives display only (live slider drag).
+            // Commit setter writes the persisted global (Apply only).
             id(ha_panel_id).set_brightness_setter([](uint8_t v) {
               id(amoled_display).set_brightness(v);
+            });
+            id(ha_panel_id).set_brightness_committer([](uint8_t v) {
               id(active_brightness_g) = v;
             });
             id(ha_panel_id).set_active_brightness(id(active_brightness_g));

@@ -49,3 +49,13 @@ ota:
 time:
   - platform: homeassistant
     id: ha_time
+
+# P7b: feed RSSI into the header wifi icon. Internal — no HA entity created.
+sensor:
+  - platform: wifi_signal
+    id: wifi_rssi
+    internal: true
+    update_interval: 30s
+    on_value:
+      then:
+        - lambda: "id(ha_panel_id).set_wifi_rssi((int) x);"

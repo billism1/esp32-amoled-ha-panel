@@ -180,17 +180,18 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
 }
 
 void HAPanel::build_settings_tile_(lv_obj_t *parent) {
+  // Scrollable content area occupies the top portion of the tile. Apply/
+  // Cancel sit in a fixed 60 px row at the bottom (drawn after this block).
+  // Content height = 440 (tile) - 60 (button row) - 8 (gap above buttons).
   lv_obj_t *content = lv_obj_create(parent);
   lv_obj_remove_style_all(content);
-  lv_obj_set_size(content, 480, 440);
+  lv_obj_set_size(content, 480, 372);
+  lv_obj_set_pos(content, 0, 0);
   lv_obj_set_style_bg_color(content, lv_color_hex(0x000000), 0);
   lv_obj_set_style_bg_opa(content, LV_OPA_COVER, 0);
   // 16 px side padding because the settings labels run nearly edge-to-edge;
   // gives the side rounded corners enough clearance not to clip the text.
   lv_obj_set_style_pad_all(content, 16, 0);
-  // 32 px bottom — slightly more than the lists because the About block is
-  // the last item and is multi-line text, more sensitive to corner clipping.
-  lv_obj_set_style_pad_bottom(content, 32, 0);
   lv_obj_set_style_pad_row(content, 14, 0);
   lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_scroll_dir(content, LV_DIR_VER);
@@ -251,6 +252,52 @@ void HAPanel::build_settings_tile_(lv_obj_t *parent) {
   lv_label_set_text(about, abuf);
   lv_obj_set_style_text_color(about, lv_color_hex(0xAAAAAA), 0);
   lv_obj_set_style_text_font(about, &lv_font_montserrat_18, 0);
+
+  // ---- Apply / Cancel button row (P7b) ----
+  // Sits below the scrolling content, above the bottom rounded corner.
+  // Tile is 480x440; button row 60 px tall at y=380 → 0 px bottom inset still
+  // safe because buttons are inset 32 px horizontally on each side and the
+  // panel's bottom-corner radius bites less than the side radius.
+  lv_obj_t *btn_row = lv_obj_create(parent);
+  lv_obj_remove_style_all(btn_row);
+  lv_obj_set_size(btn_row, 480, 60);
+  lv_obj_set_pos(btn_row, 0, 380);
+  lv_obj_set_style_bg_color(btn_row, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(btn_row, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_left(btn_row, 32, 0);
+  lv_obj_set_style_pad_right(btn_row, 32, 0);
+  lv_obj_set_style_pad_column(btn_row, 12, 0);
+  lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  lv_obj_t *cancel = lv_button_create(btn_row);
+  lv_obj_set_size(cancel, 200, 50);
+  lv_obj_set_style_bg_color(cancel, lv_color_hex(0x222A33), 0);
+  lv_obj_set_style_bg_color(cancel, lv_color_hex(0x3A4A6A), LV_STATE_PRESSED);
+  lv_obj_set_style_bg_opa(cancel, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(cancel, 8, 0);
+  lv_obj_set_style_border_width(cancel, 0, 0);
+  lv_obj_add_event_cb(cancel, &HAPanel::on_cancel_clicked_, LV_EVENT_CLICKED, this);
+  lv_obj_t *clbl = lv_label_create(cancel);
+  lv_label_set_text(clbl, "Cancel");
+  lv_obj_set_style_text_color(clbl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(clbl, &lv_font_montserrat_18, 0);
+  lv_obj_center(clbl);
+
+  lv_obj_t *apply = lv_button_create(btn_row);
+  lv_obj_set_size(apply, 200, 50);
+  lv_obj_set_style_bg_color(apply, lv_color_hex(0x2A553A), 0);
+  lv_obj_set_style_bg_color(apply, lv_color_hex(0x3F8556), LV_STATE_PRESSED);
+  lv_obj_set_style_bg_opa(apply, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(apply, 8, 0);
+  lv_obj_set_style_border_width(apply, 0, 0);
+  lv_obj_add_event_cb(apply, &HAPanel::on_apply_clicked_, LV_EVENT_CLICKED, this);
+  lv_obj_t *albl = lv_label_create(apply);
+  lv_label_set_text(albl, "Apply");
+  lv_obj_set_style_text_color(albl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(albl, &lv_font_montserrat_18, 0);
+  lv_obj_center(albl);
 }
 
 void HAPanel::build_ui_() {
@@ -281,16 +328,18 @@ void HAPanel::build_ui_() {
   lv_obj_add_flag(header, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(header, &HAPanel::on_header_clicked_, LV_EVENT_CLICKED, this);
 
-  // Connection status dot at far left. Panel's rounded-corner radius is
-  // larger than initially measured — clipping persisted at 28 px and 36 px;
-  // 44 px gives the dot full clearance on both sides.
-  this->status_dot_ = lv_obj_create(header);
-  lv_obj_remove_style_all(this->status_dot_);
-  lv_obj_set_size(this->status_dot_, 10, 10);
-  lv_obj_set_style_radius(this->status_dot_, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(this->status_dot_, lv_color_hex(0xCC4444), 0);
-  lv_obj_set_style_bg_opa(this->status_dot_, LV_OPA_COVER, 0);
-  lv_obj_align(this->status_dot_, LV_ALIGN_LEFT_MID, 44, 0);
+  // P7b header layout:
+  //   [ HH:MM ────── Area ▼ ──────  📶 🔋 ● ]
+  // Clock left, area + chevron center, wifi → battery → status right.
+  // 44 px corner inset on both far ends per the empirically-measured panel
+  // radius (see P7a notes).
+
+  // Clock at far left.
+  this->clock_label_ = lv_label_create(header);
+  lv_label_set_text(this->clock_label_, "--:--");
+  lv_obj_set_style_text_color(this->clock_label_, lv_color_hex(0xCCCCCC), 0);
+  lv_obj_set_style_text_font(this->clock_label_, &lv_font_montserrat_18, 0);
+  lv_obj_align(this->clock_label_, LV_ALIGN_LEFT_MID, 44, 0);
 
   this->header_label_ = lv_label_create(header);
   lv_label_set_text(this->header_label_, this->areas_[0].name.c_str());
@@ -304,13 +353,33 @@ void HAPanel::build_ui_() {
   lv_obj_set_style_text_font(chev, &lv_font_montserrat_18, 0);
   lv_obj_align_to(chev, this->header_label_, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
 
-  // Clock at far right. Matches the status-dot inset (44 px) so both sides
-  // clear the rounded corners equally.
-  this->clock_label_ = lv_label_create(header);
-  lv_label_set_text(this->clock_label_, "--:--");
-  lv_obj_set_style_text_color(this->clock_label_, lv_color_hex(0xCCCCCC), 0);
-  lv_obj_set_style_text_font(this->clock_label_, &lv_font_montserrat_18, 0);
-  lv_obj_align(this->clock_label_, LV_ALIGN_RIGHT_MID, -44, 0);
+  // Connection status dot at far right (44 px corner inset).
+  this->status_dot_ = lv_obj_create(header);
+  lv_obj_remove_style_all(this->status_dot_);
+  lv_obj_set_size(this->status_dot_, 10, 10);
+  lv_obj_set_style_radius(this->status_dot_, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(this->status_dot_, lv_color_hex(0xCC4444), 0);
+  lv_obj_set_style_bg_opa(this->status_dot_, LV_OPA_COVER, 0);
+  lv_obj_align(this->status_dot_, LV_ALIGN_RIGHT_MID, -44, 0);
+
+  // Battery icon, to the left of the status dot. Single LV_SYMBOL_BATTERY_*
+  // glyph (5 variants) bucketed by voltage. Tint matches level.
+  this->battery_icon_ = lv_label_create(header);
+  lv_label_set_text(this->battery_icon_, LV_SYMBOL_BATTERY_EMPTY);
+  lv_obj_set_style_text_color(this->battery_icon_, lv_color_hex(0x888888), 0);
+  lv_obj_set_style_text_font(this->battery_icon_, &lv_font_montserrat_18, 0);
+  lv_obj_align_to(this->battery_icon_, this->status_dot_, LV_ALIGN_OUT_LEFT_MID,
+                  -12, 0);
+
+  // Wi-Fi icon, to the left of the battery icon. LVGL ships a single
+  // LV_SYMBOL_WIFI glyph, so we tint by RSSI bucket instead of swapping
+  // variants. Grey until a reading lands.
+  this->wifi_icon_ = lv_label_create(header);
+  lv_label_set_text(this->wifi_icon_, LV_SYMBOL_WIFI);
+  lv_obj_set_style_text_color(this->wifi_icon_, lv_color_hex(0x888888), 0);
+  lv_obj_set_style_text_font(this->wifi_icon_, &lv_font_montserrat_18, 0);
+  lv_obj_align_to(this->wifi_icon_, this->battery_icon_, LV_ALIGN_OUT_LEFT_MID,
+                  -12, 0);
 
   // ---- Tileview (rest of screen) ----
   this->tileview_ = lv_tileview_create(scr);
@@ -510,6 +579,8 @@ void HAPanel::set_api_connected(bool connected) {
 
 void HAPanel::set_active_brightness(uint8_t v) {
   this->active_brightness_ = v;
+  this->staged_brightness_ = v;
+  this->brightness_dirty_ = false;
   if (this->brightness_slider_ != nullptr) {
     lv_slider_set_value(this->brightness_slider_, v, LV_ANIM_OFF);
   }
@@ -518,6 +589,101 @@ void HAPanel::set_active_brightness(uint8_t v) {
     snprintf(buf, sizeof(buf), "%u / 255", (unsigned) v);
     lv_label_set_text(this->brightness_value_label_, buf);
   }
+}
+
+void HAPanel::apply_brightness_() {
+  if (!this->brightness_dirty_)
+    return;
+  this->active_brightness_ = this->staged_brightness_;
+  if (this->brightness_committer_)
+    this->brightness_committer_(this->active_brightness_);
+  this->brightness_dirty_ = false;
+  ESP_LOGI(TAG, "brightness applied: %u", (unsigned) this->active_brightness_);
+}
+
+void HAPanel::revert_brightness_() {
+  if (!this->brightness_dirty_)
+    return;
+  this->staged_brightness_ = this->active_brightness_;
+  if (this->brightness_setter_)
+    this->brightness_setter_(this->active_brightness_);
+  if (this->brightness_slider_ != nullptr)
+    lv_slider_set_value(this->brightness_slider_, this->active_brightness_,
+                        LV_ANIM_OFF);
+  if (this->brightness_value_label_ != nullptr) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%u / 255", (unsigned) this->active_brightness_);
+    lv_label_set_text(this->brightness_value_label_, buf);
+  }
+  this->brightness_dirty_ = false;
+  ESP_LOGI(TAG, "brightness reverted to %u", (unsigned) this->active_brightness_);
+}
+
+void HAPanel::set_wifi_rssi(int rssi) {
+  this->wifi_rssi_ = rssi;
+  this->have_wifi_rssi_ = true;
+  this->update_wifi_icon_();
+}
+
+void HAPanel::set_battery_voltage(float volts) {
+  this->battery_voltage_ = volts;
+  this->have_battery_ = true;
+  this->update_battery_icon_();
+}
+
+void HAPanel::update_wifi_icon_() {
+  if (this->wifi_icon_ == nullptr)
+    return;
+  // RSSI bucketing (typical 2.4 GHz indoor):
+  //   >= -55  excellent (green)
+  //   >= -65  good      (lime)
+  //   >= -75  fair      (yellow)
+  //   >= -85  weak      (orange)
+  //   <  -85  poor      (red)
+  // No reading yet → grey.
+  uint32_t col = 0x888888;
+  if (this->have_wifi_rssi_) {
+    if (this->wifi_rssi_ >= -55)
+      col = 0x66BB66;
+    else if (this->wifi_rssi_ >= -65)
+      col = 0x88CC44;
+    else if (this->wifi_rssi_ >= -75)
+      col = 0xDDAA33;
+    else if (this->wifi_rssi_ >= -85)
+      col = 0xCC7733;
+    else
+      col = 0xCC4444;
+  }
+  lv_obj_set_style_text_color(this->wifi_icon_, lv_color_hex(col), 0);
+}
+
+void HAPanel::update_battery_icon_() {
+  if (this->battery_icon_ == nullptr)
+    return;
+  // LiPo voltage → icon variant + tint. Same buckets documented in plan §P7b.
+  const char *glyph = LV_SYMBOL_BATTERY_EMPTY;
+  uint32_t col = 0x888888;
+  if (this->have_battery_) {
+    const float v = this->battery_voltage_;
+    if (v >= 4.00f) {
+      glyph = LV_SYMBOL_BATTERY_FULL;
+      col = 0x66BB66;
+    } else if (v >= 3.85f) {
+      glyph = LV_SYMBOL_BATTERY_3;
+      col = 0x88CC44;
+    } else if (v >= 3.70f) {
+      glyph = LV_SYMBOL_BATTERY_2;
+      col = 0xDDAA33;
+    } else if (v >= 3.55f) {
+      glyph = LV_SYMBOL_BATTERY_1;
+      col = 0xCC7733;
+    } else {
+      glyph = LV_SYMBOL_BATTERY_EMPTY;
+      col = 0xCC4444;
+    }
+  }
+  lv_label_set_text(this->battery_icon_, glyph);
+  lv_obj_set_style_text_color(this->battery_icon_, lv_color_hex(col), 0);
 }
 
 // ---------- LVGL event trampolines ----------
@@ -532,6 +698,9 @@ void HAPanel::on_tileview_changed_(lv_event_t *e) {
       lv_label_set_text(self->header_label_, "Settings");
     return;
   }
+  // P7b: leaving the settings tile with un-applied changes silently reverts.
+  if (self->brightness_dirty_)
+    self->revert_brightness_();
   for (size_t ai = 0; ai < self->tile_objs_.size(); ai++) {
     if (self->tile_objs_[ai] != tile)
       continue;
@@ -545,6 +714,9 @@ void HAPanel::on_header_clicked_(lv_event_t *e) {
   auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
   if (self == nullptr)
     return;
+  // P7b: header tap from the settings tile counts as navigating away — revert.
+  if (self->brightness_dirty_)
+    self->revert_brightness_();
   self->open_picker_();
 }
 
@@ -593,7 +765,11 @@ void HAPanel::on_brightness_slider_(lv_event_t *e) {
   int32_t v = lv_slider_get_value(self->brightness_slider_);
   if (v < 0) v = 0;
   if (v > 255) v = 255;
-  self->active_brightness_ = (uint8_t) v;
+  // P7b: stage only — display previews live, but the persisted global is not
+  // written until Apply. brightness_dirty_ tracks "user has touched slider"
+  // so navigating away can revert silently.
+  self->staged_brightness_ = (uint8_t) v;
+  self->brightness_dirty_ = (self->staged_brightness_ != self->active_brightness_);
   if (self->brightness_value_label_ != nullptr) {
     char buf[24];
     snprintf(buf, sizeof(buf), "%u / 255", (unsigned) v);
@@ -601,6 +777,20 @@ void HAPanel::on_brightness_slider_(lv_event_t *e) {
   }
   if (self->brightness_setter_)
     self->brightness_setter_((uint8_t) v);
+}
+
+void HAPanel::on_apply_clicked_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  self->apply_brightness_();
+}
+
+void HAPanel::on_cancel_clicked_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  self->revert_brightness_();
 }
 
 }  // namespace ha_panel

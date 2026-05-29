@@ -47,9 +47,18 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void set_brightness_setter(std::function<void(uint8_t)> setter) {
     this->brightness_setter_ = std::move(setter);
   }
+  // P7b: committer writes the persisted active-brightness global. Separate
+  // from setter so the slider can drive a live preview without committing
+  // until Apply is tapped.
+  void set_brightness_committer(std::function<void(uint8_t)> committer) {
+    this->brightness_committer_ = std::move(committer);
+  }
   void set_active_brightness(uint8_t v);
   void set_clock_text(const std::string &text);
   void set_api_connected(bool connected);
+  // P7b: header status icons.
+  void set_wifi_rssi(int rssi);
+  void set_battery_voltage(float volts);
 
  protected:
   // HA state callback.
@@ -66,7 +75,12 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void open_picker_();
   void close_picker_();
   void update_status_dot_();
+  void update_wifi_icon_();
+  void update_battery_icon_();
   bool is_settings_active_() const;
+  // P7b: stage / commit / revert brightness slider edits.
+  void apply_brightness_();
+  void revert_brightness_();
 
   // Event trampolines (LVGL takes raw C callbacks).
   static void on_tileview_changed_(lv_event_t *e);
@@ -75,6 +89,8 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_picker_row_clicked_(lv_event_t *e);
   static void on_picker_bg_clicked_(lv_event_t *e);
   static void on_brightness_slider_(lv_event_t *e);
+  static void on_apply_clicked_(lv_event_t *e);
+  static void on_cancel_clicked_(lv_event_t *e);
 
   std::vector<Area> areas_;
   std::vector<Entity> entities_;
@@ -83,6 +99,8 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *header_label_{nullptr};
   lv_obj_t *clock_label_{nullptr};
   lv_obj_t *status_dot_{nullptr};
+  lv_obj_t *wifi_icon_{nullptr};
+  lv_obj_t *battery_icon_{nullptr};
   lv_obj_t *tileview_{nullptr};
   lv_obj_t *picker_{nullptr};
   lv_obj_t *splash_{nullptr};
@@ -93,8 +111,18 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   std::vector<lv_obj_t *> badges_by_entity_;     // [entity_idx]
 
   std::function<void(uint8_t)> brightness_setter_;
+  std::function<void(uint8_t)> brightness_committer_;
+  // active_brightness_ = persisted (last committed) value, mirrors the YAML
+  // global. staged_brightness_ = current slider position (live preview).
+  // brightness_dirty_ flips true on first slider drag, false on Apply/Cancel.
   uint8_t active_brightness_{0xD0};
+  uint8_t staged_brightness_{0xD0};
+  bool brightness_dirty_{false};
   bool api_connected_{false};
+  int wifi_rssi_{0};
+  bool have_wifi_rssi_{false};
+  float battery_voltage_{0.0f};
+  bool have_battery_{false};
 };
 
 }  // namespace ha_panel
