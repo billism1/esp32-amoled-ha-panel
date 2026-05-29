@@ -699,6 +699,101 @@ P7e row:
 
 ---
 
+## Phase 7f — Per-entity tap-confirmation guard
+
+**Status:** ⬜ not started · target tag: `p7f-confirm`
+
+**Goal:** Stop me from accidentally opening the garage door (or unlocking the front door, or running a "panic" script) by brushing the screen. A per-entity opt-in flag in `ha-entities.yaml` turns the short-tap into "open a confirm sheet" instead of "fire the action immediately". The actual action only fires after an explicit second tap on a labelled button inside the sheet.
+
+### YAML schema change
+
+Add an optional `confirm: true` flag to the entity entry:
+
+```yaml
+ha_panel:
+  areas:
+    - name: "Garage"
+      entities:
+        - entity_id: cover.ratgdov25_dc1381_door
+          friendly_name: "Garage door"
+          confirm: true              # short-tap → confirm sheet, not toggle
+        - entity_id: light.ratgdov25_dc1381_light
+          friendly_name: "Garage light"
+          # no confirm: short-tap toggles immediately as today
+```
+
+`components/ha_panel/__init__.py` adds `cv.Optional("confirm", default=False)`. Codegen passes through to `add_entity(entity_id, friendly_name, icon_override, confirm)` — same call shape P7e will extend with `icon_override`, so the two phases stack cleanly.
+
+### Behaviour
+
+| Entity domain | `confirm: false` (default) | `confirm: true` |
+|---|---|---|
+| `light` / `switch` / `fan` / `input_boolean` | Short-tap fires turn_on/turn_off (P7c). Long-press opens the detail modal (P7d, where applicable). | Short-tap opens the detail modal (same modal P7d builds, with the on/off switch + brightness etc. pre-loaded). Apply commits, Cancel does nothing. Long-press also opens the detail modal — same target either way. |
+| `scene` / `script` / `automation` / `button` | Short-tap fires the action service (P7c). No detail modal. | Short-tap opens a new "confirm action" sheet: title = friendly name, big centered button labelled with the action verb ("Run script", "Trigger automation", "Press button", "Activate scene"), Cancel button. Apply fires the service; Cancel closes. |
+| `lock` | Short-tap toggles lock state for known `locked`/`unlocked` (P7c). | Short-tap opens a confirm sheet with two large buttons ("Lock"/"Unlock") based on current state, plus Cancel. Same security justification as P7c's no-op on transient states — extra friction before committing. |
+| `cover` | Short-tap fires `homeassistant.toggle` (P7c). Long-press opens position modal (P7d). | Short-tap opens a confirm sheet: title + "Open" / "Stop" / "Close" buttons (mirrors the P7d cover modal's transport row but **without** the persistent slider — keeps the sheet visually minimal and the action commit explicit). |
+| `climate` / `media_player` / `number` / `select` | Short-tap is read-only / summary (P7c); long-press opens detail modal (P7d). | Short-tap opens the same P7d detail modal directly. Functionally similar to long-press; the difference is "tap also works" so the user doesn't need to know the long-press gesture for a confirm-flagged entity. |
+| `sensor` / `binary_sensor` / `weather` / other read-only | Short-tap logs no-op (P7c). | `confirm: true` is meaningless on read-only domains — log a config-validation warning at codegen and ignore the flag at runtime. |
+
+### Architecture
+
+- **`Entity::confirm` bool field**, populated at codegen-time alongside `friendly_name` and (P7e's) `icon_override`.
+- **Short-tap dispatch (`on_entity_row_clicked_` → `tap_entity_`) gains a pre-flight check.** If `confirm == true` AND the domain has a meaningful confirm path (everything except read-only), route the tap to a new `open_confirm_or_detail_(entity_idx)` that picks between:
+  - The existing P7d detail modal for domains that have one (`light`, `climate`, `media_player`, `number`, `select`, `fan`, `cover`).
+  - A new **action confirm sheet** for action-only / lock-only domains (`scene`, `script`, `automation`, `button`, `lock`).
+- **Action confirm sheet** is a third overlay alongside `picker_` and `detail_modal_`. Built once at setup, hidden by default, repopulated on each open:
+  - Title bar: friendly name.
+  - Centered body: 1-2 large buttons (200×70 px, 12 px radius) coloured by criticality:
+    - "Run script" / "Trigger automation" / "Press button" / "Activate scene" — accent blue (`0x44CCDD` background).
+    - "Lock" — green (`0x2A553A`).
+    - "Unlock" — amber (`0x553A2A`).
+    - Cover "Open" — green; "Close" — amber; "Stop" — neutral grey.
+  - Cancel button at the bottom (same shape as P7d/settings Cancel).
+- **Long-press behaviour unchanged.** Long-press still opens the detail modal for domains that have one; confirm-flagged entities have a redundant long-press path but no regression.
+- **Confirm flag is per-entity, not per-area or global.** No mass opt-in or opt-out — every entity decides individually in YAML. Aligns with the static-config model in P5.
+
+### Picker / overlay z-order
+
+LVGL z-order today is:
+1. Tileview (entity rows).
+2. Header.
+3. Picker modal (when open) — `move_foreground` on open.
+4. Detail modal (when open) — `move_foreground` on open.
+5. Splash (top until API connects).
+
+Action confirm sheet slots between 3 and 4 — same `move_foreground` pattern. Only one of {picker, detail, confirm} is ever open at a time; bg-tap on any of them dismisses.
+
+### Edge cases
+
+- **Detail modal already open + user taps another row.** Detail modal eats touches outside its content area (Cancel on bg-tap), so the underlying row won't fire. No interaction needed.
+- **`confirm: true` on a read-only entity.** Codegen logs `WARN: confirm: true ignored for read-only domain '<d>' (<entity_id>)` and leaves the flag at its default false. Avoids silent surprise.
+- **Confirm-flagged entity goes `unavailable`.** Sheet still opens; Apply button is disabled (grey + non-clickable) and a small text under the title reads "Currently unavailable". Cancel stays active so the user can dismiss.
+- **Long-press on a confirm-flagged action-only entity** (e.g. `script.panic` with `confirm: true`). No detail modal exists for the domain, so long-press should match short-tap and open the confirm sheet — same target either way. Trivially supported by registering both LV_EVENT_SHORT_CLICKED and LV_EVENT_LONG_PRESSED to the same dispatcher for confirm-flagged rows.
+
+### Implementation notes (decisions captured for the build)
+
+- **Single dispatcher method.** `open_confirm_or_detail_(entity_idx)` parses domain and either calls existing `open_detail_(idx)` (for domains with a detail modal — pre-load handled by P7d's path, which today means "use defaults" per the parked attr-fetch TODO) OR a new `open_confirm_action_(idx)` for action-only / lock-only domains.
+- **Cover special case.** Cover has both a detail modal (P7d position slider) AND wants a "confirm before tap" sheet that the user expects to be the *fast* path for the garage door (no slider, just Open / Stop / Close). Decide at runtime: if `confirm: true`, short-tap opens the confirm sheet (no slider), long-press opens the full position modal. Two different entries to the cover surface, each appropriate to the gesture.
+- **No "are you sure?" dialog vs. modal proper.** Keep it as a real modal sheet (same look as detail / picker), not a small dialog box. The screen is 480 px and the user is at arm's length — a quick large-button "Open garage door" / "Cancel" sheet is faster to read than a centered dialog with smaller text.
+- **No tap-timeout / "press and hold to confirm" gesture.** Considered but rejected — adds friction and is harder to discover. The two-step tap (open sheet → tap "Run") is the minimum that prevents pocket-tap mistakes without making the panel feel slow.
+- **Schema migration.** Existing `ha-entities.yaml` entries without `confirm:` keep working unchanged (default false). Roll-out for sensitive entities is a one-line YAML edit per entity.
+
+### Risks / unknowns
+
+- **User muscle memory.** If the same entity is sometimes tappable (light) and sometimes not (lock with confirm), the user might expect a confirm sheet on every tap. Live with it; the YAML edit is opt-in and the user controls the trade-off.
+- **Confirm sheet vs. P7d detail modal for `media_player`.** Adding `confirm: true` to a media player with a long-form modal could feel weird (opens a big modal to play a track). But the same modal already opens via long-press, so functionally no surprise. Document in the table above as "uses the detail modal as the confirm path".
+- **Action confirm sheet width clashing with rounded corners.** Same 44 px corner inset rule as P7a header — primary buttons must stay within `[44, 436]` px horizontally to avoid corner clipping. Apply this in the builder.
+
+**Exit criteria:**
+- `confirm: true` on a `cover` entity → short-tap on the row opens a confirm sheet with Open / Stop / Close / Cancel buttons. Tap on Open / Stop / Close fires the corresponding `cover.*` service.
+- `confirm: true` on a `script` / `automation` / `button` / `scene` entity → short-tap opens a confirm sheet with a single labelled action button + Cancel. Action button fires; Cancel closes.
+- `confirm: true` on a `lock` entity → short-tap opens a confirm sheet with Lock / Unlock buttons (the one matching the *opposite* of current state is the action), plus Cancel.
+- `confirm: true` on `light` / `switch` / `fan` / `input_boolean` / `climate` / `media_player` / `number` / `select` → short-tap opens the existing P7d detail modal. Apply commits the action; Cancel closes.
+- `confirm: true` on a read-only domain (`sensor`, `binary_sensor`, …) → codegen warns and the runtime treats the entity as if `confirm` weren't set.
+- Entities without `confirm:` behave exactly as today (short-tap fires per P7c).
+
+---
+
 ## Phase 8 — Multi-board support
 
 **Status:** ⬜ not started · target tag: `p8-multiboard`
