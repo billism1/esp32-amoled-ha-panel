@@ -14,12 +14,25 @@
 namespace esphome {
 namespace ha_panel {
 
+// P7c: how an entity row paints itself + how a short-tap dispatches. Picked
+// once at codegen time from the entity_id domain. A new HA domain that we
+// don't recognise falls into READ_ONLY_TEXT — safe default, no crash.
+enum class RenderClass : uint8_t {
+  BINARY_SWITCH,    // light/switch/fan/input_boolean → lv_switch indicator
+  ACTION_ICON,      // scene/script/automation/button → LV_SYMBOL_PLAY badge
+  LOCK_TEXT,        // lock → glyph + Locked/Unlocked text
+  COVER_TEXT,       // cover → chevron + Open/Closed text
+  SUMMARY_TEXT,     // climate/media_player/number/select → state summary (P7d adds modal)
+  READ_ONLY_TEXT,   // sensor/binary_sensor/everything else → text badge
+};
+
 struct Entity {
   std::string entity_id;
   std::string friendly_name;
   std::string domain;     // prefix before '.'  (light/switch/sensor/…)
   std::string state;      // last known HA state; empty until first callback
   bool has_state{false};
+  RenderClass render_class{RenderClass::READ_ONLY_TEXT};
 };
 
 struct Area {
@@ -67,11 +80,13 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // Domain dispatch: returns true if a service was sent.
   bool tap_entity_(size_t entity_idx);
   static std::string extract_domain_(const std::string &entity_id);
+  static RenderClass render_class_for_(const std::string &domain);
 
   // LVGL build + helpers.
   void build_ui_();
   void build_settings_tile_(lv_obj_t *parent);
-  void rebuild_entity_row_text_(size_t entity_idx);
+  // P7c: dispatches on Entity::render_class to update the right child widget.
+  void rebuild_entity_row_(size_t entity_idx);
   void open_picker_();
   void close_picker_();
   void update_status_dot_();
@@ -108,7 +123,14 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *brightness_slider_{nullptr};
   lv_obj_t *brightness_value_label_{nullptr};
   std::vector<lv_obj_t *> tile_objs_;            // [area_idx]
-  std::vector<lv_obj_t *> badges_by_entity_;     // [entity_idx]
+  // P7c: per-entity right-side widget — lv_switch for binaries, lv_label
+  // for everything else. Renamed from badges_by_entity_ since it's no longer
+  // always a label.
+  std::vector<lv_obj_t *> widgets_by_entity_;    // [entity_idx]
+  // P7c follow-up: BINARY_SWITCH rows only. When state == unavailable/unknown
+  // we hide the switch (which would otherwise look like a normal "off") and
+  // show this red text label in its slot. nullptr for non-binary rows.
+  std::vector<lv_obj_t *> unavail_labels_by_entity_;
 
   std::function<void(uint8_t)> brightness_setter_;
   std::function<void(uint8_t)> brightness_committer_;

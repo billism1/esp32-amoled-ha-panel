@@ -29,12 +29,12 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 | 6 | LVGL UI: area carousel + entity scroller | ✅ | verified 2026-05-28: tileview swipe, vertical scroll, tap-toggle, area picker modal all live; touch transform reset to no-swap/no-mirror |
 | 7a | Polish round 1 (clock, settings tile, splash, tap feedback) | ✅ | verified 2026-05-28; battery + RTC deferred |
 | 7b | Polish round 2 (header layout, battery + Wi-Fi icons, Apply/Cancel in settings) | 🟡 | code complete 2026-05-28; awaiting on-device verification |
-| 7c | Entity control: explicit on/off + per-domain update operations | ⬜ | toggle already in P5/P6; round out actions for other domains where cheap, defer the rest to P7d |
+| 7c | Entity control: explicit on/off + per-domain update operations | 🟡 | code complete 2026-05-28; awaiting on-device verification |
 | 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | ⬜ | long-press → shared modal with per-domain widgets |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
-**Last updated:** 2026-05-28 (P7b code complete).
+**Last updated:** 2026-05-28 (P7c code complete).
 
 ---
 
@@ -389,7 +389,7 @@ Target (P7b):
 
 ## Phase 7c — Entity control: explicit on/off + per-domain rendering + per-domain dispatch
 
-**Status:** ⬜ not started · target tag: `p7c-controls`
+**Status:** 🟡 code complete 2026-05-28 · target tag: `p7c-controls`
 
 **Goal:** Two things in one phase, both row-scoped:
 1. **Dispatch:** tighten the tap action per domain — explicit on/off where state is known, real services for action domains (scene/script/automation/button) and lock.
@@ -402,12 +402,12 @@ Target (P7b):
 
 ### Dispatch — in scope for P7c
 
-- [ ] **Explicit on / off when state is known.** For binary domains (`light` / `switch` / `fan` / `input_boolean`): if `state == "on"` send `homeassistant.turn_off`; if `state == "off"` send `homeassistant.turn_on`. **Fall through to `homeassistant.toggle` for any other state** (`unavailable`, `unknown`, transient values like a light's mid-transition `transitioning`, or anything else we don't recognise). Comment the toggle fallback so the "why" is captured — it covers more than just unknown/unavailable.
-- [ ] **`cover`** stays on `homeassistant.toggle`. Cover state alphabet is `open` / `closed` / `opening` / `closing` — the binary on/off mapping doesn't fit, and toggle does the right thing (HA forwards to `cover.open_cover` / `cover.close_cover` based on current position). Explicit open/close lives in the P7d position slider.
-- [ ] **`lock`** → `lock.unlock` if `state == "locked"`, `lock.lock` if `state == "unlocked"`. Fall through to no-op log for any other state (`locking` / `unlocking` / `jammed` / `unavailable`) — better to do nothing than commit the wrong action mid-transition. Lock is security-sensitive; only fires on `LV_EVENT_CLICKED` (already drag-disambiguated by lv_button), never on long-press or scroll.
-- [ ] **`scene`** → `scene.turn_on` on tap. Currently falls through to read-only.
-- [ ] **`button`** → `button.press` on tap. Currently falls through to read-only. (User still has to list a `button.*` entity_id in `ha-entities.yaml` to surface it — codegen isn't auto-discovering.)
-- [ ] **State callback** keeps populating `Entity::state` for every subscribed entity — no change. Rendering layer (next section) reads the latest `state` whenever it redraws.
+- [x] **Explicit on / off when state is known.** For binary domains (`light` / `switch` / `fan` / `input_boolean`): if `state == "on"` send `homeassistant.turn_off`; if `state == "off"` send `homeassistant.turn_on`. **Fall through to `homeassistant.toggle` for any other state** (`unavailable`, `unknown`, transient values like a light's mid-transition `transitioning`, or anything else we don't recognise). Comment the toggle fallback so the "why" is captured — it covers more than just unknown/unavailable.
+- [x] **`cover`** stays on `homeassistant.toggle`. Cover state alphabet is `open` / `closed` / `opening` / `closing` — the binary on/off mapping doesn't fit, and toggle does the right thing (HA forwards to `cover.open_cover` / `cover.close_cover` based on current position). Explicit open/close lives in the P7d position slider.
+- [x] **`lock`** → `lock.unlock` if `state == "locked"`, `lock.lock` if `state == "unlocked"`. Fall through to no-op log for any other state (`locking` / `unlocking` / `jammed` / `unavailable`) — better to do nothing than commit the wrong action mid-transition. Lock is security-sensitive; only fires on `LV_EVENT_CLICKED` (already drag-disambiguated by lv_button), never on long-press or scroll.
+- [x] **`scene`** → `scene.turn_on` on tap. Currently falls through to read-only.
+- [x] **`button`** → `button.press` on tap. Currently falls through to read-only. (User still has to list a `button.*` entity_id in `ha-entities.yaml` to surface it — codegen isn't auto-discovering.)
+- [x] **State callback** keeps populating `Entity::state` for every subscribed entity — no change. Rendering layer (next section) reads the latest `state` whenever it redraws.
 
 ### Rendering — in scope for P7c
 
@@ -665,6 +665,21 @@ text_sensor:
 ## Session notes & decisions log
 
 > Newest entry at top. Date in `YYYY-MM-DD`. One line per gotcha, decision, or surprise — anything future-you will want when picking the work back up after a few days away. Not a changelog — git log already does that. This is for *why* and *what bit me*.
+
+### 2026-05-28 — P7c entity control + per-domain rendering (code complete, compile clean)
+
+- **`RenderClass` enum** (in `ha_panel.h`) keyed off `Entity::domain` at codegen time. Six classes: `BINARY_SWITCH`, `ACTION_ICON`, `LOCK_TEXT`, `COVER_TEXT`, `SUMMARY_TEXT`, `READ_ONLY_TEXT`. `render_class_for_(domain)` is the single source of truth — adding a new domain means one line in that mapper + one branch in the renderer + one branch in the dispatcher. `READ_ONLY_TEXT` is the default so an unknown HA domain just renders as text instead of crashing.
+- **Row widget per class.** `make_entity_row` switches on `render_class`:
+  - BINARY_SWITCH → `lv_switch` (50×26, right-aligned at -16 px). `LV_OBJ_FLAG_CLICKABLE` cleared so the parent button captures the tap — without that the switch's own `LV_EVENT_VALUE_CHANGED` fires alongside the row's `LV_EVENT_CLICKED`, double-dispatching. Indicator tint forced to 0x66BB66 to match the rest of the panel's "on" green.
+  - ACTION_ICON → single `LV_SYMBOL_PLAY` label tinted cyan (0x44CCDD). Cyan accent makes it read as an affordance, not a status.
+  - LOCK_TEXT / COVER_TEXT / SUMMARY_TEXT / READ_ONLY_TEXT → text label at right edge, content + colour driven by `rebuild_entity_row_`.
+- **Lock UX choice**: amber on unlocked (0xDDAA33), green on locked (0x66BB66). "Open lock" is a warning state for most users — green-on-unlocked would teach the wrong instinct.
+- **Cover UX choice**: chevron-up + "Open" / chevron-down + "Closed", greyed "Opening" / "Closing" for transient states. Glyph hints at the direction the next tap will produce.
+- **Lock dispatch is the only one that no-ops on transient states**. For binary domains we fall through to `homeassistant.toggle` on unknown/unavailable/transitioning — better to act than refuse. For lock, the security cost of acting on stale state is higher than the inconvenience of waiting one round-trip, so transient states log + return false.
+- **Cover dispatch stays on `homeassistant.toggle`**, not `cover.toggle`. Generic `homeassistant.*` services dispatch per-domain on the HA side and keep the C++ dispatcher flat (one less domain-specific branch). Comment in `tap_entity_` captures the rationale.
+- **Renamed** `badges_by_entity_` → `widgets_by_entity_` and `rebuild_entity_row_text_` → `rebuild_entity_row_` since the right-side widget is no longer always a label. Mechanical change; no behavioural drift.
+- **Build flag**: added `-DLV_USE_SWITCH=1` to the board package. Runtime widget construction doesn't auto-pull it in; without the flag `lv_switch_create` links but generates a black-bar rendering. Flash +3 KB, RAM unchanged.
+- **`button` codegen**: re-read `ha_panel/__init__.py` — schema does not filter by domain, so `button.*` entity_ids ship today without codegen changes. User just has to list them in `ha-entities.yaml`.
 
 ### 2026-05-28 — P7b polish round 2 (code complete, compile clean)
 

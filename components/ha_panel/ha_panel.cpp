@@ -30,6 +30,7 @@ void HAPanel::add_entity(const std::string &entity_id, const std::string &friend
   e.entity_id = entity_id;
   e.friendly_name = friendly_name.empty() ? entity_id : friendly_name;
   e.domain = HAPanel::extract_domain_(entity_id);
+  e.render_class = HAPanel::render_class_for_(e.domain);
   size_t idx = this->entities_.size();
   this->entities_.push_back(std::move(e));
   this->areas_.back().entity_indices.push_back(idx);
@@ -42,6 +43,20 @@ std::string HAPanel::extract_domain_(const std::string &entity_id) {
   return entity_id.substr(0, dot);
 }
 
+RenderClass HAPanel::render_class_for_(const std::string &d) {
+  if (d == "light" || d == "switch" || d == "fan" || d == "input_boolean")
+    return RenderClass::BINARY_SWITCH;
+  if (d == "scene" || d == "script" || d == "automation" || d == "button")
+    return RenderClass::ACTION_ICON;
+  if (d == "lock")
+    return RenderClass::LOCK_TEXT;
+  if (d == "cover")
+    return RenderClass::COVER_TEXT;
+  if (d == "climate" || d == "media_player" || d == "number" || d == "select")
+    return RenderClass::SUMMARY_TEXT;
+  return RenderClass::READ_ONLY_TEXT;
+}
+
 // ---------- setup / dump ----------
 
 void HAPanel::setup() {
@@ -50,7 +65,8 @@ void HAPanel::setup() {
   for (const auto &e : this->entities_) {
     this->subscribe_homeassistant_state(&HAPanel::on_state_, e.entity_id);
   }
-  this->badges_by_entity_.assign(this->entities_.size(), nullptr);
+  this->widgets_by_entity_.assign(this->entities_.size(), nullptr);
+  this->unavail_labels_by_entity_.assign(this->entities_.size(), nullptr);
   this->build_ui_();
 }
 
@@ -78,28 +94,110 @@ void HAPanel::on_state_(const std::string &entity_id, StringRef state) {
     } else {
       ESP_LOGD(TAG, "%s = %s", entity_id.c_str(), this->entities_[i].state.c_str());
     }
-    this->rebuild_entity_row_text_(i);
+    this->rebuild_entity_row_(i);
     return;
   }
   ESP_LOGW(TAG, "state callback for unknown entity %s", entity_id.c_str());
 }
 
-void HAPanel::rebuild_entity_row_text_(size_t entity_idx) {
-  if (entity_idx >= this->badges_by_entity_.size())
+void HAPanel::rebuild_entity_row_(size_t entity_idx) {
+  if (entity_idx >= this->widgets_by_entity_.size())
     return;
-  lv_obj_t *badge = this->badges_by_entity_[entity_idx];
-  if (badge == nullptr)
+  lv_obj_t *w = this->widgets_by_entity_[entity_idx];
+  if (w == nullptr)
     return;
-  const auto &e = this->entities_[entity_idx];
-  lv_label_set_text(badge, e.has_state ? e.state.c_str() : "…");
-  uint32_t col = 0xFFFFFF;
-  if (e.state == "on" || e.state == "open" || e.state == "home" || e.state == "active")
-    col = 0x66BB66;
-  else if (e.state == "off" || e.state == "closed" || e.state == "away" || e.state == "idle")
-    col = 0x888888;
-  else if (e.state == "unavailable" || e.state == "unknown")
-    col = 0xCC4444;
-  lv_obj_set_style_text_color(badge, lv_color_hex(col), 0);
+  const Entity &e = this->entities_[entity_idx];
+
+  switch (e.render_class) {
+    case RenderClass::BINARY_SWITCH: {
+      // Mirror state. Switch is non-interactive (parent button drives the
+      // tap) so we drive CHECKED purely from `state`. When unavailable we
+      // hide the switch (a disabled-looking switch still reads as "off"
+      // from across the room) and show the red overlay label instead.
+      const bool unavail = !e.has_state || e.state == "unavailable" ||
+                            e.state == "unknown";
+      lv_obj_t *overlay = entity_idx < this->unavail_labels_by_entity_.size()
+                              ? this->unavail_labels_by_entity_[entity_idx]
+                              : nullptr;
+      if (unavail) {
+        lv_obj_add_flag(w, LV_OBJ_FLAG_HIDDEN);
+        if (overlay != nullptr)
+          lv_obj_clear_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+      } else {
+        if (overlay != nullptr)
+          lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(w, LV_OBJ_FLAG_HIDDEN);
+        if (e.state == "on")
+          lv_obj_add_state(w, LV_STATE_CHECKED);
+        else
+          lv_obj_remove_state(w, LV_STATE_CHECKED);
+      }
+      return;
+    }
+    case RenderClass::ACTION_ICON: {
+      // Static glyph — no per-state update. Action domains expose no
+      // meaningful state (button has only last-pressed timestamp; scene/
+      // script/automation report `unknown` or a timestamp). Leave alone.
+      return;
+    }
+    case RenderClass::LOCK_TEXT: {
+      const char *txt = e.has_state ? e.state.c_str() : "…";
+      uint32_t col = 0x888888;
+      if (e.state == "locked") {
+        txt = LV_SYMBOL_CLOSE "  Locked";
+        col = 0x66BB66;  // green: secured is the "good" state
+      } else if (e.state == "unlocked") {
+        // Amber, not green — an unlocked lock is a warning to most users.
+        txt = LV_SYMBOL_OK "  Unlocked";
+        col = 0xDDAA33;
+      } else if (e.state == "locking" || e.state == "unlocking") {
+        col = 0xCCCCCC;
+      } else if (e.state == "jammed" || e.state == "unavailable" ||
+                 e.state == "unknown") {
+        col = 0xCC4444;
+      }
+      lv_label_set_text(w, txt);
+      lv_obj_set_style_text_color(w, lv_color_hex(col), 0);
+      return;
+    }
+    case RenderClass::COVER_TEXT: {
+      const char *txt = e.has_state ? e.state.c_str() : "…";
+      uint32_t col = 0xCCCCCC;
+      if (e.state == "open") {
+        txt = LV_SYMBOL_UP "  Open";
+        col = 0x66BB66;
+      } else if (e.state == "closed") {
+        txt = LV_SYMBOL_DOWN "  Closed";
+        col = 0x888888;
+      } else if (e.state == "opening") {
+        txt = LV_SYMBOL_UP "  Opening";
+        col = 0xCCCCCC;
+      } else if (e.state == "closing") {
+        txt = LV_SYMBOL_DOWN "  Closing";
+        col = 0xCCCCCC;
+      } else if (e.state == "unavailable" || e.state == "unknown") {
+        col = 0xCC4444;
+      }
+      lv_label_set_text(w, txt);
+      lv_obj_set_style_text_color(w, lv_color_hex(col), 0);
+      return;
+    }
+    case RenderClass::SUMMARY_TEXT:
+    case RenderClass::READ_ONLY_TEXT: {
+      lv_label_set_text(w, e.has_state ? e.state.c_str() : "…");
+      uint32_t col = 0xFFFFFF;
+      if (e.state == "on" || e.state == "open" || e.state == "home" ||
+          e.state == "active" || e.state == "playing")
+        col = 0x66BB66;
+      else if (e.state == "off" || e.state == "closed" || e.state == "away" ||
+               e.state == "idle" || e.state == "paused")
+        col = 0x888888;
+      else if (e.state == "unavailable" || e.state == "unknown")
+        col = 0xCC4444;
+      lv_obj_set_style_text_color(w, lv_color_hex(col), 0);
+      return;
+    }
+  }
 }
 
 // ---------- tap dispatch ----------
@@ -114,21 +212,75 @@ bool HAPanel::tap_entity_(size_t entity_idx) {
   std::map<std::string, std::string> data;
   data["entity_id"] = ent.entity_id;
 
-  if (d == "light" || d == "switch" || d == "fan" || d == "input_boolean" || d == "cover") {
-    this->call_homeassistant_service("homeassistant.toggle", data);
-    ESP_LOGI(TAG, "tap %s → homeassistant.toggle", ent.entity_id.c_str());
-    return true;
-  } else if (d == "script") {
-    this->call_homeassistant_service("script.turn_on", data);
-    ESP_LOGI(TAG, "tap %s → script.turn_on", ent.entity_id.c_str());
-    return true;
-  } else if (d == "automation") {
-    this->call_homeassistant_service("automation.trigger", data);
-    ESP_LOGI(TAG, "tap %s → automation.trigger", ent.entity_id.c_str());
-    return true;
+  switch (ent.render_class) {
+    case RenderClass::BINARY_SWITCH: {
+      // Explicit turn_on/turn_off when state is "on"/"off". Anything else —
+      // including unavailable/unknown and transient values like a light's
+      // "transitioning" — falls through to toggle so we don't refuse to act
+      // just because HA hasn't reported back yet.
+      if (ent.has_state && ent.state == "on") {
+        this->call_homeassistant_service("homeassistant.turn_off", data);
+        ESP_LOGI(TAG, "tap %s → homeassistant.turn_off", ent.entity_id.c_str());
+      } else if (ent.has_state && ent.state == "off") {
+        this->call_homeassistant_service("homeassistant.turn_on", data);
+        ESP_LOGI(TAG, "tap %s → homeassistant.turn_on", ent.entity_id.c_str());
+      } else {
+        this->call_homeassistant_service("homeassistant.toggle", data);
+        ESP_LOGI(TAG, "tap %s → homeassistant.toggle (state '%s')",
+                 ent.entity_id.c_str(), ent.state.c_str());
+      }
+      return true;
+    }
+    case RenderClass::ACTION_ICON: {
+      const char *svc = nullptr;
+      if (d == "scene")
+        svc = "scene.turn_on";
+      else if (d == "script")
+        svc = "script.turn_on";
+      else if (d == "automation")
+        svc = "automation.trigger";
+      else if (d == "button")
+        svc = "button.press";
+      if (svc == nullptr) {
+        ESP_LOGW(TAG, "ACTION_ICON with unmapped domain '%s'", d.c_str());
+        return false;
+      }
+      this->call_homeassistant_service(svc, data);
+      ESP_LOGI(TAG, "tap %s → %s", ent.entity_id.c_str(), svc);
+      return true;
+    }
+    case RenderClass::LOCK_TEXT: {
+      // Mid-transition (locking/unlocking) and jammed/unavailable explicitly
+      // no-op. Better to wait for a stable state than commit the wrong action.
+      if (ent.has_state && ent.state == "locked") {
+        this->call_homeassistant_service("lock.unlock", data);
+        ESP_LOGI(TAG, "tap %s → lock.unlock", ent.entity_id.c_str());
+        return true;
+      }
+      if (ent.has_state && ent.state == "unlocked") {
+        this->call_homeassistant_service("lock.lock", data);
+        ESP_LOGI(TAG, "tap %s → lock.lock", ent.entity_id.c_str());
+        return true;
+      }
+      ESP_LOGI(TAG, "tap %s lock in transient/unknown state '%s' — no-op",
+               ent.entity_id.c_str(), ent.state.c_str());
+      return false;
+    }
+    case RenderClass::COVER_TEXT: {
+      // homeassistant.toggle forwards to the right cover service based on
+      // current position — keeps the dispatch flat. P7d's modal will expose
+      // explicit open/stop/close + position slider.
+      this->call_homeassistant_service("homeassistant.toggle", data);
+      ESP_LOGI(TAG, "tap %s → homeassistant.toggle (cover)", ent.entity_id.c_str());
+      return true;
+    }
+    case RenderClass::SUMMARY_TEXT:
+    case RenderClass::READ_ONLY_TEXT: {
+      ESP_LOGI(TAG, "tap %s (domain '%s') is read-only — no action",
+               ent.entity_id.c_str(), d.c_str());
+      return false;
+    }
   }
-  ESP_LOGI(TAG, "tap %s (domain '%s') is read-only — no action", ent.entity_id.c_str(),
-           d.c_str());
   return false;
 }
 
@@ -145,7 +297,9 @@ bool HAPanel::tap(size_t area_idx, size_t entity_idx) {
 
 static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_data,
                                  lv_event_cb_t cb, uintptr_t entity_idx,
-                                 lv_obj_t **out_badge) {
+                                 lv_obj_t **out_widget,
+                                 lv_obj_t **out_unavail_label) {
+  *out_unavail_label = nullptr;
   lv_obj_t *btn = lv_button_create(parent);
   lv_obj_set_width(btn, LV_PCT(100));
   lv_obj_set_height(btn, 60);
@@ -166,16 +320,62 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
   lv_obj_set_style_text_color(name, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_style_text_font(name, &lv_font_montserrat_18, 0);
   lv_obj_align(name, LV_ALIGN_LEFT_MID, 12, 0);
-  lv_obj_set_width(name, 300);
+  // Trim name width to 280 px (was 300) to leave room for a ~50 px switch.
+  lv_obj_set_width(name, 280);
   lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
 
-  lv_obj_t *badge = lv_label_create(btn);
-  lv_label_set_text(badge, e.has_state ? e.state.c_str() : "…");
-  lv_obj_set_style_text_color(badge, lv_color_hex(0xAAAAAA), 0);
-  lv_obj_set_style_text_font(badge, &lv_font_montserrat_18, 0);
-  lv_obj_align(badge, LV_ALIGN_RIGHT_MID, -12, 0);
-  *out_badge = badge;
-
+  // P7c: right-side widget varies by render class.
+  lv_obj_t *w = nullptr;
+  switch (e.render_class) {
+    case RenderClass::BINARY_SWITCH: {
+      w = lv_switch_create(btn);
+      lv_obj_set_size(w, 50, 26);
+      lv_obj_align(w, LV_ALIGN_RIGHT_MID, -16, 0);
+      // Non-interactive — parent button handles the tap. Without this the
+      // switch fires its own LV_EVENT_VALUE_CHANGED + the click bubbles to
+      // the parent, producing a double dispatch.
+      lv_obj_clear_flag(w, LV_OBJ_FLAG_CLICKABLE);
+      // Green when checked; default LVGL accent looks fine but force the
+      // on-tint to match the rest of the panel's "on" colour for cohesion.
+      lv_obj_set_style_bg_color(w, lv_color_hex(0x66BB66),
+                                LV_PART_INDICATOR | LV_STATE_CHECKED);
+      // Unavailable overlay: a switch in DISABLED state still looks like a
+      // normal off-toggle from a meter away. Stack a red label in the same
+      // right-mid slot, hidden by default; rebuild_entity_row_ flips
+      // visibility based on state. Keeps the legacy "red Unavailable text"
+      // affordance the old text-badge had.
+      lv_obj_t *unavail = lv_label_create(btn);
+      lv_label_set_text(unavail, "Unavailable");
+      lv_obj_set_style_text_color(unavail, lv_color_hex(0xCC4444), 0);
+      lv_obj_set_style_text_font(unavail, &lv_font_montserrat_18, 0);
+      lv_obj_align(unavail, LV_ALIGN_RIGHT_MID, -12, 0);
+      lv_obj_add_flag(unavail, LV_OBJ_FLAG_HIDDEN);
+      *out_unavail_label = unavail;
+      break;
+    }
+    case RenderClass::ACTION_ICON: {
+      // Single play glyph on the right — communicates "tap fires action".
+      // Cyan accent so it reads as an affordance, not a status label.
+      w = lv_label_create(btn);
+      lv_label_set_text(w, LV_SYMBOL_PLAY);
+      lv_obj_set_style_text_color(w, lv_color_hex(0x44CCDD), 0);
+      lv_obj_set_style_text_font(w, &lv_font_montserrat_18, 0);
+      lv_obj_align(w, LV_ALIGN_RIGHT_MID, -16, 0);
+      break;
+    }
+    case RenderClass::LOCK_TEXT:
+    case RenderClass::COVER_TEXT:
+    case RenderClass::SUMMARY_TEXT:
+    case RenderClass::READ_ONLY_TEXT: {
+      w = lv_label_create(btn);
+      lv_label_set_text(w, e.has_state ? e.state.c_str() : "…");
+      lv_obj_set_style_text_color(w, lv_color_hex(0xAAAAAA), 0);
+      lv_obj_set_style_text_font(w, &lv_font_montserrat_18, 0);
+      lv_obj_align(w, LV_ALIGN_RIGHT_MID, -12, 0);
+      break;
+    }
+  }
+  *out_widget = w;
   return btn;
 }
 
@@ -420,11 +620,13 @@ void HAPanel::build_ui_() {
 
     for (size_t ei : this->areas_[ai].entity_indices) {
       Entity &e = this->entities_[ei];
-      lv_obj_t *badge = nullptr;
+      lv_obj_t *widget = nullptr;
+      lv_obj_t *unavail = nullptr;
       make_entity_row(list, e, this, &HAPanel::on_entity_row_clicked_, (uintptr_t) ei,
-                      &badge);
-      this->badges_by_entity_[ei] = badge;
-      this->rebuild_entity_row_text_(ei);
+                      &widget, &unavail);
+      this->widgets_by_entity_[ei] = widget;
+      this->unavail_labels_by_entity_[ei] = unavail;
+      this->rebuild_entity_row_(ei);
     }
   }
   // Settings tile (last col). LV_DIR_LEFT only — can't scroll right past it.
