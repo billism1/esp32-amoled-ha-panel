@@ -508,6 +508,14 @@ Anything that needs a value picker, slider, dropdown, or multi-button transport 
 
 P7c already shipped: row-level `lv_switch` for binary domains, action-icon for scene/script/automation/button, text+glyph for lock/cover, summary text for climate/media_player/number/select. P7d's job is the *modal* surface on top of that — sliders, dropdowns, transport buttons — for domains where a single tap can't communicate the user's intent.
 
+### What P7d can lift from earlier phases
+
+- **Apply/Cancel staging pattern** — P7b's settings tile already ships the dirty-flag + revert-on-navigate-away + commit-on-Apply recipe. Lift it for the modal.
+- **Full-screen modal infrastructure** — P5/P6's area picker (`picker_` lv_obj in [ha_panel.cpp](components/ha_panel/ha_panel.cpp)) is a working show/hide/bg-click-to-dismiss overlay. `detail_modal_` is the same shape.
+- **Tap visual feedback** — `LV_STATE_PRESSED` bg override already on rows from P7a; new modal buttons should match.
+- **Slider widget** — `LV_USE_SLIDER` + `LV_USE_BAR` already on from P7a; no new flag needed for brightness/volume/position sliders.
+- **Switch widget** — `LV_USE_SWITCH` on from P7c; the modal's per-light on/off toggle can reuse it.
+
 ### Interaction model
 
 - Long-press threshold: ~600 ms (LVGL `LV_EVENT_LONG_PRESSED`). Avoids accidental detail-view opens during scroll.
@@ -531,8 +539,8 @@ P7c already shipped: row-level `lv_switch` for binary domains, action-icon for s
   - Brightness slider (0–100 %): `light.turn_on { brightness_pct: N }`.
   - On / off toggle button at top: `light.turn_on` / `light.turn_off`.
   - If the entity reports `supported_color_modes` includes `color_temp`: CT slider in Kelvin (3000–6500 K) → `light.turn_on { color_temp_kelvin: N }`.
-  - If `rgb` is supported: leave colour-wheel as a stretch item — LVGL has no built-in colour picker, would need a custom `LV_USE_CANVAS` widget. Hold for P7e if it grows large.
-  - Need to consume entity attributes (`brightness`, `color_mode`, `supported_color_modes`) — current `ha_panel` only subscribes to state, not attributes. **Add attribute subscription path** (`subscribe_homeassistant_state(cb, entity_id, "brightness")` etc) and a flat `std::map<std::string, std::string>` per entity for attribute storage.
+  - If `rgb` is supported: leave colour-wheel as a stretch item — LVGL has no built-in colour picker, would need a custom `LV_USE_CANVAS` widget. Hold out-of-scope or punt to a dedicated colour-wheel mini-phase (P7f or parking lot) if it grows large.
+  - Need to consume entity attributes (`brightness`, `color_mode`, `supported_color_modes`) — current `ha_panel` only subscribes to state, not attributes. **Add attribute subscription path** (`subscribe_homeassistant_state(cb, entity_id, "brightness")` etc) and a flat `std::map<std::string, std::string>` per entity for attribute storage. **Shared with P7e** (HA `icon` attribute subscription) — whichever phase ships first builds it; the other reuses.
 - **`climate` (set-point + mode).**
   - Current temperature read-only at top.
   - Target temperature spinbox or arc widget (range derived from `min_temp` / `max_temp` attrs) → `climate.set_temperature { temperature: N }`.
@@ -560,7 +568,11 @@ Add to `boards/waveshare-2.16.yaml` `build_flags` for any not already on:
 - `LV_USE_SPINBOX=1` (number set value, climate set-point).
 - `LV_USE_ARC=1` (optional alternative to slider for temperature).
 - `LV_USE_CANVAS=1` (only if RGB colour wheel ends up in scope).
-- `LV_USE_FLEX=1` and `LV_USE_LABEL=1` already on from P6/P7a.
+
+Already on, no flag change needed:
+- `LV_USE_FLEX=1`, `LV_USE_LABEL=1`, `LV_USE_BUTTON=1`, `LV_USE_TILEVIEW=1` (P6).
+- `LV_USE_BAR=1`, `LV_USE_SLIDER=1` (P7a settings tile).
+- `LV_USE_SWITCH=1` (P7c binary-row indicator).
 
 ### Risks / unknowns
 
