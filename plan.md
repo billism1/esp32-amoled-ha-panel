@@ -60,7 +60,7 @@ firmware when HA is the one silently rejecting calls.
 | 7b | Polish round 2 (header layout, battery + Wi-Fi icons, Apply/Cancel in settings) | 🟡 | code complete 2026-05-28; awaiting on-device verification |
 | 7c | Entity control: explicit on/off + per-domain update operations | 🟡 | code complete 2026-05-28; awaiting on-device verification |
 | 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | 🟡 | code complete 2026-05-29; awaiting on-device verification |
-| 7e | Per-entity icons (left of friendly name) | ⬜ | HA `icon` attr → YAML override → domain default → fallback; baked MDI subset |
+| 7e | Per-entity icons (left of friendly name) | ⬜ | v1: YAML override → domain default → fallback (zero new subs); baked MDI subset. HA `icon` attr deferred to P9 batched sensor |
 | 7f | Per-entity tap-confirmation guard | ⬜ | `confirm: true` in YAML → short-tap opens modal instead of firing action |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
@@ -594,14 +594,17 @@ Already on, no flag change needed:
 
 **Status:** ⬜ not started · target tag: `p7e-icons`
 
-**Goal:** Show the entity's chosen icon to the left of `friendly_name` on every row, sourced from Home Assistant by default so the user only curates icons in one place (HA's entity editor). Optional YAML override per entity for the rare "different on the panel than in HA" case.
+**Goal:** Show the entity's chosen icon to the left of `friendly_name` on every row. Sourced from a YAML override or a compile-time domain default. **No live HA `icon` attribute subscription in v1** — see the connect-time TX-saturation lesson below.
 
-### Icon resolution chain (per entity, evaluated each render)
+> **⚠️ Dependency — do NOT subscribe to the HA `icon` attribute at connect.** The 2026-05-29 P7d post-mortem (§Session notes) proved that bursting ~100+ per-entity attribute subscriptions at connect saturates the native-API TX path, drops HA's `SubscribeHomeassistantServicesRequest`, and makes **every firmware-initiated service call silently fail** (taps log but nothing happens; HA eventually disconnects). P7e's original "subscribe to `icon` on every entity" would re-trigger exactly that. v1 therefore resolves icons with **zero new subscriptions**. The live HA-`icon` source is deferred to the P9 HA-side batched template sensor (one sub, JSON payload) — same path that unparks the P7d live-attrs modal.
 
-1. **YAML override** in `ha-entities.yaml` — `icon: mdi:foo` on the entity entry. Highest priority; if set, HA attr is ignored. For entities with no HA icon or where you want a panel-specific glyph.
-2. **HA `icon` attribute** — subscribed via `subscribe_homeassistant_state(cb, entity_id, "icon")`. Live: change icon in HA → panel reflects within one state callback.
-3. **Domain default** — compile-time map (`light` → `mdi:lightbulb`, `switch` → `mdi:toggle-switch`, `cover` → `mdi:window-shutter`, `lock` → `mdi:lock`, `fan` → `mdi:fan`, `climate` → `mdi:thermostat`, `media_player` → `mdi:speaker`, `scene` → `mdi:palette`, `script` → `mdi:script-text-play`, `automation` → `mdi:robot`, `button` → `mdi:gesture-tap-button`, `sensor` → `mdi:gauge`, `binary_sensor` → `mdi:checkbox-marked-circle-outline`).
-4. **Generic fallback** — `LV_SYMBOL_REFRESH` (already in default LVGL font) when the resolved MDI name isn't in the baked subset. Logs once per missing icon name so we know what to bake next.
+### Icon resolution chain (per entity, evaluated each render) — v1
+
+1. **YAML override** in `ha-entities.yaml` — `icon: mdi:foo` on the entity entry. Highest priority. For entities where you want a panel-specific glyph.
+2. **Domain default** — compile-time map (`light` → `mdi:lightbulb`, `switch` → `mdi:toggle-switch`, `cover` → `mdi:window-shutter`, `lock` → `mdi:lock`, `fan` → `mdi:fan`, `climate` → `mdi:thermostat`, `media_player` → `mdi:speaker`, `scene` → `mdi:palette`, `script` → `mdi:script-text-play`, `automation` → `mdi:robot`, `button` → `mdi:gesture-tap-button`, `sensor` → `mdi:gauge`, `binary_sensor` → `mdi:checkbox-marked-circle-outline`).
+3. **Generic fallback** — `LV_SYMBOL_REFRESH` (already in default LVGL font) when the resolved MDI name isn't in the baked subset. Logs once per missing icon name so we know what to bake next.
+
+**Deferred to P9 (HA `icon` attribute, batched):** slots between YAML override and domain default once the P9 template sensor lands. Single startup subscription to one HA entity whose attribute payload carries every entity's icon as JSON — no per-entity sub multiplier. Until then, domain default covers the common case and YAML override handles the rest.
 
 ### YAML schema change
 
@@ -617,15 +620,13 @@ ha_panel:
           icon: mdi:desk-lamp      # optional override
 ```
 
-`components/ha_panel/__init__.py` adds `cv.Optional("icon", default="")`. Codegen passes it into `add_entity(entity_id, friendly_name, icon_override)`. Stored as `Entity::icon_override`. Empty string = "fall through to HA attr → domain default → fallback".
+`components/ha_panel/__init__.py` adds `cv.Optional("icon", default="")`. Codegen passes it into `add_entity(entity_id, friendly_name, icon_override)`. Stored as `Entity::icon_override`. Empty string = "fall through to domain default → fallback" (HA-attr tier inserted at P9).
 
-### Attribute subscription path (shared with P7d)
+### Attribute subscription path — NOT used in P7e v1
 
-P7d already needs an attribute-subscription mechanism for `brightness` / `color_temp_kelvin` / etc. Build the path once; both phases benefit:
+P7e v1 adds **no** attribute subscriptions. Icons resolve from YAML override + compile-time domain map only, so there is no connect-time sub burst. This is the deliberate fix for the 2026-05-29 TX-saturation failure (see warning above and §Session notes).
 
-- `HAPanel::setup()` already does `subscribe_homeassistant_state(&HAPanel::on_state_, entity_id)` for every entity. Add a parallel `subscribe_homeassistant_state(&HAPanel::on_attr_, entity_id, attribute_name)` call per `(entity, attribute_of_interest)` pair.
-- For P7e: subscribe to `icon` on every entity that has no `icon_override`. Skip the subscription if YAML override is set (saves API traffic).
-- Store attrs in `Entity::attrs` (`std::map<std::string, std::string>`). On `icon` update → re-resolve, redraw the row's icon widget.
+The live HA-`icon` source folds into P9's batched template-sensor work: one startup subscription to a single HA entity whose JSON attribute payload carries all icons. At that point `on_attr_` parses the payload and re-resolves affected rows — re-using the `ensure_attrs_subscribed_` / `on_attr_` scaffolding left in source. No per-entity icon subscription, ever.
 
 ### Baked MDI font subset
 
@@ -677,17 +678,16 @@ P7e row:
 
 ### Architecture additions
 
-- `Entity` struct gains `std::string icon_override;` and `std::string icon_attr;` (latter populated by HA attribute callback).
-- `HAPanel::resolve_icon_(const Entity &e) -> const char *` returns the codepoint string for the row. Implements the four-step chain. Caches the resolution (`mutable std::string icon_resolved_` per Entity) so we're not re-walking the chain every redraw.
-- `HAPanel::on_attr_(entity_id, attribute, value)` dispatches: if `attribute == "icon"`, update `Entity::icon_attr` + re-resolve + redraw.
-- `icons_by_entity_` parallel vector (matches `widgets_by_entity_`) for the icon label widgets so the rebuild path can update them in place.
+- `Entity` struct gains `std::string icon_override;`. (`icon_attr` deferred — populated by P9 batched payload, not a per-entity sub.)
+- `HAPanel::resolve_icon_(const Entity &e) -> const char *` returns the codepoint string for the row. Implements the v1 chain (override → domain default → fallback). Caches the resolution (`mutable std::string icon_resolved_` per Entity) so we're not re-walking the chain every redraw. P9 inserts the HA-`icon` tier into this same function.
+- `icons_by_entity_` parallel vector (matches `widgets_by_entity_`) for the icon label widgets so the rebuild path can update them in place (needed when P9 pushes live icon updates).
 
 ### Risks / unknowns
 
 - **MDI font flash cost.** 60 glyphs × ~1 KB each = ~60 KB. Acceptable on 16 MB flash. If subset grows past ~200 icons, revisit.
 - **Codepoint maintenance.** Hand-typing `\U000F0335` is error-prone. Build the helper script before the first icon lands.
 - **Missing-icon log spam.** If a user has an unusual `mdi:foo-bar` set in HA, we'll log it once and fall back to the domain default. Throttle to once-per-name to avoid log floods.
-- **Attribute subscription overhead.** One extra subscription per entity that doesn't have a YAML override. For ~100 entities that's ~100 subscriptions on top of the ~100 state subscriptions. Within native API limits but worth measuring after P7e on-device.
+- **~~Attribute subscription overhead.~~ RESOLVED by dropping HA-`icon` subs from v1.** Original plan (~100 icon subs on top of ~100 state subs) would have re-triggered the 2026-05-29 TX-saturation failure that silently kills service calls. v1 adds zero subs; live HA icons deferred to P9 batched sensor. See warning at top of phase.
 - **Icon != state widget.** Don't try to encode state in the icon (e.g. swap `lightbulb` → `lightbulb-off` on state change). State is the *right-side* widget's job. Keep the icon static per entity to avoid jumpy visual.
 
 **Exit criteria:**
