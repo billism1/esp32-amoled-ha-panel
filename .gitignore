@@ -17,6 +17,11 @@ __pycache__/
 venv/
 env/
 
+# Claude Code runtime state — machine-local. settings.json is tracked (shared);
+# the scheduled-task lock and other runtime files are not.
+.claude/scheduled_tasks.lock
+.claude/*.lock
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db
