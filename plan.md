@@ -60,6 +60,7 @@ firmware when HA is the one silently rejecting calls.
 | 7b | Polish round 2 (header layout, battery + Wi-Fi icons, Apply/Cancel in settings) | 🟡 | code complete 2026-05-28; awaiting on-device verification |
 | 7c | Entity control: explicit on/off + per-domain update operations | 🟡 | code complete 2026-05-28; awaiting on-device verification |
 | 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | ⬜ | long-press → shared modal with per-domain widgets |
+| 7e | Per-entity icons (left of friendly name) | ⬜ | HA `icon` attr → YAML override → domain default → fallback; baked MDI subset |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
@@ -573,6 +574,115 @@ Add to `boards/waveshare-2.16.yaml` `build_flags` for any not already on:
 - Long-press on a `climate` row opens a modal with set-point + HVAC-mode controls that fire the right services.
 - Long-press on `media_player`, `number`, `select`, `fan`, `cover` opens the relevant modal and dispatches the right service.
 - Tap (short-press) on entity rows still does the P7c short-tap action — no regression.
+
+---
+
+## Phase 7e — Per-entity icons (left of friendly name)
+
+**Status:** ⬜ not started · target tag: `p7e-icons`
+
+**Goal:** Show the entity's chosen icon to the left of `friendly_name` on every row, sourced from Home Assistant by default so the user only curates icons in one place (HA's entity editor). Optional YAML override per entity for the rare "different on the panel than in HA" case.
+
+### Icon resolution chain (per entity, evaluated each render)
+
+1. **YAML override** in `ha-entities.yaml` — `icon: mdi:foo` on the entity entry. Highest priority; if set, HA attr is ignored. For entities with no HA icon or where you want a panel-specific glyph.
+2. **HA `icon` attribute** — subscribed via `subscribe_homeassistant_state(cb, entity_id, "icon")`. Live: change icon in HA → panel reflects within one state callback.
+3. **Domain default** — compile-time map (`light` → `mdi:lightbulb`, `switch` → `mdi:toggle-switch`, `cover` → `mdi:window-shutter`, `lock` → `mdi:lock`, `fan` → `mdi:fan`, `climate` → `mdi:thermostat`, `media_player` → `mdi:speaker`, `scene` → `mdi:palette`, `script` → `mdi:script-text-play`, `automation` → `mdi:robot`, `button` → `mdi:gesture-tap-button`, `sensor` → `mdi:gauge`, `binary_sensor` → `mdi:checkbox-marked-circle-outline`).
+4. **Generic fallback** — `LV_SYMBOL_REFRESH` (already in default LVGL font) when the resolved MDI name isn't in the baked subset. Logs once per missing icon name so we know what to bake next.
+
+### YAML schema change
+
+```yaml
+ha_panel:
+  areas:
+    - name: "Office"
+      entities:
+        - entity_id: light.office_color_lamp
+          friendly_name: "Office lamp"
+        - entity_id: light.desk_lamp
+          friendly_name: "Desk lamp"
+          icon: mdi:desk-lamp      # optional override
+```
+
+`components/ha_panel/__init__.py` adds `cv.Optional("icon", default="")`. Codegen passes it into `add_entity(entity_id, friendly_name, icon_override)`. Stored as `Entity::icon_override`. Empty string = "fall through to HA attr → domain default → fallback".
+
+### Attribute subscription path (shared with P7d)
+
+P7d already needs an attribute-subscription mechanism for `brightness` / `color_temp_kelvin` / etc. Build the path once; both phases benefit:
+
+- `HAPanel::setup()` already does `subscribe_homeassistant_state(&HAPanel::on_state_, entity_id)` for every entity. Add a parallel `subscribe_homeassistant_state(&HAPanel::on_attr_, entity_id, attribute_name)` call per `(entity, attribute_of_interest)` pair.
+- For P7e: subscribe to `icon` on every entity that has no `icon_override`. Skip the subscription if YAML override is set (saves API traffic).
+- Store attrs in `Entity::attrs` (`std::map<std::string, std::string>`). On `icon` update → re-resolve, redraw the row's icon widget.
+
+### Baked MDI font subset
+
+LVGL needs a bitmap font compiled in. ESPHome's `font:` block accepts a TTF file + glyph list + size:
+
+```yaml
+# packages/lvgl-ui.yaml (or board package — TBD which is cleaner)
+font:
+  - file:
+      type: web
+      url: https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf
+      refresh: never
+    id: mdi_24
+    size: 24
+    glyphs:
+      - "\U000F0335"   # mdi-lightbulb
+      - "\U000F1255"   # mdi-lightbulb-multiple
+      - "\U000F0425"   # mdi-toggle-switch
+      # … initial subset (see below)
+```
+
+Initial baked subset (~60–80 icons, ~50–100 KB flash). Maintained as a top-of-file comment in the board package so adding new ones is a one-file edit:
+
+- **Lights**: `lightbulb`, `lightbulb-multiple`, `lightbulb-on`, `lamp`, `desk-lamp`, `ceiling-light`, `wall-sconce`, `floor-lamp`, `string-lights`, `led-strip-variant`.
+- **Switches / power**: `toggle-switch`, `toggle-switch-off`, `power`, `power-plug`, `power-socket`, `power-socket-us`.
+- **Fans**: `fan`, `fan-off`, `ceiling-fan`, `ceiling-fan-light`.
+- **Locks**: `lock`, `lock-open`, `lock-alert`.
+- **Covers**: `window-shutter`, `window-shutter-open`, `blinds`, `blinds-open`, `curtains`, `garage`, `garage-open`, `gate`, `gate-open`.
+- **Climate**: `thermostat`, `air-conditioner`, `radiator`, `fireplace`, `heat-pump`, `weather-sunny`, `weather-cloudy`, `weather-rainy`.
+- **Media**: `television`, `television-classic`, `speaker`, `speaker-multiple`, `music`, `volume-high`, `volume-off`.
+- **Sensors**: `thermometer`, `water-percent`, `gauge`, `motion-sensor`, `door`, `door-open`, `window-closed`, `window-open`, `leak`, `smoke-detector`, `battery`.
+- **Buttons / scenes / scripts**: `gesture-tap-button`, `play`, `palette`, `script-text-play`, `robot`, `cog`.
+- **Generic**: `home`, `alert`, `alert-circle`, `refresh`, `checkbox-marked-circle-outline`.
+
+Codepoints come from the MDI webfont CSS — script the list, don't type by hand. A `tools/build-mdi-glyphs.py` helper that reads a YAML list of `mdi-*` names + outputs the `\U…` codepoints for the `glyphs:` block is the cleanest maintenance path. Same script can be reused when adding new icons.
+
+### Row layout reflow
+
+Current row: `[friendly_name (LEFT_MID +12) ─── widget (RIGHT_MID -12)]`, name width 280 px.
+
+P7e row:
+```
+[ icon (LEFT_MID +12, 28×28) │ friendly_name (LEFT_MID +48) ─── widget (RIGHT_MID) ]
+```
+
+- Icon: `lv_label` with the resolved codepoint, font `mdi_24`. Position `LV_ALIGN_LEFT_MID, +12, 0`. 24 px glyph + ~4 px breathing room.
+- Friendly name shifts right by ~36 px (`LV_ALIGN_LEFT_MID, +48, 0`). Width drops from 280 → ~240 to keep ellipsis behaviour.
+- Icon tint: white (0xFFFFFF) default; could later tint by state (lit lights green, off lights grey) — flag as nice-to-have, not required for P7e exit.
+
+### Architecture additions
+
+- `Entity` struct gains `std::string icon_override;` and `std::string icon_attr;` (latter populated by HA attribute callback).
+- `HAPanel::resolve_icon_(const Entity &e) -> const char *` returns the codepoint string for the row. Implements the four-step chain. Caches the resolution (`mutable std::string icon_resolved_` per Entity) so we're not re-walking the chain every redraw.
+- `HAPanel::on_attr_(entity_id, attribute, value)` dispatches: if `attribute == "icon"`, update `Entity::icon_attr` + re-resolve + redraw.
+- `icons_by_entity_` parallel vector (matches `widgets_by_entity_`) for the icon label widgets so the rebuild path can update them in place.
+
+### Risks / unknowns
+
+- **MDI font flash cost.** 60 glyphs × ~1 KB each = ~60 KB. Acceptable on 16 MB flash. If subset grows past ~200 icons, revisit.
+- **Codepoint maintenance.** Hand-typing `\U000F0335` is error-prone. Build the helper script before the first icon lands.
+- **Missing-icon log spam.** If a user has an unusual `mdi:foo-bar` set in HA, we'll log it once and fall back to the domain default. Throttle to once-per-name to avoid log floods.
+- **Attribute subscription overhead.** One extra subscription per entity that doesn't have a YAML override. For ~100 entities that's ~100 subscriptions on top of the ~100 state subscriptions. Within native API limits but worth measuring after P7e on-device.
+- **Icon != state widget.** Don't try to encode state in the icon (e.g. swap `lightbulb` → `lightbulb-off` on state change). State is the *right-side* widget's job. Keep the icon static per entity to avoid jumpy visual.
+
+**Exit criteria:**
+- Every entity row shows an icon to the left of the friendly_name.
+- Icon resolves from YAML override if set, else from HA `icon` attribute if set, else from the domain default, else from the generic fallback.
+- Changing an entity's icon in HA's entity editor reflects on the panel within one state callback (no reflash).
+- Adding a new icon to the baked subset = one line in the font glyph list + one line in the domain-default map (if a new default), recompile.
+- Missing-icon name (resolved MDI name not in the baked subset) logs once and renders the generic fallback — no crash, no repeated noise.
 
 ---
 
