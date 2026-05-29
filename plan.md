@@ -387,45 +387,86 @@ Target (P7b):
 
 ---
 
-## Phase 7c — Entity control: explicit on/off + per-domain updates
+## Phase 7c — Entity control: explicit on/off + per-domain rendering + per-domain dispatch
 
 **Status:** ⬜ not started · target tag: `p7c-controls`
 
-**Goal:** Tighten the action set for already-controllable domains and add real control for the read-only ones where the cost is low. Anything that needs a detail/popup view per entity moves to P7d.
+**Goal:** Two things in one phase, both row-scoped:
+1. **Dispatch:** tighten the tap action per domain — explicit on/off where state is known, real services for action domains (scene/script/automation/button) and lock.
+2. **Rendering:** replace the generic right-aligned text badge with a per-domain widget that matches the domain's affordance (toggle switch for binaries, play icon for action-domains, text+colour for multi-state). Modals stay in P7d.
 
-### Already in place (P5/P6)
+### Already in place (P5/P6/P7a)
 - Tap on a row in `light` / `switch` / `fan` / `input_boolean` / `cover` → `homeassistant.toggle`.
 - Tap on `script` → `script.turn_on`. Tap on `automation` → `automation.trigger`.
+- All rows render the same way: friendly_name left, state text right (colour-tinted by [`rebuild_entity_row_text_`](components/ha_panel/ha_panel.cpp#L87-L103)).
 
-### In scope for P7c (cheap additions)
+### Dispatch — in scope for P7c
 
-- [ ] **Explicit on / off instead of toggle, where state is known.** If `Entity::has_state` and `state == "on"`, send `homeassistant.turn_off` for that entity_id; if `state == "off"`, send `homeassistant.turn_on`. Falls back to `homeassistant.toggle` when state is unknown / unavailable. Removes the "I toggled but it was already off and now it turned on" surprise.
-- [ ] **Cover** dispatch already toggles via `cover.toggle` (current code path uses `homeassistant.toggle` which works for covers). No change needed unless we want explicit open/close.
-- [ ] **`scene` domain** → `scene.turn_on` on tap. (Currently falls through to read-only.)
-- [ ] **`button` domain** → `button.press` on tap. (Currently filtered out at the YAML level; if the user wants buttons on the panel they can add them.)
-- [ ] **`lock` domain** → `lock.unlock` if `state == "locked"`, `lock.lock` if `state == "unlocked"`. Read-only fallback otherwise. Security-sensitive — only fire on explicit tap, never on swipe.
-- [ ] State-badge readout for any new domain shows the new state on next subscription update — the existing `on_state_` path covers this already, no extra code.
+- [ ] **Explicit on / off when state is known.** For binary domains (`light` / `switch` / `fan` / `input_boolean`): if `state == "on"` send `homeassistant.turn_off`; if `state == "off"` send `homeassistant.turn_on`. **Fall through to `homeassistant.toggle` for any other state** (`unavailable`, `unknown`, transient values like a light's mid-transition `transitioning`, or anything else we don't recognise). Comment the toggle fallback so the "why" is captured — it covers more than just unknown/unavailable.
+- [ ] **`cover`** stays on `homeassistant.toggle`. Cover state alphabet is `open` / `closed` / `opening` / `closing` — the binary on/off mapping doesn't fit, and toggle does the right thing (HA forwards to `cover.open_cover` / `cover.close_cover` based on current position). Explicit open/close lives in the P7d position slider.
+- [ ] **`lock`** → `lock.unlock` if `state == "locked"`, `lock.lock` if `state == "unlocked"`. Fall through to no-op log for any other state (`locking` / `unlocking` / `jammed` / `unavailable`) — better to do nothing than commit the wrong action mid-transition. Lock is security-sensitive; only fires on `LV_EVENT_CLICKED` (already drag-disambiguated by lv_button), never on long-press or scroll.
+- [ ] **`scene`** → `scene.turn_on` on tap. Currently falls through to read-only.
+- [ ] **`button`** → `button.press` on tap. Currently falls through to read-only. (User still has to list a `button.*` entity_id in `ha-entities.yaml` to surface it — codegen isn't auto-discovering.)
+- [ ] **State callback** keeps populating `Entity::state` for every subscribed entity — no change. Rendering layer (next section) reads the latest `state` whenever it redraws.
 
-### Punt to P7d (proper detail/popup view per entity)
+### Rendering — in scope for P7c
 
-Each of the below needs more than a row tap — they need a transient widget (panel, modal, second tileview row) to let the user pick a value. Document the *shape* of the work; don't build it in P7c.
+Replace the single text-badge slot on each entity row with a domain-specific widget. Pick the widget at row-build time using `Entity::domain` (already populated at codegen). One method per render class, dispatched off a small table.
 
-- **`light` brightness / colour temperature / RGB.** Tap-and-hold on a light row opens a detail view with a brightness slider (calls `light.turn_on { brightness_pct }`), optional CT slider, optional HSV picker. Need LVGL `LV_USE_ARC` or `LV_USE_SLIDER` + colour wheel — colour wheel is non-trivial.
-- **`climate` set-point + HVAC mode.** Detail view with a temperature spinbox/arc and a mode dropdown. Calls `climate.set_temperature` and `climate.set_hvac_mode`.
-- **`media_player` transport.** Play / pause / next / prev / volume buttons. Calls `media_player.media_play_pause`, `_next_track`, `_volume_set`, etc.
-- **`number` set value, `select` set option.** Detail view with a spinbox or roller.
+| Domain(s) | Row widget | Reason |
+|---|---|---|
+| `light` / `switch` / `fan` / `input_boolean` | `lv_switch` indicator, non-interactive. Updated programmatically from `state`. | Stock LVGL widget, communicates on/off at a glance, matches HA's own UI convention. Non-interactive because the row itself is already the tap target — making the switch clickable too would double-fire (switch event + row event bubble) or force us to suppress one of them. Simpler: switch is read-only visual, row tap drives dispatch + state mirroring on next subscription update. |
+| `scene` / `script` / `automation` / `button` | `LV_SYMBOL_PLAY` icon in the badge slot, tinted accent. | Action-only domains have no on/off state to show — the badge becomes an affordance ("this fires when tapped") instead of a status. Single glyph keeps row height unchanged. |
+| `lock` | Text badge: `LV_SYMBOL_CLOSE` + "Locked" (red-tinted) / `LV_SYMBOL_OK` + "Unlocked" (amber-tinted). | Lock has >2 logical states (`locking` / `unlocking` / `jammed`) so an `lv_switch` would lie during transitions. Text + glyph stays honest and security-sensitive. Amber on unlocked (not green) because "open lock" is a warning state for most users. |
+| `cover` | Text badge with chevron: `LV_SYMBOL_UP` + "Open" (green-tint) / `LV_SYMBOL_DOWN` + "Closed" (grey-tint) / italic "…" for `opening` / `closing`. | Cover has the same multi-state problem as lock. Chevron hints at the toggle direction the next tap will produce. |
+| `sensor` / `binary_sensor` / `weather` / any other read-only | Text badge, same as today. Numeric values render verbatim; well-known string states (`home` / `away`, `clear-night` / `cloudy`) keep their P6 colour cue. | These don't have an action — text *is* the right widget. No regression. |
+| `climate` / `media_player` / `number` / `select` | Compact text summary only. See "Row summary for P7d-bound domains" below. | These get the full control surface in P7d; row stays informative but not interactive. |
 
-### Design sketch (for P7d, not built here)
+#### Row summary for P7d-bound domains (P7c renders only)
 
-- Add a long-press handler on entity rows (`LV_EVENT_LONG_PRESSED`). Trigger threshold ~600 ms.
-- Build a single shared modal lv_obj covering the screen. `HAPanel::open_detail_(size_t entity_idx)` populates it based on `entity.domain`.
-- One C++ method per supported domain (`build_light_detail_`, `build_climate_detail_`, etc) that constructs the right widget set + binds events to `HomeAssistantActionRequest`s with the right service + data map.
-- Close on Apply, Cancel, or swipe-down. Same close semantics as the area picker.
+These render a richer text summary so the row is useful before P7d ships, but the tap still falls through to the existing "read-only — no action" log. P7d's long-press handler is what activates the modal; short-tap stays inert.
 
-**Exit criteria (P7c only):**
-- Tapping an `on` light or switch sends `turn_off`; tapping an `off` one sends `turn_on`. No more accidental wrong-direction toggles.
-- `scene`, `button`, `lock` taps fire the right service. Lock read-only fallback when domain not supported.
-- All other domains remain read-only with the existing "tap is no-op" log.
+- **`climate`**: badge shows `"<mode> <current_temp>°"` if attributes available, else just `state`. Needs attribute readout (deferred — render bare `state` in P7c if attribute path isn't ready, document the placeholder).
+- **`media_player`**: badge shows `state` (`playing` / `paused` / `idle` / `off`). Bare state is fine for P7c; media_title in the row is too long.
+- **`number`**: badge shows the numeric `state` verbatim (already works via the read-only path).
+- **`select`**: badge shows the currently-selected option (`state` is the selected option for `select` entities — verify on first one).
+
+### Punted to P7d (proper detail/popup view per entity)
+
+Anything that needs a value picker, slider, dropdown, or multi-button transport stays in P7d. This is unchanged from the prior plan; included here as a checklist of what the row widget *doesn't* do.
+
+- **`light` brightness / colour temperature / RGB.** Row `lv_switch` handles on/off fast path. Long-press → P7d modal with brightness slider (`light.turn_on { brightness_pct }`), optional CT slider, optional HSV picker. Colour wheel still flagged as non-trivial; may slip to P7e.
+- **`climate` set-point + HVAC mode.** Row shows summary text. Long-press → P7d modal with temperature spinbox/arc + mode dropdown.
+- **`media_player` transport + volume.** Long-press → P7d modal with prev / play-pause / next / vol± / mute buttons + volume slider.
+- **`number` set value, `select` set option, `fan` speed, `cover` position.** Long-press → P7d modal with the appropriate spinbox / roller / slider.
+
+### Implementation notes (decisions captured for the build)
+
+- **Row-build dispatch.** Add a `RenderClass` enum to `ha_panel.h` (`BINARY_SWITCH` / `ACTION_ICON` / `LOCK_TEXT` / `COVER_TEXT` / `READ_ONLY_TEXT` / `SUMMARY_TEXT`) + a `render_class_for_(const std::string &domain)` helper. `make_entity_row` switches on the class and creates the right child widget. Keeps the row builder linear and easy to extend in P7e.
+- **Switch double-fire avoidance.** When `lv_switch` is the indicator: `lv_obj_clear_flag(sw, LV_OBJ_FLAG_CLICKABLE)` so the parent button gets the tap. Comment it — without context the cleared flag looks accidental.
+- **Switch state mirroring.** `rebuild_entity_row_text_` becomes `rebuild_entity_row_(entity_idx)` and switches on `RenderClass`. For `BINARY_SWITCH`: `state == "on"` → `lv_obj_add_state(sw, LV_STATE_CHECKED)`; else clear. For `ACTION_ICON`: nothing to mirror. For text classes: update label text + colour as today.
+- **Storage.** `badges_by_entity_` already stores one `lv_obj_t *` per entity; rename to `widgets_by_entity_` since it's no longer always a label. No behavioural change.
+- **LVGL widget enables.** Add `LV_USE_SWITCH=1` to `boards/waveshare-2.16.yaml` `build_flags` — runtime widget construction won't auto-pull it in. Confirm switch compiles against LVGL v9.5 (`lv_switch_create`, `LV_STATE_CHECKED`).
+- **Fall-through dispatch logging.** Keep the existing `"tap … (domain '%s') is read-only — no action"` log for any domain not in the dispatch table. Don't silently swallow taps — the log is how we notice missing domains.
+- **`button` codegen filter.** Re-read `ha_panel/__init__.py` before P7c starts — current schema doesn't filter by domain, so `button.*` entries already work today. Verify on a real `button.*` entity_id before claiming the dispatch line ships the feature.
+- **Cover dispatch is still `homeassistant.toggle`.** Comment in `tap_entity_` documenting why we don't use `cover.toggle` directly: the generic service dispatches to the right per-domain handler and keeps the dispatch table flat.
+
+### Risks / unknowns
+
+- **Switch widget width on a 60 px row.** `lv_switch` defaults to ~50×25 px. Should fit the existing badge slot (right-aligned, ~80 px wide). If layout fights us, shrink via `lv_obj_set_size(sw, 44, 22)`.
+- **Action-icon visual weight.** Single `LV_SYMBOL_PLAY` glyph on the right may look like a static label rather than an affordance. If on-device feedback says it's not obvious, tint accent (e.g. cyan 0x44CCDD) and/or add a subtle border. Hold the call until on-device check.
+- **`climate` summary needs attributes.** Attribute subscriptions are a P7d concern (HVAC modes, target temp, etc). If P7c ships before that path lands, climate rows render bare `state` and a one-line comment notes the gap.
+- **State alphabet drift across HA versions.** Map of known states (`on` / `off` / `open` / `closed` / `locked` / `unlocked` / `home` / `away` / `unavailable` / `unknown`) is built into the renderer. Any new HA state value falls into the "render as-is, default colour" bucket — safe default, not a crash.
+
+**Exit criteria:**
+- Tapping an `on` light/switch/fan/input_boolean sends `turn_off`; tapping an `off` one sends `turn_on`. Unknown/transient state falls back to toggle with a log entry.
+- `scene`, `script`, `automation`, `button` taps fire their respective HA services.
+- `lock` taps lock/unlock based on current state; mid-transition taps log + no-op.
+- Binary domains render with `lv_switch` indicator that mirrors state within ~1s of the HA round-trip.
+- Action domains render with `LV_SYMBOL_PLAY` icon badge.
+- `lock` / `cover` render with state text + glyph + colour cue.
+- `climate` / `media_player` / `number` / `select` rows render a summary text and still log "read-only — no action" on short-tap (the modal in P7d will be the action path).
+- All other domains keep today's text badge unchanged.
 
 ---
 
@@ -433,7 +474,9 @@ Each of the below needs more than a row tap — they need a transient widget (pa
 
 **Status:** ⬜ not started · target tag: `p7d-detail`
 
-**Goal:** Give domains that need more than a binary tap their own control surface. Long-press an entity row → a shared modal opens, populated by a per-domain builder. Tap an entity row stays as the P7c short-tap action; the modal is strictly opt-in via long-press.
+**Goal:** Give domains that need more than a binary tap their own control surface. Long-press an entity row → a shared modal opens, populated by a per-domain builder. Short-tap stays as the P7c row-level action (dispatch for binaries + action domains, no-op-with-log for the P7d-bound domains); the modal is strictly opt-in via long-press.
+
+P7c already shipped: row-level `lv_switch` for binary domains, action-icon for scene/script/automation/button, text+glyph for lock/cover, summary text for climate/media_player/number/select. P7d's job is the *modal* surface on top of that — sliders, dropdowns, transport buttons — for domains where a single tap can't communicate the user's intent.
 
 ### Interaction model
 
