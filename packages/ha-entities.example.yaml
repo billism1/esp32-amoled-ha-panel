@@ -19,6 +19,13 @@
 # Friendly names are optional but recommended; the panel falls back to the
 # entity_id if not provided.
 #
+# Tap-confirm (P7f): add `confirm: true` to guard an entity against accidental
+# brushes. Short-tap then opens a confirm sheet (action/lock/cover/switch) or
+# the detail modal (light/climate/media_player/number/select/fan) instead of
+# firing immediately — the action commits only on a second, deliberate tap.
+# Meaningless on read-only domains (sensor, binary_sensor, weather…); set there
+# it is ignored and warned about at compile time. Default false.
+#
 # Icons (P7e): each row shows an icon left of the friendly name. By default it
 # comes from the entity's domain (light → bulb, lock → lock, etc). Add an
 # optional `icon: mdi:foo` to override per entity. The glyph must be in the
@@ -52,6 +59,9 @@ ha_panel:
           friendly_name: "Bedside"
         - entity_id: cover.bedroom_blinds
           friendly_name: "Blinds"
+        - entity_id: cover.garage_door
+          friendly_name: "Garage door"
+          confirm: true            # short-tap → Open/Stop/Close confirm sheet
 
     - name: "Office"
       entities:

@@ -61,11 +61,11 @@ firmware when HA is the one silently rejecting calls.
 | 7c | Entity control: explicit on/off + per-domain update operations | ✅ | verified on-device 2026-05-29 (tap-toggle live after the P7d attr-sub burst was disabled) |
 | 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | ✅ | verified on-device 2026-05-29; live-attr modal preload parked → P9 (see Post-P7 TODO) |
 | 7e | Per-entity icons (left of friendly name) | ✅ | v1: YAML override → domain default → fallback (zero new subs); baked MDI subset. HA `icon` attr deferred to P9 batched sensor. On-device verified |
-| 7f | Per-entity tap-confirmation guard | ⬜ | `confirm: true` in YAML → short-tap opens modal instead of firing action |
+| 7f | Per-entity tap-confirmation guard | ✅ | verified on-device 2026-05-29. `confirm: true` → short-tap opens confirm sheet (action/lock/cover/switch) or detail modal (light/climate/…). switch/input_boolean use action sheet (no P7d modal exists for binary domains) |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
-**Last updated:** 2026-05-29 (P7b–P7e verified on-device; next: P7f tap-confirm guard).
+**Last updated:** 2026-05-29 (P7b–P7f verified on-device; next: P8 multi-board support).
 
 ---
 
@@ -701,7 +701,7 @@ P7e row:
 
 ## Phase 7f — Per-entity tap-confirmation guard
 
-**Status:** ⬜ not started · target tag: `p7f-confirm`
+**Status:** ✅ verified on-device 2026-05-29 · target tag: `p7f-confirm`
 
 **Goal:** Stop me from accidentally opening the garage door (or unlocking the front door, or running a "panic" script) by brushing the screen. A per-entity opt-in flag in `ha-entities.yaml` turns the short-tap into "open a confirm sheet" instead of "fire the action immediately". The actual action only fires after an explicit second tap on a labelled button inside the sheet.
 

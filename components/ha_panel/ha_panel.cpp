@@ -28,7 +28,7 @@ void HAPanel::add_area(const std::string &name) {
 }
 
 void HAPanel::add_entity(const std::string &entity_id, const std::string &friendly_name,
-                         const std::string &icon_override) {
+                         const std::string &icon_override, bool confirm) {
   if (this->areas_.empty()) {
     ESP_LOGE(TAG, "add_entity called before any area — codegen bug");
     return;
@@ -39,6 +39,7 @@ void HAPanel::add_entity(const std::string &entity_id, const std::string &friend
   e.domain = HAPanel::extract_domain_(entity_id);
   e.render_class = HAPanel::render_class_for_(e.domain);
   e.icon_override = icon_override;
+  e.confirm = confirm;
   size_t idx = this->entities_.size();
   this->entities_.push_back(std::move(e));
   this->areas_.back().entity_indices.push_back(idx);
@@ -57,6 +58,12 @@ bool HAPanel::has_detail_(const std::string &d) {
   // skip the modal — single tap already does the right thing.
   return d == "light" || d == "climate" || d == "media_player" ||
          d == "number" || d == "select" || d == "fan" || d == "cover";
+}
+
+bool HAPanel::confirm_meaningful_(const std::string &d) {
+  // P7f: confirm has a surface for any domain that does something on tap —
+  // i.e. anything that isn't READ_ONLY_TEXT. Mirrors render_class_for_.
+  return HAPanel::render_class_for_(d) != RenderClass::READ_ONLY_TEXT;
 }
 
 std::vector<std::string> HAPanel::parse_ha_list_(const std::string &raw) {
@@ -894,7 +901,11 @@ void HAPanel::build_ui_() {
                                       (uintptr_t) ei, &widget, &unavail,
                                       glyph.c_str(), mdi_lv_font, &icon);
       // P7d: long-press → detail modal, only for domains that have one.
-      if (HAPanel::has_detail_(e.domain)) {
+      // P7f: also register long-press for confirm-flagged action-only entities
+      // (no detail modal) so a long-press opens the same confirm sheet as a
+      // short-tap — otherwise the gesture would do nothing.
+      if (HAPanel::has_detail_(e.domain) ||
+          (e.confirm && HAPanel::confirm_meaningful_(e.domain))) {
         lv_obj_add_event_cb(btn, &HAPanel::on_entity_row_long_pressed_,
                             LV_EVENT_LONG_PRESSED, this);
       }
@@ -985,6 +996,9 @@ void HAPanel::build_ui_() {
 
   // ---- P7d detail modal (built once, hidden) ----
   this->build_detail_modal_(scr);
+
+  // ---- P7f action confirm sheet (built once, hidden) ----
+  this->build_confirm_sheet_(scr);
 
   // ---- Boot splash (hides everything until API connects) ----
   this->splash_ = lv_obj_create(scr);
@@ -1206,6 +1220,15 @@ void HAPanel::on_entity_row_clicked_(lv_event_t *e) {
     return;
   lv_obj_t *row = lv_event_get_target_obj(e);
   size_t entity_idx = (size_t) (uintptr_t) lv_obj_get_user_data(row);
+  // P7f: confirm-flagged entities with a meaningful surface defer the action —
+  // short-tap opens a confirm sheet or detail modal instead of firing now.
+  if (entity_idx < self->entities_.size()) {
+    const Entity &en = self->entities_[entity_idx];
+    if (en.confirm && HAPanel::confirm_meaningful_(en.domain)) {
+      self->open_confirm_or_detail_(entity_idx);
+      return;
+    }
+  }
   self->tap_entity_(entity_idx);
 }
 
@@ -2053,6 +2076,19 @@ void HAPanel::on_entity_row_long_pressed_(lv_event_t *e) {
     return;
   lv_obj_t *row = lv_event_get_target_obj(e);
   size_t entity_idx = (size_t) (uintptr_t) lv_obj_get_user_data(row);
+  // P7f: a confirm-flagged action-only entity (no detail modal — e.g.
+  // script.panic) has no long-press target otherwise; route it to the confirm
+  // sheet so long-press matches short-tap. Domains WITH a detail modal (incl.
+  // cover, whose confirm short-tap is the no-slider sheet) still open the full
+  // modal on long-press.
+  if (entity_idx < self->entities_.size()) {
+    const Entity &en = self->entities_[entity_idx];
+    if (en.confirm && HAPanel::confirm_meaningful_(en.domain) &&
+        !HAPanel::has_detail_(en.domain)) {
+      self->open_confirm_action_(entity_idx);
+      return;
+    }
+  }
   self->open_detail_(entity_idx);
 }
 
@@ -2249,6 +2285,265 @@ void HAPanel::on_fan_off_(lv_event_t *e) {
   d["entity_id"] = en.entity_id;
   self->call_homeassistant_service("fan.turn_off", d);
   ESP_LOGI(TAG, "fan off: %s", en.entity_id.c_str());
+}
+
+// ---------- P7f action confirm sheet ----------
+
+// 200x70 coloured action button on the confirm sheet. enabled=false (entity
+// unavailable) paints it grey, drops the click handler, and dims the label.
+static lv_obj_t *add_confirm_button(lv_obj_t *parent, const char *text,
+                                    uint32_t bg, uint32_t text_col,
+                                    lv_event_cb_t cb, void *ud, bool enabled) {
+  lv_obj_t *b = lv_button_create(parent);
+  lv_obj_set_size(b, 200, 70);
+  lv_obj_set_style_radius(b, 12, 0);
+  lv_obj_set_style_border_width(b, 0, 0);
+  lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+  if (enabled) {
+    lv_obj_set_style_bg_color(b, lv_color_hex(bg), 0);
+    // Press feedback: dim the fill rather than carry a per-colour pressed tint.
+    lv_obj_set_style_bg_opa(b, LV_OPA_80, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
+  } else {
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x333333), 0);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    text_col = 0x777777;
+  }
+  lv_obj_t *l = lv_label_create(b);
+  lv_label_set_text(l, text);
+  lv_obj_set_style_text_color(l, lv_color_hex(text_col), 0);
+  lv_obj_set_style_text_font(l, &lv_font_montserrat_18, 0);
+  lv_obj_center(l);
+  return b;
+}
+
+void HAPanel::build_confirm_sheet_(lv_obj_t *scr) {
+  this->confirm_sheet_ = lv_obj_create(scr);
+  lv_obj_remove_style_all(this->confirm_sheet_);
+  lv_obj_set_size(this->confirm_sheet_, 480, 480);
+  lv_obj_set_pos(this->confirm_sheet_, 0, 0);
+  lv_obj_set_style_bg_color(this->confirm_sheet_, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(this->confirm_sheet_, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(this->confirm_sheet_, 0, 0);
+  lv_obj_set_style_border_width(this->confirm_sheet_, 0, 0);
+  lv_obj_add_flag(this->confirm_sheet_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(this->confirm_sheet_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(this->confirm_sheet_, &HAPanel::on_confirm_bg_clicked_,
+                      LV_EVENT_CLICKED, this);
+
+  // Title centered at top.
+  this->confirm_title_ = lv_label_create(this->confirm_sheet_);
+  lv_label_set_text(this->confirm_title_, "");
+  lv_obj_set_style_text_color(this->confirm_title_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(this->confirm_title_, &lv_font_montserrat_18, 0);
+  lv_obj_set_width(this->confirm_title_, 400);
+  lv_obj_set_style_text_align(this->confirm_title_, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_long_mode(this->confirm_title_, LV_LABEL_LONG_DOT);
+  lv_obj_align(this->confirm_title_, LV_ALIGN_TOP_MID, 0, 16);
+
+  // "Currently unavailable" note under the title — shown only when the entity
+  // has no live/usable state at open time (action buttons disabled too).
+  this->confirm_unavail_label_ = lv_label_create(this->confirm_sheet_);
+  lv_label_set_text(this->confirm_unavail_label_, "Currently unavailable");
+  lv_obj_set_style_text_color(this->confirm_unavail_label_, lv_color_hex(0xCC4444), 0);
+  lv_obj_set_style_text_font(this->confirm_unavail_label_, &lv_font_montserrat_18, 0);
+  lv_obj_align(this->confirm_unavail_label_, LV_ALIGN_TOP_MID, 0, 46);
+  lv_obj_add_flag(this->confirm_unavail_label_, LV_OBJ_FLAG_HIDDEN);
+
+  // Body: centered flex column of big action buttons. Wiped + repopulated per
+  // open. 24 px side inset clears the panel's curved corners; buttons are
+  // 200 px and centred so they sit well within the [44, 436] safe band.
+  this->confirm_body_ = lv_obj_create(this->confirm_sheet_);
+  lv_obj_remove_style_all(this->confirm_body_);
+  lv_obj_set_size(this->confirm_body_, 432, 312);
+  lv_obj_set_pos(this->confirm_body_, 24, 76);
+  lv_obj_set_style_bg_opa(this->confirm_body_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_pad_all(this->confirm_body_, 4, 0);
+  lv_obj_set_style_pad_row(this->confirm_body_, 14, 0);
+  lv_obj_set_flex_flow(this->confirm_body_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(this->confirm_body_, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_scroll_dir(this->confirm_body_, LV_DIR_VER);
+
+  // Cancel row pinned to bottom (same geometry as detail / settings).
+  lv_obj_t *btn_row = lv_obj_create(this->confirm_sheet_);
+  lv_obj_remove_style_all(btn_row);
+  lv_obj_set_size(btn_row, 480, 60);
+  lv_obj_set_pos(btn_row, 0, 396);
+  lv_obj_set_style_bg_color(btn_row, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(btn_row, LV_OPA_COVER, 0);
+  lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  lv_obj_t *cancel = lv_button_create(btn_row);
+  lv_obj_set_size(cancel, 200, 50);
+  lv_obj_set_style_bg_color(cancel, lv_color_hex(0x222A33), 0);
+  lv_obj_set_style_bg_color(cancel, lv_color_hex(0x3A4A6A), LV_STATE_PRESSED);
+  lv_obj_set_style_bg_opa(cancel, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(cancel, 8, 0);
+  lv_obj_set_style_border_width(cancel, 0, 0);
+  lv_obj_add_event_cb(cancel, &HAPanel::on_confirm_cancel_, LV_EVENT_CLICKED, this);
+  lv_obj_t *clbl = lv_label_create(cancel);
+  lv_label_set_text(clbl, "Cancel");
+  lv_obj_set_style_text_color(clbl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(clbl, &lv_font_montserrat_18, 0);
+  lv_obj_center(clbl);
+}
+
+void HAPanel::open_confirm_or_detail_(size_t entity_idx) {
+  if (entity_idx >= this->entities_.size())
+    return;
+  const std::string &d = this->entities_[entity_idx].domain;
+  // Domains with a P7d detail modal use it as the confirm path — EXCEPT cover,
+  // whose confirm short-tap is the no-slider Open/Stop/Close sheet (the full
+  // position modal stays on long-press).
+  if (HAPanel::has_detail_(d) && d != "cover") {
+    this->open_detail_(entity_idx);
+    return;
+  }
+  // Action-only / lock / cover / switch / input_boolean → action confirm sheet.
+  this->open_confirm_action_(entity_idx);
+}
+
+void HAPanel::open_confirm_action_(size_t entity_idx) {
+  if (this->confirm_sheet_ == nullptr || entity_idx >= this->entities_.size())
+    return;
+  const Entity &e = this->entities_[entity_idx];
+  this->confirm_entity_idx_ = entity_idx;
+  lv_label_set_text(this->confirm_title_, e.friendly_name.c_str());
+  lv_obj_clean(this->confirm_body_);
+
+  const bool avail = e.has_state && e.state != "unavailable" &&
+                     e.state != "unknown";
+  if (this->confirm_unavail_label_ != nullptr) {
+    if (avail)
+      lv_obj_add_flag(this->confirm_unavail_label_, LV_OBJ_FLAG_HIDDEN);
+    else
+      lv_obj_clear_flag(this->confirm_unavail_label_, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  // Accent blue gets dark text for contrast; the muted green/amber/grey fills
+  // carry white text like the rest of the panel.
+  const uint32_t ACCENT = 0x44CCDD, ACCENT_TXT = 0x05151A;
+  const std::string &d = e.domain;
+  if (d == "scene") {
+    add_confirm_button(this->confirm_body_, "Activate scene", ACCENT, ACCENT_TXT,
+                       &HAPanel::on_confirm_single_, this, avail);
+  } else if (d == "script") {
+    add_confirm_button(this->confirm_body_, "Run script", ACCENT, ACCENT_TXT,
+                       &HAPanel::on_confirm_single_, this, avail);
+  } else if (d == "automation") {
+    add_confirm_button(this->confirm_body_, "Trigger automation", ACCENT,
+                       ACCENT_TXT, &HAPanel::on_confirm_single_, this, avail);
+  } else if (d == "button") {
+    add_confirm_button(this->confirm_body_, "Press button", ACCENT, ACCENT_TXT,
+                       &HAPanel::on_confirm_single_, this, avail);
+  } else if (d == "lock") {
+    add_confirm_button(this->confirm_body_, "Lock", 0x2A553A, 0xFFFFFF,
+                       &HAPanel::on_confirm_lock_, this, avail);
+    add_confirm_button(this->confirm_body_, "Unlock", 0x553A2A, 0xFFFFFF,
+                       &HAPanel::on_confirm_unlock_, this, avail);
+  } else if (d == "cover") {
+    add_confirm_button(this->confirm_body_, LV_SYMBOL_UP "  Open", 0x2A553A,
+                       0xFFFFFF, &HAPanel::on_confirm_cover_open_, this, avail);
+    add_confirm_button(this->confirm_body_, "Stop", 0x2E3640, 0xFFFFFF,
+                       &HAPanel::on_confirm_cover_stop_, this, avail);
+    add_confirm_button(this->confirm_body_, LV_SYMBOL_DOWN "  Close", 0x553A2A,
+                       0xFFFFFF, &HAPanel::on_confirm_cover_close_, this, avail);
+  } else if (d == "switch" || d == "input_boolean") {
+    // Binary domains have no P7d modal; the confirm path is a single On/Off
+    // button labelled for the action the current state implies.
+    const char *txt = (e.has_state && e.state == "on") ? "Turn off" : "Turn on";
+    add_confirm_button(this->confirm_body_, txt, ACCENT, ACCENT_TXT,
+                       &HAPanel::on_confirm_single_, this, avail);
+  } else {
+    ESP_LOGW(TAG, "confirm sheet opened for unhandled domain '%s' (%s)",
+             d.c_str(), e.entity_id.c_str());
+  }
+
+  lv_obj_clear_flag(this->confirm_sheet_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(this->confirm_sheet_);
+  this->confirm_open_ = true;
+  ESP_LOGI(TAG, "confirm sheet open: %s%s", e.entity_id.c_str(),
+           avail ? "" : " (unavailable)");
+}
+
+void HAPanel::close_confirm_() {
+  if (this->confirm_sheet_ == nullptr)
+    return;
+  lv_obj_add_flag(this->confirm_sheet_, LV_OBJ_FLAG_HIDDEN);
+  this->confirm_open_ = false;
+  ESP_LOGD(TAG, "confirm close");
+}
+
+void HAPanel::fire_confirm_service_(const char *service) {
+  if (this->confirm_entity_idx_ >= this->entities_.size()) {
+    this->close_confirm_();
+    return;
+  }
+  const Entity &e = this->entities_[this->confirm_entity_idx_];
+  std::map<std::string, std::string> data;
+  data["entity_id"] = e.entity_id;
+  this->call_homeassistant_service(service, data);
+  ESP_LOGI(TAG, "confirm %s → %s", e.entity_id.c_str(), service);
+  this->close_confirm_();
+}
+
+// ---- P7f confirm-sheet trampolines ----
+
+void HAPanel::on_confirm_cancel_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->close_confirm_();
+}
+
+void HAPanel::on_confirm_bg_clicked_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  if (lv_event_get_target_obj(e) == self->confirm_sheet_)
+    self->close_confirm_();
+}
+
+void HAPanel::on_confirm_single_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  // Reuse the normal dispatch — correct for action domains (scene/script/
+  // automation/button) and for switch/input_boolean (state-based turn_on/off).
+  self->tap_entity_(self->confirm_entity_idx_);
+  self->close_confirm_();
+}
+
+void HAPanel::on_confirm_lock_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->fire_confirm_service_("lock.lock");
+}
+
+void HAPanel::on_confirm_unlock_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->fire_confirm_service_("lock.unlock");
+}
+
+void HAPanel::on_confirm_cover_open_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->fire_confirm_service_("cover.open_cover");
+}
+
+void HAPanel::on_confirm_cover_stop_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->fire_confirm_service_("cover.stop_cover");
+}
+
+void HAPanel::on_confirm_cover_close_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->fire_confirm_service_("cover.close_cover");
 }
 
 }  // namespace ha_panel

@@ -41,6 +41,9 @@ struct Entity {
   std::map<std::string, std::string> attrs;
   // P7e: optional "mdi:foo" override from YAML. Empty = resolve from domain.
   std::string icon_override;
+  // P7f: short-tap opens a confirm sheet / detail modal instead of firing the
+  // action immediately. Set at codegen; read in the row-click pre-flight.
+  bool confirm{false};
   // Cached UTF-8 glyph for the icon column. v1 resolution (override → domain
   // default → fallback) never changes at runtime, so resolve once on first
   // render. The HA-`icon` attribute tier (P9 batched sensor) will invalidate
@@ -64,7 +67,7 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // Codegen-time API.
   void add_area(const std::string &name);
   void add_entity(const std::string &entity_id, const std::string &friendly_name,
-                  const std::string &icon_override = "");
+                  const std::string &icon_override = "", bool confirm = false);
   // P7e: MDI glyph font for the per-entity icon column. nullptr → icons off,
   // rows fall back to the pre-P7e name-at-left layout.
   void set_mdi_font(font::Font *f) { this->mdi_font_ = f; }
@@ -117,6 +120,20 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static std::string utf8_encode_(uint32_t cp);
   // P7d: which domains expose a long-press detail modal.
   static bool has_detail_(const std::string &domain);
+
+  // P7f confirm guard.
+  // Domains where `confirm: true` does something (detail modal or action
+  // sheet). False = read-only domain → flag ignored at runtime.
+  static bool confirm_meaningful_(const std::string &domain);
+  // Short-tap dispatcher for confirm-flagged entities: routes to the P7d
+  // detail modal (light/climate/media_player/number/select/fan) or the new
+  // action confirm sheet (action-only / lock / cover / switch / input_boolean).
+  void open_confirm_or_detail_(size_t entity_idx);
+  void build_confirm_sheet_(lv_obj_t *scr);
+  void open_confirm_action_(size_t entity_idx);
+  void close_confirm_();
+  // Build+commit helper: fires `service` for the confirm entity, then closes.
+  void fire_confirm_service_(const char *service);
 
   // LVGL build + helpers.
   void build_ui_();
@@ -194,6 +211,15 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_cover_stop_(lv_event_t *e);
   static void on_cover_close_(lv_event_t *e);
   static void on_fan_off_(lv_event_t *e);
+  // P7f confirm-sheet trampolines. All read confirm_entity_idx_.
+  static void on_confirm_cancel_(lv_event_t *e);
+  static void on_confirm_bg_clicked_(lv_event_t *e);
+  static void on_confirm_single_(lv_event_t *e);  // scene/script/automation/button + switch toggle
+  static void on_confirm_lock_(lv_event_t *e);
+  static void on_confirm_unlock_(lv_event_t *e);
+  static void on_confirm_cover_open_(lv_event_t *e);
+  static void on_confirm_cover_stop_(lv_event_t *e);
+  static void on_confirm_cover_close_(lv_event_t *e);
 
   std::vector<Area> areas_;
   std::vector<Entity> entities_;
@@ -284,6 +310,15 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *dw_fan_label_{nullptr};
   lv_obj_t *dw_cover_slider_{nullptr};
   lv_obj_t *dw_cover_label_{nullptr};
+
+  // P7f action confirm sheet. Third overlay alongside picker_ / detail_modal_.
+  // Built once at setup, hidden; confirm_body_ is wiped + repopulated per open.
+  lv_obj_t *confirm_sheet_{nullptr};
+  lv_obj_t *confirm_title_{nullptr};
+  lv_obj_t *confirm_body_{nullptr};
+  lv_obj_t *confirm_unavail_label_{nullptr};
+  size_t confirm_entity_idx_{0};
+  bool confirm_open_{false};
 };
 
 }  // namespace ha_panel
