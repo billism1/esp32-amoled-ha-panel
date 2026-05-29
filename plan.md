@@ -28,7 +28,9 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 | 5 | Static HA entity model (MVP) | ✅ | verified 2026-05-28: 88 entity subscriptions arrived within ~1.5 s of HA connect, states match HA |
 | 6 | LVGL UI: area carousel + entity scroller | ✅ | verified 2026-05-28: tileview swipe, vertical scroll, tap-toggle, area picker modal all live; touch transform reset to no-swap/no-mirror |
 | 7a | Polish round 1 (clock, settings tile, splash, tap feedback) | ✅ | verified 2026-05-28; battery + RTC deferred |
-| 7b | Polish round 2 (additional UX items — TBD) | ⬜ | new items added before P8 |
+| 7b | Polish round 2 (header layout, battery + Wi-Fi icons, Apply/Cancel in settings) | ⬜ | header reflow + status icons + settings buttons |
+| 7c | Entity control: explicit on/off + per-domain update operations | ⬜ | toggle already in P5/P6; round out actions for other domains where cheap, defer the rest to P7d |
+| 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | ⬜ | long-press → shared modal with per-domain widgets |
 | 8 | Multi-board support | ⬜ | |
 | 9 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
@@ -342,13 +344,163 @@ substitutions / Jinja, not at runtime.
 
 ---
 
-## Phase 7b — Polish round 2
+## Phase 7b — Polish round 2 (header reflow + status icons + settings buttons)
 
 **Status:** ⬜ not started · target tag: `p7b-polish`
 
-**Goal:** Additional UX items uncovered during P7a on-device testing.
+**Goal:** Rework the header strip into a useful status bar and give the settings tile real commit semantics.
 
-- [ ] _(items TBD — fill in before starting)_
+### Header layout reflow
+
+Current (P7a):
+```
+[ ●(status) ────── Area Name ▼ ──────── HH:MM ]
+```
+Target (P7b):
+```
+[ HH:MM ────── Area Name ▼ ──────  📶 🔋 ● ]
+```
+- [ ] Move the **clock** to the top-left corner (replace the status-dot position).
+- [ ] Move the **API-connected status indicator** to the top-right corner (replace the clock position).
+- [ ] Add a **battery level indicator icon** immediately to the left of the status indicator. Use the AXP2101 read for raw voltage; render as a 4-bar / 3-bar / 2-bar / 1-bar / empty glyph (or LV_SYMBOL_BATTERY_3 etc) based on bucketed voltage. **Battery is now in scope** because the icon needs a real source — the deferral from P7a is reversed for P7b.
+- [ ] Add a **Wi-Fi signal strength icon** immediately to the left of the battery icon. Use the ESPHome `wifi.signal_strength` (RSSI) sensor; bucket into 4 / 3 / 2 / 1 / 0 bars (LV_SYMBOL_WIFI variants, or a custom 4-bar arc).
+- [ ] All four header items must clear the panel's rounded corners — current empirical inset is **44 px** on each side. Keep the same.
+
+### AXP2101 battery readout
+
+- [ ] Add `components/axp2101/` as a minimal external_component (read-only). Init ADC for VBAT channel; expose a `sensor` that publishes battery voltage in V.
+- [ ] No native ESPHome component exists for AXP2101 (verified again at P7b start). XPowersLib (lewisxhe) is the canonical Arduino driver — port the VBAT-read path only; skip charge-curve mapping, USB-detect, and PMU power control (P7b scope: read voltage, render icon).
+- [ ] Bucket thresholds (LiPo): full ≥ 4.0 V, high ≥ 3.85 V, mid ≥ 3.70 V, low ≥ 3.55 V, empty < 3.55 V. Document so we can tune.
+
+### Settings tile commit semantics
+
+- [ ] Add **Apply** and **Cancel** buttons at the bottom of the settings tile.
+- [ ] Slider changes become *staged* — they don't write the active brightness global until Apply is tapped. The current behaviour (live preview on every drag) stays; Cancel reverts to the saved value.
+- [ ] Pad the tile content area so the buttons don't run into the bottom rounded corner — same 32 px bottom inset already in place, plus a 60 px row for the buttons.
+- [ ] If the user navigates away (swipes off the tile, opens picker, idle blanks) with un-applied changes, revert silently — no nag dialog in v1.
+
+**Exit criteria:**
+- Header shows: time top-left, area + chevron centered, Wi-Fi → battery → status (left to right) top-right.
+- Battery icon updates within ~30 s of unplugging USB.
+- Wi-Fi icon updates when RSSI bucket changes.
+- Settings: dragging the slider previews; Apply commits to `active_brightness_g`; Cancel restores; navigating away discards.
+
+---
+
+## Phase 7c — Entity control: explicit on/off + per-domain updates
+
+**Status:** ⬜ not started · target tag: `p7c-controls`
+
+**Goal:** Tighten the action set for already-controllable domains and add real control for the read-only ones where the cost is low. Anything that needs a detail/popup view per entity moves to P7d.
+
+### Already in place (P5/P6)
+- Tap on a row in `light` / `switch` / `fan` / `input_boolean` / `cover` → `homeassistant.toggle`.
+- Tap on `script` → `script.turn_on`. Tap on `automation` → `automation.trigger`.
+
+### In scope for P7c (cheap additions)
+
+- [ ] **Explicit on / off instead of toggle, where state is known.** If `Entity::has_state` and `state == "on"`, send `homeassistant.turn_off` for that entity_id; if `state == "off"`, send `homeassistant.turn_on`. Falls back to `homeassistant.toggle` when state is unknown / unavailable. Removes the "I toggled but it was already off and now it turned on" surprise.
+- [ ] **Cover** dispatch already toggles via `cover.toggle` (current code path uses `homeassistant.toggle` which works for covers). No change needed unless we want explicit open/close.
+- [ ] **`scene` domain** → `scene.turn_on` on tap. (Currently falls through to read-only.)
+- [ ] **`button` domain** → `button.press` on tap. (Currently filtered out at the YAML level; if the user wants buttons on the panel they can add them.)
+- [ ] **`lock` domain** → `lock.unlock` if `state == "locked"`, `lock.lock` if `state == "unlocked"`. Read-only fallback otherwise. Security-sensitive — only fire on explicit tap, never on swipe.
+- [ ] State-badge readout for any new domain shows the new state on next subscription update — the existing `on_state_` path covers this already, no extra code.
+
+### Punt to P7d (proper detail/popup view per entity)
+
+Each of the below needs more than a row tap — they need a transient widget (panel, modal, second tileview row) to let the user pick a value. Document the *shape* of the work; don't build it in P7c.
+
+- **`light` brightness / colour temperature / RGB.** Tap-and-hold on a light row opens a detail view with a brightness slider (calls `light.turn_on { brightness_pct }`), optional CT slider, optional HSV picker. Need LVGL `LV_USE_ARC` or `LV_USE_SLIDER` + colour wheel — colour wheel is non-trivial.
+- **`climate` set-point + HVAC mode.** Detail view with a temperature spinbox/arc and a mode dropdown. Calls `climate.set_temperature` and `climate.set_hvac_mode`.
+- **`media_player` transport.** Play / pause / next / prev / volume buttons. Calls `media_player.media_play_pause`, `_next_track`, `_volume_set`, etc.
+- **`number` set value, `select` set option.** Detail view with a spinbox or roller.
+
+### Design sketch (for P7d, not built here)
+
+- Add a long-press handler on entity rows (`LV_EVENT_LONG_PRESSED`). Trigger threshold ~600 ms.
+- Build a single shared modal lv_obj covering the screen. `HAPanel::open_detail_(size_t entity_idx)` populates it based on `entity.domain`.
+- One C++ method per supported domain (`build_light_detail_`, `build_climate_detail_`, etc) that constructs the right widget set + binds events to `HomeAssistantActionRequest`s with the right service + data map.
+- Close on Apply, Cancel, or swipe-down. Same close semantics as the area picker.
+
+**Exit criteria (P7c only):**
+- Tapping an `on` light or switch sends `turn_off`; tapping an `off` one sends `turn_on`. No more accidental wrong-direction toggles.
+- `scene`, `button`, `lock` taps fire the right service. Lock read-only fallback when domain not supported.
+- All other domains remain read-only with the existing "tap is no-op" log.
+
+---
+
+## Phase 7d — Per-entity detail / popup view
+
+**Status:** ⬜ not started · target tag: `p7d-detail`
+
+**Goal:** Give domains that need more than a binary tap their own control surface. Long-press an entity row → a shared modal opens, populated by a per-domain builder. Tap an entity row stays as the P7c short-tap action; the modal is strictly opt-in via long-press.
+
+### Interaction model
+
+- Long-press threshold: ~600 ms (LVGL `LV_EVENT_LONG_PRESSED`). Avoids accidental detail-view opens during scroll.
+- Detail modal covers the screen (same shape as the existing area picker overlay) — easier than fitting controls into the row.
+- Close on: tap Apply, tap Cancel, tap an empty area, or swipe down. Apply commits; Cancel + dismiss revert to the entity's last known state.
+- One open modal at a time. If a state update arrives for the entity while the modal is open, refresh the displayed value but don't override the in-progress edit (sticky local value until Apply / Cancel).
+
+### Architecture
+
+- `HAPanel` gains:
+  - `lv_obj_t *detail_modal_` (built once at setup, hidden by default).
+  - `size_t detail_entity_idx_` (which entity the modal is currently configured for).
+  - `void open_detail_(size_t entity_idx)` — clears prior widgets, dispatches on domain.
+  - One builder method per supported domain. Each populates `detail_modal_` with the right widgets + binds events.
+- Long-press handler on every entity row (registered alongside the existing `LV_EVENT_CLICKED`). Reads `entity_idx` from `user_data` and calls `open_detail_`.
+- Apply handler builds the `homeassistant.<service>` call with the right data map and dispatches via `call_homeassistant_service`. Cancel just hides the modal.
+
+### Per-domain widget plan
+
+- **`light` (full control).**
+  - Brightness slider (0–100 %): `light.turn_on { brightness_pct: N }`.
+  - On / off toggle button at top: `light.turn_on` / `light.turn_off`.
+  - If the entity reports `supported_color_modes` includes `color_temp`: CT slider in Kelvin (3000–6500 K) → `light.turn_on { color_temp_kelvin: N }`.
+  - If `rgb` is supported: leave colour-wheel as a stretch item — LVGL has no built-in colour picker, would need a custom `LV_USE_CANVAS` widget. Hold for P7e if it grows large.
+  - Need to consume entity attributes (`brightness`, `color_mode`, `supported_color_modes`) — current `ha_panel` only subscribes to state, not attributes. **Add attribute subscription path** (`subscribe_homeassistant_state(cb, entity_id, "brightness")` etc) and a flat `std::map<std::string, std::string>` per entity for attribute storage.
+- **`climate` (set-point + mode).**
+  - Current temperature read-only at top.
+  - Target temperature spinbox or arc widget (range derived from `min_temp` / `max_temp` attrs) → `climate.set_temperature { temperature: N }`.
+  - HVAC mode dropdown (`heat` / `cool` / `auto` / `off` etc from `hvac_modes` attr) → `climate.set_hvac_mode { hvac_mode: <m> }`.
+- **`media_player` (transport + volume).**
+  - Six buttons: prev / play-pause / next / vol- / vol+ / mute.
+  - Optional volume slider 0–100 → `media_player.volume_set { volume_level: N/100 }`.
+  - Currently-playing track read-only at top (`media_title` attr if present).
+- **`number` (set value).**
+  - Spinbox or slider scoped to `min` / `max` / `step` attrs → `number.set_value { value: N }`.
+- **`select` (set option).**
+  - Roller widget populated from `options` attr → `select.select_option { option: <s> }`.
+- **`fan` (speed).**
+  - Speed slider 0–100 % → `fan.set_percentage { percentage: N }`.
+  - Off button → `fan.turn_off`.
+- **`cover` (position).**
+  - Open / Stop / Close buttons → `cover.open_cover` / `cover.stop_cover` / `cover.close_cover`.
+  - If `current_position` attr present: position slider 0–100 % → `cover.set_cover_position { position: N }`.
+
+### New LVGL widget enables needed
+
+Add to `boards/waveshare-2.16.yaml` `build_flags` for any not already on:
+- `LV_USE_DROPDOWN=1` (climate HVAC mode, generic option pickers).
+- `LV_USE_ROLLER=1` (select option picker).
+- `LV_USE_SPINBOX=1` (number set value, climate set-point).
+- `LV_USE_ARC=1` (optional alternative to slider for temperature).
+- `LV_USE_CANVAS=1` (only if RGB colour wheel ends up in scope).
+- `LV_USE_FLEX=1` and `LV_USE_LABEL=1` already on from P6/P7a.
+
+### Risks / unknowns
+
+- **Attribute subscriptions multiply the API traffic.** A light with brightness + colour_temp + color_mode + supported_color_modes = 4 extra subscriptions per light. For ~30 lights that is ~120 extra subscriptions. Should be fine within HA native API limits but flag for memory if it grows.
+- **Sticky local edit vs. live state updates.** Defining "user has started editing" is fuzzy — first slider movement is a reasonable start; close of modal is the end. Don't try to merge live updates back into the slider mid-drag.
+- **Service call data types.** Native API service-call data is `map<string, string>`. Some HA services expect numeric / boolean — values are coerced from string on HA side, but verify each per-domain service signature before going live.
+- **Modal vs. tile.** Detail view is a modal because tileview tiles are reserved for areas + settings. If modal swipe-down conflicts with vertical row scroll under it, switch to a slide-up sheet that covers ~80 % of the screen instead. Decide after the first widget lands.
+
+**Exit criteria:**
+- Long-press on a `light` row opens a modal with a working brightness slider that drives `light.turn_on { brightness_pct }`. Slider snapped to current value on open, sticky during edit.
+- Long-press on a `climate` row opens a modal with set-point + HVAC-mode controls that fire the right services.
+- Long-press on `media_player`, `number`, `select`, `fan`, `cover` opens the relevant modal and dispatches the right service.
+- Tap (short-press) on entity rows still does the P7c short-tap action — no regression.
 
 ---
 
