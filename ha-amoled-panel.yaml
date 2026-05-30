@@ -9,6 +9,10 @@ substitutions:
 esphome:
   name: ${node_name}
   friendly_name: ${friendly_name}
+  # P8: light-sleep IDF helper (ha_power::enter_light_sleep), called from the
+  # idle machine's enter_sleep script. Deep sleep uses the ESPHome component.
+  includes:
+    - power_mgr.h
   on_boot:
     # Priority -100: after components (PROCESSOR / DATA / AFTER_CONNECTION) are
     # constructed. Wire ha_panel's brightness setter to the display + idle
@@ -25,6 +29,15 @@ esphome:
               id(active_brightness_g) = v;
             });
             id(ha_panel_id).set_active_brightness(id(active_brightness_g));
+            // P8: sleep settings — committer writes the persisted globals on
+            // Apply; set_sleep_settings seeds the settings-tile controls from
+            // the restored values at boot.
+            id(ha_panel_id).set_sleep_committer([](bool enabled, uint8_t mode) {
+              id(sleep_enabled_g) = enabled;
+              id(power_saver_mode_g) = mode;
+            });
+            id(ha_panel_id).set_sleep_settings(id(sleep_enabled_g),
+                                               id(power_saver_mode_g));
     # Existing display bring-up event for HA visibility.
     - priority: -200
       then:

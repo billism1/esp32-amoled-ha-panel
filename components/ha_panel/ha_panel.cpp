@@ -703,6 +703,43 @@ void HAPanel::build_settings_tile_(lv_obj_t *parent) {
   lv_obj_set_style_text_color(to_dim, lv_color_hex(0xAAAAAA), 0);
   lv_obj_set_style_text_font(to_dim, &lv_font_montserrat_18, 0);
 
+  // ---- Power saving (P8) ----
+  lv_obj_t *pwr_title = lv_label_create(content);
+  lv_label_set_text(pwr_title, "Power saving");
+  lv_obj_set_style_text_color(pwr_title, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(pwr_title, &lv_font_montserrat_18, 0);
+
+  // Master toggle row: label left, lv_switch right.
+  lv_obj_t *sleep_row = lv_obj_create(content);
+  lv_obj_remove_style_all(sleep_row);
+  lv_obj_set_width(sleep_row, LV_PCT(100));
+  lv_obj_set_height(sleep_row, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(sleep_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(sleep_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(sleep_row, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *sleep_lbl = lv_label_create(sleep_row);
+  lv_label_set_text(sleep_lbl, "Sleep when idle");
+  lv_obj_set_style_text_color(sleep_lbl, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(sleep_lbl, &lv_font_montserrat_18, 0);
+
+  this->sleep_switch_ = lv_switch_create(sleep_row);
+  if (this->sleep_enabled_)
+    lv_obj_add_state(this->sleep_switch_, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(this->sleep_switch_, &HAPanel::on_sleep_switch_,
+                      LV_EVENT_VALUE_CHANGED, this);
+
+  // Mode dropdown: Light sleep (0) / Deep sleep (1). Greyed when toggle off.
+  this->sleep_mode_dropdown_ = lv_dropdown_create(content);
+  lv_obj_set_width(this->sleep_mode_dropdown_, LV_PCT(100));
+  lv_dropdown_set_options(this->sleep_mode_dropdown_, "Light sleep\nDeep sleep");
+  lv_dropdown_set_selected(this->sleep_mode_dropdown_,
+                           this->sleep_mode_ == 1 ? 1 : 0);
+  lv_obj_add_event_cb(this->sleep_mode_dropdown_, &HAPanel::on_sleep_mode_dropdown_,
+                      LV_EVENT_VALUE_CHANGED, this);
+  this->update_sleep_mode_enabled_();
+
   // About block.
   lv_obj_t *about_title = lv_label_create(content);
   lv_label_set_text(about_title, "About");
@@ -1113,6 +1150,69 @@ void HAPanel::revert_brightness_() {
   ESP_LOGI(TAG, "brightness reverted to %u", (unsigned) this->active_brightness_);
 }
 
+// ---------- P8 sleep settings (staged like brightness) ----------
+
+void HAPanel::set_sleep_settings(bool enabled, uint8_t mode) {
+  this->sleep_enabled_ = enabled;
+  this->sleep_mode_ = (mode == 1) ? 1 : 0;
+  this->staged_sleep_enabled_ = this->sleep_enabled_;
+  this->staged_sleep_mode_ = this->sleep_mode_;
+  this->sleep_dirty_ = false;
+  if (this->sleep_switch_ != nullptr) {
+    if (this->sleep_enabled_)
+      lv_obj_add_state(this->sleep_switch_, LV_STATE_CHECKED);
+    else
+      lv_obj_remove_state(this->sleep_switch_, LV_STATE_CHECKED);
+  }
+  if (this->sleep_mode_dropdown_ != nullptr)
+    lv_dropdown_set_selected(this->sleep_mode_dropdown_, this->sleep_mode_);
+  this->update_sleep_mode_enabled_();
+}
+
+void HAPanel::update_sleep_mode_enabled_() {
+  if (this->sleep_mode_dropdown_ == nullptr)
+    return;
+  // Mode is irrelevant when the master toggle is off — disable + dim it.
+  if (this->staged_sleep_enabled_) {
+    lv_obj_remove_state(this->sleep_mode_dropdown_, LV_STATE_DISABLED);
+    lv_obj_set_style_text_opa(this->sleep_mode_dropdown_, LV_OPA_COVER, 0);
+  } else {
+    lv_obj_add_state(this->sleep_mode_dropdown_, LV_STATE_DISABLED);
+    lv_obj_set_style_text_opa(this->sleep_mode_dropdown_, LV_OPA_50, 0);
+  }
+}
+
+void HAPanel::apply_sleep_() {
+  if (!this->sleep_dirty_)
+    return;
+  this->sleep_enabled_ = this->staged_sleep_enabled_;
+  this->sleep_mode_ = this->staged_sleep_mode_;
+  if (this->sleep_committer_)
+    this->sleep_committer_(this->sleep_enabled_, this->sleep_mode_);
+  this->sleep_dirty_ = false;
+  ESP_LOGI(TAG, "sleep applied: enabled=%d mode=%u",
+           (int) this->sleep_enabled_, (unsigned) this->sleep_mode_);
+}
+
+void HAPanel::revert_sleep_() {
+  if (!this->sleep_dirty_)
+    return;
+  this->staged_sleep_enabled_ = this->sleep_enabled_;
+  this->staged_sleep_mode_ = this->sleep_mode_;
+  if (this->sleep_switch_ != nullptr) {
+    if (this->sleep_enabled_)
+      lv_obj_add_state(this->sleep_switch_, LV_STATE_CHECKED);
+    else
+      lv_obj_remove_state(this->sleep_switch_, LV_STATE_CHECKED);
+  }
+  if (this->sleep_mode_dropdown_ != nullptr)
+    lv_dropdown_set_selected(this->sleep_mode_dropdown_, this->sleep_mode_);
+  this->update_sleep_mode_enabled_();
+  this->sleep_dirty_ = false;
+  ESP_LOGI(TAG, "sleep reverted to enabled=%d mode=%u",
+           (int) this->sleep_enabled_, (unsigned) this->sleep_mode_);
+}
+
 void HAPanel::set_wifi_rssi(int rssi) {
   this->wifi_rssi_ = rssi;
   this->have_wifi_rssi_ = true;
@@ -1192,9 +1292,11 @@ void HAPanel::on_tileview_changed_(lv_event_t *e) {
       lv_label_set_text(self->header_label_, "Settings");
     return;
   }
-  // P7b: leaving the settings tile with un-applied changes silently reverts.
+  // P7b/P8: leaving the settings tile with un-applied changes silently reverts.
   if (self->brightness_dirty_)
     self->revert_brightness_();
+  if (self->sleep_dirty_)
+    self->revert_sleep_();
   for (size_t ai = 0; ai < self->tile_objs_.size(); ai++) {
     if (self->tile_objs_[ai] != tile)
       continue;
@@ -1208,9 +1310,11 @@ void HAPanel::on_header_clicked_(lv_event_t *e) {
   auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
   if (self == nullptr)
     return;
-  // P7b: header tap from the settings tile counts as navigating away — revert.
+  // P7b/P8: header tap from the settings tile counts as navigating away — revert.
   if (self->brightness_dirty_)
     self->revert_brightness_();
+  if (self->sleep_dirty_)
+    self->revert_sleep_();
   self->open_picker_();
 }
 
@@ -1287,6 +1391,7 @@ void HAPanel::on_apply_clicked_(lv_event_t *e) {
   if (self == nullptr)
     return;
   self->apply_brightness_();
+  self->apply_sleep_();
 }
 
 void HAPanel::on_cancel_clicked_(lv_event_t *e) {
@@ -1294,6 +1399,30 @@ void HAPanel::on_cancel_clicked_(lv_event_t *e) {
   if (self == nullptr)
     return;
   self->revert_brightness_();
+  self->revert_sleep_();
+}
+
+void HAPanel::on_sleep_switch_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->sleep_switch_ == nullptr)
+    return;
+  self->staged_sleep_enabled_ =
+      lv_obj_has_state(self->sleep_switch_, LV_STATE_CHECKED);
+  self->sleep_dirty_ =
+      (self->staged_sleep_enabled_ != self->sleep_enabled_) ||
+      (self->staged_sleep_mode_ != self->sleep_mode_);
+  self->update_sleep_mode_enabled_();
+}
+
+void HAPanel::on_sleep_mode_dropdown_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->sleep_mode_dropdown_ == nullptr)
+    return;
+  self->staged_sleep_mode_ =
+      (uint8_t) lv_dropdown_get_selected(self->sleep_mode_dropdown_);
+  self->sleep_dirty_ =
+      (self->staged_sleep_enabled_ != self->sleep_enabled_) ||
+      (self->staged_sleep_mode_ != self->sleep_mode_);
 }
 
 // ---------- P7d detail modal ----------

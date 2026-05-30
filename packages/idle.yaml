@@ -22,6 +22,14 @@ substitutions:
   dim_timeout_s: "15"
   # Additional time at dim before fully blanking.
   blank_timeout_s: "30"
+  # P8: total no-input time (measured from last input) before entering the
+  # low-power sleep tier. 60 s = aggressive on purpose; with the default
+  # *light* sleep mode the cost of over-eager sleeping is near-zero (wake is an
+  # instant RAM resume). Raise it if Deep sleep is selected (cold-boot wake).
+  sleep_timeout_s: "60"
+  # P8: minimum uptime before the device is allowed to sleep at all. Keeps an
+  # awake window after boot so OTA can land before the first sleep.
+  sleep_arm_uptime_s: "30"
   # Initial active-state brightness (uint8_t). Slider writes the same global at
   # runtime; this only sets the boot default.
   brightness_active_default: "0xD0"   # ~80%
@@ -48,6 +56,32 @@ globals:
     type: uint8_t
     restore_value: yes
     initial_value: ${brightness_active_default}
+  # P8: power-management settings, persisted (settings tile edits these via the
+  # ha_panel sleep committer; read at boot to arm the idle machine's sleep tier).
+  #   sleep_enabled_g    — master toggle. true = allowed to enter `sleep`.
+  #   power_saver_mode_g — 0 = light sleep (default, Wi-Fi off, RAM kept),
+  #                        1 = deep sleep (cold-boot wake, max battery).
+  - id: sleep_enabled_g
+    type: bool
+    restore_value: yes
+    initial_value: "true"
+  - id: power_saver_mode_g
+    type: uint8_t
+    restore_value: yes
+    initial_value: "0"
+  # P8: gate flipped true once the device is usable + updatable (API connected
+  # AND past sleep_arm_uptime_s). The idle machine refuses to sleep until then
+  # so a freshly-booted device stays reachable for OTA.
+  - id: sleep_armed
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  # P8: mirrors the HA API connection state for the interval lambda (which has
+  # no easy handle on the api component). Set from base.yaml api callbacks.
+  - id: idle_api_connected
+    type: bool
+    restore_value: no
+    initial_value: "false"
 
 script:
   # Single entry-point any input source calls. Always restamps the clock;
@@ -87,6 +121,39 @@ script:
           id(amoled_display).set_brightness((uint8_t) ${brightness_blank});
           ESP_LOGI("idle", "→ blank");
 
+  # P8: enter the configured low-power sleep tier. Only reached from the
+  # interval tick when blank + idle past sleep_timeout AND sleep is enabled +
+  # armed. mode: single so a second tick can't re-enter while we're mid-sleep.
+  - id: enter_sleep
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: "return id(power_saver_mode_g) == 1;"
+          then:
+            # --- Deep sleep ---
+            # ESPHome deep_sleep owns the radio + wake pin (touch GPIO11, ext0).
+            # This reboots on wake; nothing after it runs.
+            - lambda: 'ESP_LOGI("idle", "→ deep sleep");'
+            - deep_sleep.enter: deep_sleep_ctl
+          else:
+            # --- Light sleep (default) ---
+            # Drop Wi-Fi so the radio is fully off (the win on a
+            # power_save_mode:NONE mesh), block in light sleep until a touch
+            # wake, then bring Wi-Fi + HA back and resume from retained RAM.
+            - lambda: 'ESP_LOGI("idle", "→ light sleep (wifi off)");'
+            - wifi.disable:
+            # Yield so ESPHome's wifi component actually tears the link down
+            # before we halt the main loop — wifi.disable is async.
+            - delay: 250ms
+            - lambda: 'ha_power::enter_light_sleep();'   # blocks until wake
+            - lambda: 'ESP_LOGI("idle", "← light sleep wake");'
+            - wifi.enable:
+            # Treat the wake as fresh input so we land back in active and don't
+            # immediately re-sleep on the next tick. UI is already intact (RAM).
+            - lambda: 'id(idle_last_input_ms) = millis();'
+            - script.execute: enter_active
+
 interval:
   # 1 s tick. Cheap; uses millis() rather than ESPHome time so it works before
   # HA time syncs and survives DST changes.
@@ -98,8 +165,19 @@ interval:
           const int s = id(idle_state);
           const uint32_t dim_at   = (uint32_t) ${dim_timeout_s} * 1000UL;
           const uint32_t blank_at = dim_at + (uint32_t) ${blank_timeout_s} * 1000UL;
+          // P8: sleep_at is measured from last input (not from blank). Must be
+          // after blank_at for the tiers to make sense; 60 s > 45 s by default.
+          const uint32_t sleep_at = (uint32_t) ${sleep_timeout_s} * 1000UL;
+          // Arm sleep once API has connected and we're past the OTA window.
+          if (!id(sleep_armed) && id(idle_api_connected) &&
+              now >= (uint32_t) ${sleep_arm_uptime_s} * 1000UL) {
+            id(sleep_armed) = true;
+          }
           if (s == 0 && since >= dim_at) {
             id(enter_dim).execute();
           } else if (s == 1 && since >= blank_at) {
             id(enter_blank).execute();
+          } else if (s == 2 && since >= sleep_at &&
+                     id(sleep_enabled_g) && id(sleep_armed)) {
+            id(enter_sleep).execute();
           }

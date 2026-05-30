@@ -88,6 +88,12 @@ class HAPanel : public Component, public api::CustomAPIDevice {
     this->brightness_committer_ = std::move(committer);
   }
   void set_active_brightness(uint8_t v);
+  // P8: commit persisted sleep settings (enabled flag + mode) on Apply.
+  void set_sleep_committer(std::function<void(bool, uint8_t)> committer) {
+    this->sleep_committer_ = std::move(committer);
+  }
+  // Seed the settings-tile sleep controls from the boot-restored globals.
+  void set_sleep_settings(bool enabled, uint8_t mode);
   void set_clock_text(const std::string &text);
   void set_api_connected(bool connected);
   // P7b: header status icons.
@@ -149,6 +155,12 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // P7b: stage / commit / revert brightness slider edits.
   void apply_brightness_();
   void revert_brightness_();
+  // P8: stage / commit / revert sleep toggle + mode dropdown edits. Same
+  // dirty-flag + revert-on-navigate-away recipe as brightness.
+  void apply_sleep_();
+  void revert_sleep_();
+  // Grey out the mode dropdown when the master toggle is off (mode irrelevant).
+  void update_sleep_mode_enabled_();
 
   // P7d detail modal.
   void build_detail_modal_(lv_obj_t *scr);
@@ -191,6 +203,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_brightness_slider_(lv_event_t *e);
   static void on_apply_clicked_(lv_event_t *e);
   static void on_cancel_clicked_(lv_event_t *e);
+  // P8 sleep controls.
+  static void on_sleep_switch_(lv_event_t *e);
+  static void on_sleep_mode_dropdown_(lv_event_t *e);
   static void on_detail_apply_clicked_(lv_event_t *e);
   static void on_detail_cancel_clicked_(lv_event_t *e);
   static void on_detail_bg_clicked_(lv_event_t *e);
@@ -236,6 +251,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *settings_tile_{nullptr};
   lv_obj_t *brightness_slider_{nullptr};
   lv_obj_t *brightness_value_label_{nullptr};
+  // P8 settings-tile sleep controls.
+  lv_obj_t *sleep_switch_{nullptr};
+  lv_obj_t *sleep_mode_dropdown_{nullptr};
   std::vector<lv_obj_t *> tile_objs_;            // [area_idx]
   // P7c: per-entity right-side widget — lv_switch for binaries, lv_label
   // for everything else. Renamed from badges_by_entity_ since it's no longer
@@ -254,6 +272,15 @@ class HAPanel : public Component, public api::CustomAPIDevice {
 
   std::function<void(uint8_t)> brightness_setter_;
   std::function<void(uint8_t)> brightness_committer_;
+  // P8 sleep settings. *_committed_ mirror the persisted globals; staged_*
+  // track the current widget state; sleep_dirty_ flips on any edit, cleared on
+  // Apply / revert. mode: 0 = light, 1 = deep.
+  std::function<void(bool, uint8_t)> sleep_committer_;
+  bool sleep_enabled_{true};
+  uint8_t sleep_mode_{0};
+  bool staged_sleep_enabled_{true};
+  uint8_t staged_sleep_mode_{0};
+  bool sleep_dirty_{false};
   // active_brightness_ = persisted (last committed) value, mirrors the YAML
   // global. staged_brightness_ = current slider position (live preview).
   // brightness_dirty_ flips true on first slider drag, false on Apply/Cancel.

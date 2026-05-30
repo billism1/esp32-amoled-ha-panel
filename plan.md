@@ -62,11 +62,11 @@ firmware when HA is the one silently rejecting calls.
 | 7d | Per-entity detail/popup view (light dim/colour, climate, media, number, select) | ✅ | verified on-device 2026-05-29; live-attr modal preload parked → P10 (see Post-P7 TODO) |
 | 7e | Per-entity icons (left of friendly name) | ✅ | v1: YAML override → domain default → fallback (zero new subs); baked MDI subset. HA `icon` attr deferred to P10 batched sensor. On-device verified |
 | 7f | Per-entity tap-confirmation guard | ✅ | verified on-device 2026-05-29. `confirm: true` → short-tap opens confirm sheet (action/lock/cover/switch) or detail modal (light/climate/…). switch/input_boolean use action sheet (no P7d modal exists for binary domains) |
-| 8 | Power management (sleep/wake for nightstand) | ⬜ | deep/light sleep, wake on touch + buttons; setting-toggled |
+| 8 | Power management (sleep/wake for nightstand) | ✅ | verified on-device: light+deep sleep, settings toggle/mode, idle-tier transition, touch GPIO11 wake, Wi-Fi drop/restore |
 | 9 | Multi-board support | ⬜ | |
 | 10 | Dynamic discovery via HA template sensor | ⬜ | replaces P5 static YAML |
 
-**Last updated:** 2026-05-29 (P7b–P7f verified on-device; next: P8 power management).
+**Last updated:** 2026-05-30 (P8 verified on-device: light+deep sleep, settings toggle/mode, touch GPIO11 wake, Wi-Fi drop/restore. Next: P9 multi-board).
 
 ---
 
@@ -797,7 +797,35 @@ Action confirm sheet slots between 3 and 4 — same `move_foreground` pattern. O
 
 ## Phase 8 — Power management (sleep / wake for nightstand use)
 
-**Status:** ⬜ not started · target tag: `p8-power`
+**Status:** ✅ done · verified on-device 2026-05-30 · target tag: `p8-power`
+
+**What landed (2026-05-29):**
+- `power_mgr.h` — light-sleep IDF wrapper (`ha_power::enter_light_sleep`), touch
+  GPIO11 low-level wake. Included via `esphome: includes:`.
+- `packages/idle.yaml` — `sleep_enabled_g` / `power_saver_mode_g` (persisted) +
+  `sleep_armed` / `idle_api_connected` globals; `sleep_timeout_s` (60 s) +
+  `sleep_arm_uptime_s` (30 s) substitutions; `enter_sleep` script (deep →
+  `deep_sleep.enter`, light → `wifi.disable` + delay + light-sleep + `wifi.enable`
+  + resume); interval tick gains the `blank → sleep` transition gated on
+  enabled + armed.
+- `boards/waveshare-2.16.yaml` — `deep_sleep:` (`deep_sleep_ctl`) with ext0
+  wake on GPIO11 (`inverted: true`), the safe single-pin fallback.
+- `packages/base.yaml` — API callbacks set `idle_api_connected`.
+- `ha-amoled-panel.yaml` — `includes: [power_mgr.h]`; on_boot wires
+  `set_sleep_committer` (writes globals) + `set_sleep_settings` (seeds controls).
+- `components/ha_panel` — settings tile "Power saving" section: master
+  `lv_switch` (default ON) + Light/Deep `lv_dropdown` (greyed when toggle off),
+  staged with the same dirty-flag + Apply/Cancel + revert-on-navigate-away
+  recipe as brightness.
+
+**Verified on-device 2026-05-30:** sleep current in the hundreds-of-µA band;
+touch GPIO11 fires the wake edge in polling mode; `wifi.disable`/`enable` cleanly
+drops + re-raises the link around light sleep; touch IC alive on first wake
+without a power-cycle; deep-sleep ext0 wake + OTA-window survival.
+
+**Deferred (not blocking P8):** GPIO18 button + ext1 any-low and RTC-alarm wake
+(touch-wake-only for v1); cold-boot splash suppression + AXP rail gating
+(optimizations).
 
 **Goal:** Survive an overnight (and ideally multi-day) idle on the LiPo without a
 charger. Use case is **nightstand**: set it down at night, leave it,

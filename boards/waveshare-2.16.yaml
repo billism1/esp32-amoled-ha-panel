@@ -139,6 +139,21 @@ axp2101:
       then:
         - lambda: "id(ha_panel_id).set_battery_voltage(x);"
 
+# --- Deep sleep (P8 — "Deep sleep" power-saver mode) ---
+# Only entered manually via `deep_sleep.enter` from the idle machine's
+# enter_sleep script; no sleep_duration/run_duration here, so it never
+# auto-sleeps. Wake on the CST9220 touch INT (GPIO11, RTC-capable, active-low)
+# via ext0 — the safe single-pin fallback from plan §P8 (the GPIO18 button +
+# ext1 any-low path is a hardware-verification follow-up; motion + PWR button
+# can NOT wake deep sleep on this board). GPIO11 idles high, pulses low on
+# touch → inverted: true wakes on the low edge. KEEP_AWAKE (default) means a
+# touch held down at sleep-entry just defers the sleep instead of cancelling.
+deep_sleep:
+  id: deep_sleep_ctl
+  wakeup_pin:
+    number: 11
+    inverted: true
+
 touchscreen:
   - id: main_touchscreen
     platform: cst9220

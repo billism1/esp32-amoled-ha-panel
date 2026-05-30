@@ -37,9 +37,13 @@ api:
   on_client_connected:
     then:
       - lambda: "id(ha_panel_id).set_api_connected(true);"
+      # P8: feed the idle machine's sleep-arm gate (set once connected; the
+      # interval also requires sleep_arm_uptime_s of uptime before arming).
+      - lambda: "id(idle_api_connected) = true;"
   on_client_disconnected:
     then:
       - lambda: "id(ha_panel_id).set_api_connected(false);"
+      - lambda: "id(idle_api_connected) = false;"
 
 ota:
   - platform: esphome
