@@ -733,8 +733,8 @@ Tasks:
 
 ### Phase E9 — Read-only entity history chart sheet
 
-**Status:** 🟡 ring-buffer mode implemented (REST backfill deferred) · target
-tag: `e9-history-chart`
+**Status:** 🟡 ring-buffer mode shipped — verified on-device 2026-05-30 (REST
+backfill deferred) · target tag: `e9-history-chart`
 
 **Scope decision (2026-05-30):** shipped the chart sheet on the in-device ring
 buffer first — fully self-contained, always compiles/runs, no external deps. The
