@@ -863,17 +863,40 @@ void HAPanel::build_ui_() {
   lv_obj_set_style_text_font(this->clock_label_, &lv_font_montserrat_18, 0);
   lv_obj_align(this->clock_label_, LV_ALIGN_LEFT_MID, 44, 0);
 
-  this->header_label_ = lv_label_create(header);
+  // E3: area name + chevron live in a centered horizontal flex row. The label
+  // sizes to its content but is capped at 200 px via max_width with LONG_DOT,
+  // so a long name ellipsizes ("Living Roo…") instead of overrunning. The flex
+  // container lays the chevron immediately right of the (possibly truncated)
+  // label and re-runs on every text change — no more one-shot align_to that
+  // went stale when the area name grew. 200 px cap clears the worst-case clock
+  // ("12:00 pm", left) and the Wi-Fi/battery/dot cluster (right).
+  lv_obj_t *center = lv_obj_create(header);
+  lv_obj_remove_style_all(center);
+  lv_obj_set_height(center, 40);
+  lv_obj_set_width(center, LV_SIZE_CONTENT);
+  lv_obj_set_style_pad_all(center, 0, 0);
+  lv_obj_set_style_pad_column(center, 8, 0);
+  lv_obj_set_flex_flow(center, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(center, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(center, LV_OBJ_FLAG_SCROLLABLE);
+  // Not clickable, and bubble any taps up so the header still opens the picker.
+  lv_obj_clear_flag(center, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(center, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_align(center, LV_ALIGN_CENTER, 0, 0);
+
+  this->header_label_ = lv_label_create(center);
   lv_label_set_text(this->header_label_, this->areas_[0].name.c_str());
   lv_obj_set_style_text_color(this->header_label_, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_style_text_font(this->header_label_, &lv_font_montserrat_18, 0);
-  lv_obj_align(this->header_label_, LV_ALIGN_CENTER, -12, 0);
+  lv_obj_set_width(this->header_label_, LV_SIZE_CONTENT);
+  lv_obj_set_style_max_width(this->header_label_, 200, 0);
+  lv_label_set_long_mode(this->header_label_, LV_LABEL_LONG_DOT);
 
-  lv_obj_t *chev = lv_label_create(header);
+  lv_obj_t *chev = lv_label_create(center);
   lv_label_set_text(chev, LV_SYMBOL_DOWN);
   lv_obj_set_style_text_color(chev, lv_color_hex(0x888888), 0);
   lv_obj_set_style_text_font(chev, &lv_font_montserrat_18, 0);
-  lv_obj_align_to(chev, this->header_label_, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
 
   // Connection status dot at far right (44 px corner inset).
   this->status_dot_ = lv_obj_create(header);

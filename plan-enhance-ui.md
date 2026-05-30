@@ -223,7 +223,7 @@ Tasks:
 
 ### Phase E3 — Area-label chevron overlap fix
 
-**Status:** ⬜ not started · target tag: `e3-header-chevron`
+**Status:** ✅ done · target tag: `e3-header-chevron`
 
 **Goal:** Long area names never run over the dropdown chevron.
 
@@ -239,9 +239,9 @@ which only positioned the chevron at build time and never re-ran when the label
 text changed.
 
 Tasks:
-- [ ] Centered flex row containing label + chevron in the header.
-- [ ] Label width cap + `LV_LABEL_LONG_DOTS`.
-- [ ] Remove the build-time `align_to` chevron positioning.
+- [x] Centered flex row containing label + chevron in the header.
+- [x] Label width cap + `LV_LABEL_LONG_DOT` (LVGL 8.4 spelling).
+- [x] Remove the build-time `align_to` chevron positioning.
 
 **Exit criteria:**
 - With the longest configured area name selected, the chevron is fully visible
