@@ -33,8 +33,15 @@ CSS_URL = f"https://cdn.jsdelivr.net/npm/@mdi/font@{MDI_VERSION}/css/materialdes
 # `type: web` font URL used by ESPHome at compile time. Same release as the CSS.
 TTF_URL = f"https://cdn.jsdelivr.net/npm/@mdi/font@{MDI_VERSION}/fonts/materialdesignicons-webfont.ttf"
 
-FONT_ID = "mdi_icons"
-FONT_SIZE = 24
+# E8: the icon column scales with the per-entity `size:`. We bake the same glyph
+# subset at three pixel sizes so medium/large rows draw crisp icons instead of
+# upscaling the 24 px base. (id, size) — id "mdi_icons" stays the base so older
+# config keeps working; the re-bakes get the suffixed ids.
+FONT_VARIANTS = [
+    ("mdi_icons", 24),
+    ("mdi_icons_36", 36),
+    ("mdi_icons_48", 48),
+]
 
 # Per-domain default icon (step 2 of the resolution chain). entity_id domain ->
 # mdi name. Anything not listed falls straight to the fallback glyph.
@@ -183,22 +190,27 @@ def write_font(resolved: list[tuple[str, int]]) -> None:
         "# Baked MDI glyph subset for Phase 7e per-entity icons. The glyph list here",
         "# must match components/ha_panel/mdi_icons.h — both come from the same script.",
         "#",
-        "# Anchored into LVGL by a hidden label in packages/lvgl-ui.yaml so that",
-        "# USE_LVGL_FONT is defined and the font links; ha_panel reads it back via",
-        "# its set_mdi_font() setter and draws the icon column with get_lv_font().",
+        "# E8: the same subset is baked at 24/36/48 px so medium/large rows draw",
+        "# crisp icons. All three are anchored into LVGL by hidden labels in",
+        "# packages/lvgl-ui.yaml so USE_LVGL_FONT is defined and the fonts link;",
+        "# ha_panel reads them back via set_mdi_font[_medium|_large]() and picks the",
+        "# size-matched font per row with get_lv_font().",
         "",
         "font:",
-        "  - file:",
-        "      type: web",
-        f"      url: {TTF_URL}",
-        "      refresh: never",
-        f"    id: {FONT_ID}",
-        f"    size: {FONT_SIZE}",
-        "    bpp: 4",
-        "    glyphs:",
     ]
-    for name, cp in resolved:
-        lines.append(f'      - "\\U{cp:08X}"  # mdi:{name}')
+    for font_id, size in FONT_VARIANTS:
+        lines += [
+            "  - file:",
+            "      type: web",
+            f"      url: {TTF_URL}",
+            "      refresh: never",
+            f"    id: {font_id}",
+            f"    size: {size}",
+            "    bpp: 4",
+            "    glyphs:",
+        ]
+        for name, cp in resolved:
+            lines.append(f'      - "\\U{cp:08X}"  # mdi:{name}')
     lines.append("")
     FONT_OUT.write_text("\n".join(lines), encoding="utf-8")
 

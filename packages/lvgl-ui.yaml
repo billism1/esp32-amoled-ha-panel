@@ -21,9 +21,34 @@ lvgl:
       # and links the glyph data; ha_panel then draws the entity icon column via
       # set_mdi_font() → font::Font::get_lv_font(). The label itself is hidden and
       # 0-sized — it exists only to force the font to compile in.
+      # E8: anchor the larger MDI re-bakes (36/48 px) and the montserrat 24/32
+      # sizes the medium/large rows draw their name text in. Referencing a font
+      # here is what forces it to link, exactly like mdi_icons above — without
+      # these, lv_font_montserrat_24/32 and the mdi_icons_36/48 glyph data would
+      # be dropped at link time. All anchors are hidden, 0-impact.
       widgets:
         - label:
             id: mdi_font_anchor
             text: "\U000F0335"
             text_font: mdi_icons
+            hidden: true
+        - label:
+            id: mdi_font_anchor_36
+            text: "\U000F0335"
+            text_font: mdi_icons_36
+            hidden: true
+        - label:
+            id: mdi_font_anchor_48
+            text: "\U000F0335"
+            text_font: mdi_icons_48
+            hidden: true
+        - label:
+            id: montserrat_24_anchor
+            text: " "
+            text_font: montserrat_24
+            hidden: true
+        - label:
+            id: montserrat_32_anchor
+            text: " "
+            text_font: montserrat_32
             hidden: true

@@ -28,7 +28,8 @@ void HAPanel::add_page(const std::string &name) {
 }
 
 void HAPanel::add_entity(const std::string &entity_id, const std::string &friendly_name,
-                         const std::string &icon_override, bool confirm) {
+                         const std::string &icon_override, bool confirm,
+                         EntitySize size) {
   if (this->pages_.empty()) {
     ESP_LOGE(TAG, "add_entity called before any page — codegen bug");
     return;
@@ -40,6 +41,7 @@ void HAPanel::add_entity(const std::string &entity_id, const std::string &friend
   e.render_class = HAPanel::render_class_for_(e.domain);
   e.icon_override = icon_override;
   e.confirm = confirm;
+  e.size = size;
   size_t idx = this->entities_.size();
   this->entities_.push_back(std::move(e));
   this->pages_.back().entity_indices.push_back(idx);
@@ -558,18 +560,48 @@ bool HAPanel::tap(size_t page_idx, size_t entity_idx) {
 
 // ---------- LVGL UI build ----------
 
+// E8: per-size row geometry. SMALL holds exactly the historical hard-coded
+// constants — an entity with no `size:` renders byte-for-byte as before. The
+// right-side widget, insets, name font and icon glyph all scale together so a
+// large row reads as one cohesive block, not just a tall thin one.
+struct RowMetrics {
+  int16_t height;
+  const lv_font_t *name_font;
+  int16_t icon_x;       // icon left inset (LV_ALIGN_LEFT_MID x)
+  int16_t name_x_icon;  // name left inset when an icon is present
+  int16_t name_x_noicon;
+  int16_t name_w_icon;  // name width (ellipsis budget) with / without icon
+  int16_t name_w_noicon;
+  int16_t sw_w, sw_h;   // BINARY_SWITCH widget size
+  int16_t sw_x;         // switch right inset (LV_ALIGN_RIGHT_MID x)
+  int16_t label_x;      // text-widget right inset
+};
+
+static RowMetrics row_metrics_for(EntitySize size) {
+  switch (size) {
+    case EntitySize::MEDIUM:
+      return {84, &lv_font_montserrat_24, 16, 66, 16, 300, 340, 66, 34, -18, -16};
+    case EntitySize::LARGE:
+      return {108, &lv_font_montserrat_32, 20, 84, 20, 330, 360, 84, 44, -20, -20};
+    case EntitySize::SMALL:
+    default:
+      return {60, &lv_font_montserrat_18, 12, 48, 12, 240, 280, 50, 26, -16, -12};
+  }
+}
+
 static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_data,
                                  lv_event_cb_t cb, uintptr_t entity_idx,
                                  lv_obj_t **out_widget,
                                  lv_obj_t **out_unavail_label,
                                  const char *icon_utf8,
                                  const lv_font_t *mdi_lv_font,
-                                 lv_obj_t **out_icon) {
+                                 lv_obj_t **out_icon,
+                                 const RowMetrics &m) {
   *out_unavail_label = nullptr;
   *out_icon = nullptr;
   lv_obj_t *btn = lv_button_create(parent);
   lv_obj_set_width(btn, LV_PCT(100));
-  lv_obj_set_height(btn, 60);
+  lv_obj_set_height(btn, m.height);
   lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A1A1A), 0);
   lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
   lv_obj_set_style_radius(btn, 8, 0);
@@ -595,18 +627,18 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
     lv_label_set_text(icon, icon_utf8);
     lv_obj_set_style_text_color(icon, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_font(icon, mdi_lv_font, 0);
-    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 12, 0);
+    lv_obj_align(icon, LV_ALIGN_LEFT_MID, m.icon_x, 0);
     *out_icon = icon;
   }
 
   lv_obj_t *name = lv_label_create(btn);
   lv_label_set_text(name, e.friendly_name.c_str());
   lv_obj_set_style_text_color(name, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_text_font(name, &lv_font_montserrat_18, 0);
-  // With an icon: shift name right (+48) and trim width to 240 so the ellipsis
-  // still lands before the right-side widget. Without: legacy +12 / 280 px.
-  lv_obj_align(name, LV_ALIGN_LEFT_MID, have_icon ? 48 : 12, 0);
-  lv_obj_set_width(name, have_icon ? 240 : 280);
+  lv_obj_set_style_text_font(name, m.name_font, 0);
+  // With an icon: shift name right and trim width so the ellipsis still lands
+  // before the right-side widget. Without: name flush-left, full width.
+  lv_obj_align(name, LV_ALIGN_LEFT_MID, have_icon ? m.name_x_icon : m.name_x_noicon, 0);
+  lv_obj_set_width(name, have_icon ? m.name_w_icon : m.name_w_noicon);
   lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
 
   // P7c: right-side widget varies by render class.
@@ -614,8 +646,8 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
   switch (e.render_class) {
     case RenderClass::BINARY_SWITCH: {
       w = lv_switch_create(btn);
-      lv_obj_set_size(w, 50, 26);
-      lv_obj_align(w, LV_ALIGN_RIGHT_MID, -16, 0);
+      lv_obj_set_size(w, m.sw_w, m.sw_h);
+      lv_obj_align(w, LV_ALIGN_RIGHT_MID, m.sw_x, 0);
       // Non-interactive — parent button handles the tap. Without this the
       // switch fires its own LV_EVENT_VALUE_CHANGED + the click bubbles to
       // the parent, producing a double dispatch.
@@ -636,8 +668,8 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
       lv_obj_t *unavail = lv_label_create(btn);
       lv_label_set_text(unavail, "Unavailable");
       lv_obj_set_style_text_color(unavail, lv_color_hex(0xCC4444), 0);
-      lv_obj_set_style_text_font(unavail, &lv_font_montserrat_18, 0);
-      lv_obj_align(unavail, LV_ALIGN_RIGHT_MID, -12, 0);
+      lv_obj_set_style_text_font(unavail, m.name_font, 0);
+      lv_obj_align(unavail, LV_ALIGN_RIGHT_MID, m.label_x, 0);
       lv_obj_add_flag(unavail, LV_OBJ_FLAG_HIDDEN);
       *out_unavail_label = unavail;
       break;
@@ -648,8 +680,8 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
       w = lv_label_create(btn);
       lv_label_set_text(w, LV_SYMBOL_PLAY);
       lv_obj_set_style_text_color(w, lv_color_hex(0x44CCDD), 0);
-      lv_obj_set_style_text_font(w, &lv_font_montserrat_18, 0);
-      lv_obj_align(w, LV_ALIGN_RIGHT_MID, -16, 0);
+      lv_obj_set_style_text_font(w, m.name_font, 0);
+      lv_obj_align(w, LV_ALIGN_RIGHT_MID, m.sw_x, 0);
       break;
     }
     case RenderClass::LOCK_TEXT:
@@ -659,8 +691,8 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
       w = lv_label_create(btn);
       lv_label_set_text(w, e.has_state ? e.state.c_str() : "...");
       lv_obj_set_style_text_color(w, lv_color_hex(0xAAAAAA), 0);
-      lv_obj_set_style_text_font(w, &lv_font_montserrat_18, 0);
-      lv_obj_align(w, LV_ALIGN_RIGHT_MID, -12, 0);
+      lv_obj_set_style_text_font(w, m.name_font, 0);
+      lv_obj_align(w, LV_ALIGN_RIGHT_MID, m.label_x, 0);
       break;
     }
   }
@@ -992,19 +1024,31 @@ void HAPanel::build_ui_() {
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
 
-    // P7e: resolve the MDI font once (get_lv_font is cheap but the null check
+    // P7e: resolve the MDI fonts once (get_lv_font is cheap but the null check
     // belongs out of the per-row loop). nullptr when no mdi_font configured.
+    // E8: the 36/48 px re-bakes fall back to the base 24 px font when not wired.
     const lv_font_t *mdi_lv_font =
         this->mdi_font_ != nullptr ? this->mdi_font_->get_lv_font() : nullptr;
+    const lv_font_t *mdi_lv_font_med =
+        this->mdi_font_med_ != nullptr ? this->mdi_font_med_->get_lv_font() : mdi_lv_font;
+    const lv_font_t *mdi_lv_font_lg =
+        this->mdi_font_lg_ != nullptr ? this->mdi_font_lg_->get_lv_font() : mdi_lv_font;
     for (size_t ei : this->pages_[pi].entity_indices) {
       Entity &e = this->entities_[ei];
       lv_obj_t *widget = nullptr;
       lv_obj_t *unavail = nullptr;
       lv_obj_t *icon = nullptr;
       const std::string &glyph = this->resolve_icon_(e);
+      // E8: pick the size-matched MDI glyph font + row geometry.
+      const lv_font_t *row_mdi_font = mdi_lv_font;
+      if (e.size == EntitySize::MEDIUM)
+        row_mdi_font = mdi_lv_font_med;
+      else if (e.size == EntitySize::LARGE)
+        row_mdi_font = mdi_lv_font_lg;
+      const RowMetrics metrics = row_metrics_for(e.size);
       lv_obj_t *btn = make_entity_row(list, e, this, &HAPanel::on_entity_row_clicked_,
                                       (uintptr_t) ei, &widget, &unavail,
-                                      glyph.c_str(), mdi_lv_font, &icon);
+                                      glyph.c_str(), row_mdi_font, &icon, metrics);
       // P7d: long-press → detail modal, only for domains that have one.
       // P7f: also register long-press for confirm-flagged action-only entities
       // (no detail modal) so a long-press opens the same confirm sheet as a

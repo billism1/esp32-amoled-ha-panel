@@ -31,18 +31,33 @@
 # optional `icon: mdi:foo` to override per entity. The glyph must be in the
 # baked subset — see tools/build-mdi-glyphs.py to add new ones. Unknown names
 # fall back to a generic glyph and log once.
+#
+# Row size (E8): add an optional `size:` to make a row bigger and more glanceable
+# from across the room. Values: small (default, today's look), medium, large.
+# Size scales the whole row together — height, name font, icon glyph, and the
+# right-side widget. Omit it and the row is byte-for-byte the small default.
+# Mixed sizes within one page are fine; each row sizes independently.
+#   Flash cost: medium/large draw crisp icons from extra baked MDI fonts
+#   (mdi_icons_36 / mdi_icons_48) plus montserrat_24/32. All five fonts are a
+#   small glyph subset and fit comfortably on the 16 MB board. If you never use
+#   medium/large you can drop the mdi_font_medium/large keys below — those rows
+#   then upscale the 24 px icon (still works, just softer).
 
 ha_panel:
   id: ha_panel_id      # referenced by id(ha_panel_id) in lambdas (clock, api triggers, brightness setter)
-  mdi_font: mdi_icons  # P7e: font id from packages/mdi-font.yaml (icon column)
+  mdi_font: mdi_icons             # P7e: font id from packages/mdi-font.yaml (icon column)
+  mdi_font_medium: mdi_icons_36   # E8: crisp icons for size: medium rows
+  mdi_font_large: mdi_icons_48    # E8: crisp icons for size: large rows
   pages:
     - name: "Living Room"
       entities:
         - entity_id: light.living_room_lamp
           friendly_name: "Couch lamp"
           icon: mdi:floor-lamp   # optional per-entity override
+          size: large            # E8: big glanceable row (small | medium | large)
         - entity_id: switch.tv_power
           friendly_name: "TV"
+          size: medium
         - entity_id: sensor.living_room_temperature
           friendly_name: "Temperature"
 

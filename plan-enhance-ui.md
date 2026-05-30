@@ -65,7 +65,7 @@ All three below are promoted to phases. Future ideas land here first.
 - [x] Boot splash: show current connection stage → **E5**
 - [x] Rename areas → pages + bottom-bar Home button → **E6**
 - [x] Light detail modal: real brightness, no fake 100% → **E7**
-- [ ] Per-entity component size (small / medium / large) → **E8**
+- [x] Per-entity component size (small / medium / large) → **E8**
 - [ ] Read-only entity history chart sheet → **E9**
 
 ---
@@ -601,7 +601,8 @@ Tasks:
 
 ### Phase E8 — Per-entity component size (small / medium / large)
 
-**Status:** ⬜ not started · target tag: `e8-entity-size`
+**Status:** ✅ done — verified on-device 2026-05-30 (full scale — 3 MDI re-bakes
++ montserrat 24/32) · target tag: `e8-entity-size`
 
 **Goal:** Let a user make individual entity rows bigger for easier reading. A
 new optional `size:` node on each entity selects `small` (default, today's
@@ -700,15 +701,18 @@ Full scale needs glyphs that don't exist in the firmware today:
   the `Entity`, so it should once the field exists).
 
 Tasks:
-- [ ] `size:` enum in `__init__.py` (strict `one_of`, default small); thread
+- [x] `size:` enum in `__init__.py` (strict `one_of`, default small); thread
       through `to_code` → `add_entity`.
-- [ ] `EntitySize` enum + `Entity::size` field; extend `add_entity` signature.
-- [ ] Per-size dimension lookup; rework `make_entity_row` to read row height,
-      name font, insets, and widget size from it (small = current values).
-- [ ] Enable `montserrat_24`/`montserrat_32` linkage in `lvgl-ui.yaml`.
-- [ ] Re-bake MDI glyphs at 36/48 px via `build-mdi-glyphs.py`; add the font
-      objects + size-aware MDI font selection in `ha_panel`.
-- [ ] Document `size:` + flash note in `ha-entities.example.yaml`.
+- [x] `EntitySize` enum + `Entity::size` field; extend `add_entity` signature.
+- [x] Per-size dimension lookup (`RowMetrics` / `row_metrics_for`); rework
+      `make_entity_row` to read row height, name font, insets, and widget size
+      from it (small = current values).
+- [x] Enable `montserrat_24`/`montserrat_32` linkage in `lvgl-ui.yaml` (hidden
+      anchor labels).
+- [x] Re-bake MDI glyphs at 36/48 px via `build-mdi-glyphs.py` (`mdi_icons_36`/
+      `mdi_icons_48`); `mdi_font_medium`/`mdi_font_large` config keys +
+      `set_mdi_font_medium/large` setters + size-aware selection in `ha_panel`.
+- [x] Document `size:` + flash note in `ha-entities.example.yaml`.
 
 **Exit criteria:**
 - An entity with no `size:` renders byte-for-byte as it does today (small).

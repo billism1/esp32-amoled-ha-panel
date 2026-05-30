@@ -19,6 +19,16 @@ namespace ha_panel {
 // P7c: how an entity row paints itself + how a short-tap dispatches. Picked
 // once at codegen time from the entity_id domain. A new HA domain that we
 // don't recognise falls into READ_ONLY_TEXT — safe default, no crash.
+// E8: per-entity render size. Picked at codegen from the YAML `size:` enum.
+// SMALL is the historical fixed 60 px row — zero visual change for configs
+// that omit `size:`. MEDIUM/LARGE scale the whole row (height, name font, icon
+// glyph, right-side widget) via the row-metrics lookup in ha_panel.cpp.
+enum class EntitySize : uint8_t {
+  SMALL,
+  MEDIUM,
+  LARGE,
+};
+
 enum class RenderClass : uint8_t {
   BINARY_SWITCH,    // light/switch/fan/input_boolean → lv_switch indicator
   ACTION_ICON,      // scene/script/automation/button → LV_SYMBOL_PLAY badge
@@ -48,6 +58,9 @@ struct Entity {
   // P7f: short-tap opens a confirm sheet / detail modal instead of firing the
   // action immediately. Set at codegen; read in the row-click pre-flight.
   bool confirm{false};
+  // E8: per-entity render size. Defaults to SMALL (today's look) so existing
+  // configs render byte-for-byte unchanged.
+  EntitySize size{EntitySize::SMALL};
   // Cached UTF-8 glyph for the icon column. v1 resolution (override → domain
   // default → fallback) never changes at runtime, so resolve once on first
   // render. The HA-`icon` attribute tier (P9 batched sensor) will invalidate
@@ -71,10 +84,15 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // Codegen-time API.
   void add_page(const std::string &name);
   void add_entity(const std::string &entity_id, const std::string &friendly_name,
-                  const std::string &icon_override = "", bool confirm = false);
+                  const std::string &icon_override = "", bool confirm = false,
+                  EntitySize size = EntitySize::SMALL);
   // P7e: MDI glyph font for the per-entity icon column. nullptr → icons off,
   // rows fall back to the pre-P7e name-at-left layout.
   void set_mdi_font(font::Font *f) { this->mdi_font_ = f; }
+  // E8: larger MDI re-bakes for medium/large rows. nullptr → that size falls
+  // back to the base 24 px font (icon just looks relatively smaller).
+  void set_mdi_font_medium(font::Font *f) { this->mdi_font_med_ = f; }
+  void set_mdi_font_large(font::Font *f) { this->mdi_font_lg_ = f; }
 
   // Programmatic action (tests / future automations).
   bool tap(size_t page_idx, size_t entity_idx);
@@ -309,6 +327,10 @@ class HAPanel : public Component, public api::CustomAPIDevice {
 
   // P7e: MDI glyph font for the icon column. nullptr → icons disabled.
   font::Font *mdi_font_{nullptr};
+  // E8: re-baked MDI fonts for medium (36 px) / large (48 px) rows. nullptr →
+  // fall back to mdi_font_ for that size.
+  font::Font *mdi_font_med_{nullptr};
+  font::Font *mdi_font_lg_{nullptr};
 
   std::function<void(uint8_t)> brightness_setter_;
   std::function<void(uint8_t)> brightness_committer_;

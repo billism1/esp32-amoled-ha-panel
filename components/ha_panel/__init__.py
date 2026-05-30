@@ -25,10 +25,18 @@ CONF_FRIENDLY_NAME = "friendly_name"
 # P7e: font id holding the baked MDI glyph subset (packages/mdi-font.yaml). The
 # component reads it back via get_lv_font() to draw the per-entity icon column.
 CONF_MDI_FONT = "mdi_font"
+# E8: optional re-baked MDI fonts at 36 px / 48 px for medium / large rows. When
+# omitted, those rows fall back to the base 24 px font (icon looks relatively
+# smaller, layout still works).
+CONF_MDI_FONT_MEDIUM = "mdi_font_medium"
+CONF_MDI_FONT_LARGE = "mdi_font_large"
 # P7f: per-entity tap-confirmation opt-in. Short-tap on a confirm-flagged entity
 # opens a confirm sheet (action domains) or the detail modal (light/climate/…)
 # instead of firing the action immediately.
 CONF_CONFIRM = "confirm"
+# E8: per-entity render size. Scales the whole row (height, name font, icon,
+# right-side widget). Strict enum — an unrecognised value is a compile error.
+CONF_SIZE = "size"
 
 # Domains where `confirm: true` has a meaningful surface (detail modal or
 # action confirm sheet). Everything else is read-only — the flag is ignored and
@@ -45,6 +53,14 @@ CONFIRM_MEANINGFUL_DOMAINS = frozenset(
 ha_panel_ns = cg.esphome_ns.namespace("ha_panel")
 HAPanel = ha_panel_ns.class_("HAPanel", cg.Component)
 
+# E8: mirrors enum class EntitySize in ha_panel.h.
+EntitySize = ha_panel_ns.enum("EntitySize", is_class=True)
+ENTITY_SIZES = {
+    "small": EntitySize.SMALL,
+    "medium": EntitySize.MEDIUM,
+    "large": EntitySize.LARGE,
+}
+
 ENTITY_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_ENTITY_ID): cv.entity_id,
@@ -55,6 +71,10 @@ ENTITY_SCHEMA = cv.Schema(
         # P7f: short-tap opens a confirm sheet / detail modal instead of firing
         # the action immediately. Meaningless on read-only domains (warned).
         cv.Optional(CONF_CONFIRM, default=False): cv.boolean,
+        # E8: strict enum — an unrecognised value is a compile-time error.
+        cv.Optional(CONF_SIZE, default="small"): cv.one_of(
+            *ENTITY_SIZES, lower=True
+        ),
     }
 )
 
@@ -70,6 +90,8 @@ CONFIG_SCHEMA = cv.Schema(
         cv.GenerateID(): cv.declare_id(HAPanel),
         cv.Required(CONF_PAGES): cv.ensure_list(PAGE_SCHEMA),
         cv.Optional(CONF_MDI_FONT): cv.use_id(font.Font),
+        cv.Optional(CONF_MDI_FONT_MEDIUM): cv.use_id(font.Font),
+        cv.Optional(CONF_MDI_FONT_LARGE): cv.use_id(font.Font),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -79,6 +101,10 @@ async def to_code(config):
     await cg.register_component(var, config)
     if CONF_MDI_FONT in config:
         cg.add(var.set_mdi_font(await cg.get_variable(config[CONF_MDI_FONT])))
+    if CONF_MDI_FONT_MEDIUM in config:
+        cg.add(var.set_mdi_font_medium(await cg.get_variable(config[CONF_MDI_FONT_MEDIUM])))
+    if CONF_MDI_FONT_LARGE in config:
+        cg.add(var.set_mdi_font_large(await cg.get_variable(config[CONF_MDI_FONT_LARGE])))
     for page in config[CONF_PAGES]:
         cg.add(var.add_page(page[CONF_NAME]))
         for ent in page[CONF_ENTITIES]:
@@ -99,5 +125,6 @@ async def to_code(config):
                     ent[CONF_FRIENDLY_NAME],
                     ent[CONF_ICON],
                     confirm,
+                    ENTITY_SIZES[ent[CONF_SIZE]],
                 )
             )

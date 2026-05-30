@@ -4,9 +4,11 @@
 # Baked MDI glyph subset for Phase 7e per-entity icons. The glyph list here
 # must match components/ha_panel/mdi_icons.h — both come from the same script.
 #
-# Anchored into LVGL by a hidden label in packages/lvgl-ui.yaml so that
-# USE_LVGL_FONT is defined and the font links; ha_panel reads it back via
-# its set_mdi_font() setter and draws the icon column with get_lv_font().
+# E8: the same subset is baked at 24/36/48 px so medium/large rows draw
+# crisp icons. All three are anchored into LVGL by hidden labels in
+# packages/lvgl-ui.yaml so USE_LVGL_FONT is defined and the fonts link;
+# ha_panel reads them back via set_mdi_font[_medium|_large]() and picks the
+# size-matched font per row with get_lv_font().
 
 font:
   - file:
@@ -15,6 +17,166 @@ font:
       refresh: never
     id: mdi_icons
     size: 24
+    bpp: 4
+    glyphs:
+      - "\U000F0335"  # mdi:lightbulb
+      - "\U000F0521"  # mdi:toggle-switch
+      - "\U000F0210"  # mdi:fan
+      - "\U000F111C"  # mdi:window-shutter
+      - "\U000F033E"  # mdi:lock
+      - "\U000F0393"  # mdi:thermostat
+      - "\U000F04C3"  # mdi:speaker
+      - "\U000F03D8"  # mdi:palette
+      - "\U000F1727"  # mdi:script-text-play
+      - "\U000F06A9"  # mdi:robot
+      - "\U000F12A8"  # mdi:gesture-tap-button
+      - "\U000F03A0"  # mdi:numeric
+      - "\U000F0279"  # mdi:format-list-bulleted
+      - "\U000F029A"  # mdi:gauge
+      - "\U000F0134"  # mdi:checkbox-marked-circle-outline
+      - "\U000F1255"  # mdi:lightbulb-multiple
+      - "\U000F06E8"  # mdi:lightbulb-on
+      - "\U000F06B5"  # mdi:lamp
+      - "\U000F095F"  # mdi:desk-lamp
+      - "\U000F0769"  # mdi:ceiling-light
+      - "\U000F08DD"  # mdi:floor-lamp
+      - "\U000F12BA"  # mdi:string-lights
+      - "\U000F1051"  # mdi:led-strip-variant
+      - "\U000F091C"  # mdi:wall-sconce
+      - "\U000F0522"  # mdi:toggle-switch-off
+      - "\U000F0425"  # mdi:power
+      - "\U000F06A5"  # mdi:power-plug
+      - "\U000F07E9"  # mdi:power-socket-us
+      - "\U000F081D"  # mdi:fan-off
+      - "\U000F1797"  # mdi:ceiling-fan
+      - "\U000F1798"  # mdi:ceiling-fan-light
+      - "\U000F033F"  # mdi:lock-open
+      - "\U000F08EE"  # mdi:lock-alert
+      - "\U000F111E"  # mdi:window-shutter-open
+      - "\U000F00AC"  # mdi:blinds
+      - "\U000F1011"  # mdi:blinds-open
+      - "\U000F1846"  # mdi:curtains
+      - "\U000F06D9"  # mdi:garage
+      - "\U000F06DA"  # mdi:garage-open
+      - "\U000F0299"  # mdi:gate
+      - "\U000F116A"  # mdi:gate-open
+      - "\U000F001B"  # mdi:air-conditioner
+      - "\U000F0438"  # mdi:radiator
+      - "\U000F0E2E"  # mdi:fireplace
+      - "\U000F1A43"  # mdi:heat-pump
+      - "\U000F0599"  # mdi:weather-sunny
+      - "\U000F0590"  # mdi:weather-cloudy
+      - "\U000F0597"  # mdi:weather-rainy
+      - "\U000F0502"  # mdi:television
+      - "\U000F0D38"  # mdi:speaker-multiple
+      - "\U000F075A"  # mdi:music
+      - "\U000F057E"  # mdi:volume-high
+      - "\U000F0581"  # mdi:volume-off
+      - "\U000F050F"  # mdi:thermometer
+      - "\U000F058E"  # mdi:water-percent
+      - "\U000F0D91"  # mdi:motion-sensor
+      - "\U000F081A"  # mdi:door
+      - "\U000F081C"  # mdi:door-open
+      - "\U000F05AE"  # mdi:window-closed
+      - "\U000F05B1"  # mdi:window-open
+      - "\U000F0DD7"  # mdi:leak
+      - "\U000F0392"  # mdi:smoke-detector
+      - "\U000F0079"  # mdi:battery
+      - "\U000F040A"  # mdi:play
+      - "\U000F0493"  # mdi:cog
+      - "\U000F167A"  # mdi:robot-outline
+      - "\U000F02DC"  # mdi:home
+      - "\U000F0026"  # mdi:alert
+      - "\U000F0028"  # mdi:alert-circle
+      - "\U000F0450"  # mdi:refresh
+      - "\U000F0130"  # mdi:checkbox-blank-circle-outline
+      - "\U000F02D7"  # mdi:help-circle
+  - file:
+      type: web
+      url: https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/fonts/materialdesignicons-webfont.ttf
+      refresh: never
+    id: mdi_icons_36
+    size: 36
+    bpp: 4
+    glyphs:
+      - "\U000F0335"  # mdi:lightbulb
+      - "\U000F0521"  # mdi:toggle-switch
+      - "\U000F0210"  # mdi:fan
+      - "\U000F111C"  # mdi:window-shutter
+      - "\U000F033E"  # mdi:lock
+      - "\U000F0393"  # mdi:thermostat
+      - "\U000F04C3"  # mdi:speaker
+      - "\U000F03D8"  # mdi:palette
+      - "\U000F1727"  # mdi:script-text-play
+      - "\U000F06A9"  # mdi:robot
+      - "\U000F12A8"  # mdi:gesture-tap-button
+      - "\U000F03A0"  # mdi:numeric
+      - "\U000F0279"  # mdi:format-list-bulleted
+      - "\U000F029A"  # mdi:gauge
+      - "\U000F0134"  # mdi:checkbox-marked-circle-outline
+      - "\U000F1255"  # mdi:lightbulb-multiple
+      - "\U000F06E8"  # mdi:lightbulb-on
+      - "\U000F06B5"  # mdi:lamp
+      - "\U000F095F"  # mdi:desk-lamp
+      - "\U000F0769"  # mdi:ceiling-light
+      - "\U000F08DD"  # mdi:floor-lamp
+      - "\U000F12BA"  # mdi:string-lights
+      - "\U000F1051"  # mdi:led-strip-variant
+      - "\U000F091C"  # mdi:wall-sconce
+      - "\U000F0522"  # mdi:toggle-switch-off
+      - "\U000F0425"  # mdi:power
+      - "\U000F06A5"  # mdi:power-plug
+      - "\U000F07E9"  # mdi:power-socket-us
+      - "\U000F081D"  # mdi:fan-off
+      - "\U000F1797"  # mdi:ceiling-fan
+      - "\U000F1798"  # mdi:ceiling-fan-light
+      - "\U000F033F"  # mdi:lock-open
+      - "\U000F08EE"  # mdi:lock-alert
+      - "\U000F111E"  # mdi:window-shutter-open
+      - "\U000F00AC"  # mdi:blinds
+      - "\U000F1011"  # mdi:blinds-open
+      - "\U000F1846"  # mdi:curtains
+      - "\U000F06D9"  # mdi:garage
+      - "\U000F06DA"  # mdi:garage-open
+      - "\U000F0299"  # mdi:gate
+      - "\U000F116A"  # mdi:gate-open
+      - "\U000F001B"  # mdi:air-conditioner
+      - "\U000F0438"  # mdi:radiator
+      - "\U000F0E2E"  # mdi:fireplace
+      - "\U000F1A43"  # mdi:heat-pump
+      - "\U000F0599"  # mdi:weather-sunny
+      - "\U000F0590"  # mdi:weather-cloudy
+      - "\U000F0597"  # mdi:weather-rainy
+      - "\U000F0502"  # mdi:television
+      - "\U000F0D38"  # mdi:speaker-multiple
+      - "\U000F075A"  # mdi:music
+      - "\U000F057E"  # mdi:volume-high
+      - "\U000F0581"  # mdi:volume-off
+      - "\U000F050F"  # mdi:thermometer
+      - "\U000F058E"  # mdi:water-percent
+      - "\U000F0D91"  # mdi:motion-sensor
+      - "\U000F081A"  # mdi:door
+      - "\U000F081C"  # mdi:door-open
+      - "\U000F05AE"  # mdi:window-closed
+      - "\U000F05B1"  # mdi:window-open
+      - "\U000F0DD7"  # mdi:leak
+      - "\U000F0392"  # mdi:smoke-detector
+      - "\U000F0079"  # mdi:battery
+      - "\U000F040A"  # mdi:play
+      - "\U000F0493"  # mdi:cog
+      - "\U000F167A"  # mdi:robot-outline
+      - "\U000F02DC"  # mdi:home
+      - "\U000F0026"  # mdi:alert
+      - "\U000F0028"  # mdi:alert-circle
+      - "\U000F0450"  # mdi:refresh
+      - "\U000F0130"  # mdi:checkbox-blank-circle-outline
+      - "\U000F02D7"  # mdi:help-circle
+  - file:
+      type: web
+      url: https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/fonts/materialdesignicons-webfont.ttf
+      refresh: never
+    id: mdi_icons_48
+    size: 48
     bpp: 4
     glyphs:
       - "\U000F0335"  # mdi:lightbulb
