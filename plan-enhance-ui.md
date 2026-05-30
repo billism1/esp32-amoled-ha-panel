@@ -66,6 +66,7 @@ All three below are promoted to phases. Future ideas land here first.
 - [x] Rename areas → pages + bottom-bar Home button → **E6**
 - [ ] Light detail modal: real brightness, no fake 100% → **E7**
 - [ ] Per-entity component size (small / medium / large) → **E8**
+- [ ] Read-only entity history chart sheet → **E9**
 
 ---
 
@@ -725,6 +726,138 @@ Tasks:
 
 ---
 
+### Phase E9 — Read-only entity history chart sheet
+
+**Status:** ⬜ not started · target tag: `e9-history-chart`
+
+**Goal:** Tapping a read-only entity (a sensor with no action) opens a
+full-screen overlay sheet showing a chart of its recent values. Default window
+1 h, switchable to 6 h / 24 h. Closes via an `✕` button. The chart updates in
+near-real-time while open.
+
+#### Motivation / context
+
+Read-only entities (`sensor`, `binary_sensor`, anything that resolves to
+`READ_ONLY_TEXT`) currently do nothing on tap — they only render a text badge
+([ha_panel.h:28](components/ha_panel/ha_panel.h#L28)). Their one useful
+interaction is "show me the trend," and there is no history view anywhere in the
+panel today.
+
+#### Data source — REST backfill with ring-buffer fallback
+
+The ESPHome native API exposes **current state only** — there is no history
+retrieval over the protocol the panel already uses (`subscribe_homeassistant_state`
+pushes on change; `get_homeassistant_state` is one-shot current). So history needs
+a deliberate source:
+
+- **Primary — HA REST history (true backfill).** Add the `http_request`
+  component. On sheet open, `GET /api/history/period/<start_iso>?filter_entity_id=<id>&minimal_response`
+  against the HA base URL, authenticated with a **long-lived access token** from
+  `!secret ha_history_token`. Parse the returned JSON array into chart points for
+  the selected window.
+- **Fallback — in-device ring buffer (degraded).** Every charted entity keeps a
+  small fixed-cap RAM ring buffer fed from `on_state_`
+  ([ha_panel.cpp:322](components/ha_panel/ha_panel.cpp#L322)). **If
+  `ha_history_token` is not configured, the sheet silently uses only this
+  buffer** — samples since boot, sparse (HA pushes only on change), and wiped on
+  reboot and on every P8 light-sleep wake. Documented as the no-token mode, not a
+  bug.
+- **Live tail (both modes) — no new subscription.** The panel already holds a
+  *permanent* state subscription for every entity
+  ([ha_panel.cpp:254](components/ha_panel/ha_panel.cpp#L254)); live values already
+  arrive in `on_state_`. While the sheet is open, each new sample for the charted
+  entity is appended to the series and the chart redrawn. **No temporary
+  subscription is added** — that would duplicate an existing sub and risk the
+  P7d/P7e TX-saturation problem.
+
+So with a token: REST fills history + the live tail extends it. Without a token:
+ring buffer only + live tail.
+
+#### Entities & chart types
+
+- **Numeric `sensor`** (state parses as a number) → `lv_chart` line series.
+  Y-axis auto-scaled to the window's min/max; show min/max value labels only — no
+  dense grid (small screen).
+- **`binary_sensor`** → an on/off **state-timeline strip** (filled bands), not a
+  line.
+- **Non-chartable read-only entities** (text sensors, non-numeric) → **no-op**:
+  only numeric-sensor and binary_sensor rows become tappable into this sheet.
+  Other read-only rows stay inert as today (no sheet, no "no history" message).
+- **Routing:** in the row-tap path, a chartable read-only entity opens this sheet
+  instead of the existing no-op.
+
+#### Layout (480×480, reuses the overlay pattern)
+
+```
+┌──────────────────────────────┐
+│ Living Room Temp          ✕   │  title + close (top-right)
+│ 21.4 °C                       │  current value, large
+│                               │
+│      ╱╲      ╱╲___            │  lv_chart line (numeric)
+│  ___╱  ╲___╱       ╲__        │  fills the mid-band
+│                               │
+│ 19.8                    23.1  │  min / max labels
+│  [ 1h ]  [ 6h ]  [ 24h ]      │  window chips (segmented)
+└──────────────────────────────┘
+```
+
+- Full-screen sheet built once at setup, hidden, `lv_obj_move_foreground` on
+  open — same recipe as `detail_modal_` / `confirm_sheet_` / `settings_sheet_`.
+- `✕` close button top-right; background tap also closes (matches the existing
+  sheets).
+- Window chips: a 3-button segmented row, active chip highlighted. Tapping
+  re-fetches (REST) or re-windows (ring buffer) and redraws. Default 1 h.
+
+#### Documentation
+
+- **Root [README.md](README.md):** add a section noting that
+  `ha_history_token` (a HA long-lived access token) enables true backfilled
+  history in the sensor detail chart, and that without it the chart degrades to
+  in-device samples since boot.
+- **[secrets.example.yaml](secrets.example.yaml):** add the `ha_history_token`
+  placeholder with a comment explaining what it is for and the with/without-token
+  behavior (including the since-boot fallback). **Do not touch the real
+  `secrets.yaml`** — the user fills that in themselves.
+
+Tasks:
+- [ ] Add the `http_request` component + `ha_history_token` secret wiring and HA
+      base-URL config (no-token build still compiles and runs).
+- [ ] Per-entity ring buffer in `struct Entity` (fixed cap); append in
+      `on_state_` with numeric parse / binary mapping.
+- [ ] `build_history_sheet_` overlay (title, current value, chart, min/max
+      labels, window chips, `✕`); `open_history_` / `close_history_`.
+- [ ] REST fetch + JSON parse → chart points keyed on window; graceful no-token
+      fallback to the ring buffer.
+- [ ] Live append from `on_state_` while the sheet is open; redraw.
+- [ ] Binary `state`-timeline render path.
+- [ ] Route chartable read-only row-tap → `open_history_`; other read-only rows
+      stay no-op.
+- [ ] README + `secrets.example.yaml` token docs (leave `secrets.yaml` alone).
+
+**Exit criteria:**
+- Tapping a numeric read-only sensor opens the sheet with a line chart, default
+  1 h; chips switch to 6 h / 24 h and redraw.
+- A `binary_sensor` shows an on/off timeline strip.
+- With `ha_history_token` set: the chart shows backfilled history. Without it:
+  the chart shows only since-boot samples — no crash, no error spam.
+- The chart updates live while open as new states arrive.
+- `✕` and background tap close the sheet.
+- A non-chartable read-only row (text sensor) does nothing on tap, as today.
+
+**Risks / unknowns:**
+- **On-device JSON parse** of a history period can be large — use
+  `minimal_response`, cap returned points, and decimate to the chart pixel width
+  (~200 px). Verify memory headroom on-device.
+- **TLS to HA** via `http_request` adds flash + handshake cost; confirm against
+  the 16 MB board budget ([waveshare-2.16.yaml](boards/waveshare-2.16.yaml#L46)).
+- REST endpoint / token failure must fall back cleanly to ring-buffer mode, not
+  hang the sheet — show a brief error/empty state, keep the live tail.
+- Ring-buffer mode after a P8 sleep wake is near-empty — expected and documented.
+- Window re-fetch latency on 6 h / 24 h — show a brief "loading" state while the
+  REST call is in flight.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks
@@ -743,6 +876,10 @@ Tasks:
 - No power-state / sleep-timer changes — E2 only re-reads connection state, it
   doesn't alter when the device sleeps or wakes.
 - No board / pin / driver changes; all three phases are LVGL + YAML wiring.
+  **Exception (E9):** adds the `http_request` component + a HA long-lived token
+  for REST history backfill. This is a new outbound HTTP/TLS path, not a native-
+  API subscription — it does not touch the connect-time TX budget, and absent a
+  token the feature degrades to the in-device ring buffer (no HTTP at all).
 - No redesign of the settings *content* (brightness/timeouts/power/about) — E1
   only relocates it from a tile to a sheet.
 - Battery-icon behaviour is unchanged.
