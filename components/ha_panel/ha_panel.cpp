@@ -10,6 +10,7 @@
 #include <set>
 
 #include "esphome/core/application.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 #include "esphome/core/version.h"
 #include "esphome/components/api/api_server.h"
@@ -360,6 +361,11 @@ void HAPanel::on_state_(const std::string &entity_id, StringRef state) {
       ESP_LOGD(TAG, "%s = %s", entity_id.c_str(), this->entities_[i].state.c_str());
     }
     this->rebuild_entity_row_(i);
+    // E9: capture chartable values into the history ring buffer, and live-tail
+    // the chart if its sheet is currently open on this entity.
+    this->record_history_(i);
+    if (this->history_open_ && this->history_entity_idx_ == i)
+      this->redraw_history_();
     return;
   }
   ESP_LOGW(TAG, "state callback for unknown entity %s", entity_id.c_str());
@@ -1172,6 +1178,9 @@ void HAPanel::build_ui_() {
   // ---- E1 settings overlay sheet (built once, hidden) ----
   this->build_settings_sheet_(scr);
 
+  // ---- E9 read-only history chart sheet (built once, hidden) ----
+  this->build_history_sheet_(scr);
+
   // ---- Boot splash (hides everything until API connects) ----
   this->splash_ = lv_obj_create(scr);
   lv_obj_remove_style_all(this->splash_);
@@ -1584,6 +1593,14 @@ void HAPanel::on_entity_row_clicked_(lv_event_t *e) {
     const Entity &en = self->entities_[entity_idx];
     if (en.confirm && HAPanel::confirm_meaningful_(en.domain)) {
       self->open_confirm_or_detail_(entity_idx);
+      return;
+    }
+    // E9: a chartable read-only entity (numeric sensor / binary_sensor) opens
+    // the history sheet instead of the read-only no-op. Other read-only rows
+    // (text sensors) still fall through to tap_entity_'s no-op.
+    if (en.render_class == RenderClass::READ_ONLY_TEXT &&
+        HAPanel::is_chartable_(en)) {
+      self->open_history_(entity_idx);
       return;
     }
   }
@@ -3047,6 +3064,380 @@ void HAPanel::on_confirm_cover_close_(lv_event_t *e) {
   auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
   if (self != nullptr)
     self->fire_confirm_service_("cover.close_cover");
+}
+
+// ---------- E9 read-only history chart sheet ----------
+
+// Ring-buffer cap per chartable entity. ~240 samples × 8 B = ~1.9 KB each;
+// only chartable read-only entities allocate one. HA pushes on change only, so
+// this is "last 240 changes since boot", decimated to the chart width on draw.
+static const size_t HISTORY_CAP = 240;
+// Window chip → seconds. Index matches history_window_idx_ (0 = 1h, …).
+static const uint32_t HISTORY_WINDOW_S[3] = {3600u, 6u * 3600u, 24u * 3600u};
+// Cap the points fed to lv_chart so a long window decimates to ~screen width.
+static const size_t MAX_CHART_POINTS = 100;
+
+bool HAPanel::state_to_value_(const Entity &e, float *out) {
+  const std::string &s = e.state;
+  if (!e.has_state || s.empty() || s == "unavailable" || s == "unknown")
+    return false;
+  if (e.domain == "binary_sensor") {
+    if (s == "on") { *out = 1.0f; return true; }
+    if (s == "off") { *out = 0.0f; return true; }
+    return false;
+  }
+  const char *c = s.c_str();
+  char *end = nullptr;
+  float v = strtof(c, &end);
+  if (end == c)
+    return false;
+  *out = v;
+  return true;
+}
+
+bool HAPanel::is_chartable_(const Entity &e) {
+  if (e.domain == "binary_sensor")
+    return true;
+  if (e.domain != "sensor")
+    return false;
+  // A sensor is chartable if it's ever produced a numeric sample (history) or
+  // its current state parses as a number. Covers a sensor that reads
+  // "unavailable" at tap time but is normally numeric.
+  if (!e.history.empty())
+    return true;
+  float v;
+  return HAPanel::state_to_value_(e, &v);
+}
+
+void HAPanel::record_history_(size_t entity_idx) {
+  if (entity_idx >= this->entities_.size())
+    return;
+  Entity &e = this->entities_[entity_idx];
+  if (!HAPanel::is_chartable_(e))
+    return;
+  float v;
+  if (!HAPanel::state_to_value_(e, &v))
+    return;  // skip unavailable/unknown/non-numeric transients
+  e.history.push_back({millis(), v});
+  if (e.history.size() > HISTORY_CAP)
+    e.history.erase(e.history.begin());
+}
+
+void HAPanel::build_history_sheet_(lv_obj_t *scr) {
+  // Full-screen overlay, built once, hidden — same recipe as detail_modal_.
+  this->history_sheet_ = lv_obj_create(scr);
+  lv_obj_remove_style_all(this->history_sheet_);
+  lv_obj_set_size(this->history_sheet_, 480, 480);
+  lv_obj_set_pos(this->history_sheet_, 0, 0);
+  lv_obj_set_style_bg_color(this->history_sheet_, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(this->history_sheet_, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(this->history_sheet_, 0, 0);
+  lv_obj_set_style_border_width(this->history_sheet_, 0, 0);
+  lv_obj_add_flag(this->history_sheet_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(this->history_sheet_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(this->history_sheet_, &HAPanel::on_history_bg_clicked_,
+                      LV_EVENT_CLICKED, this);
+
+  // Title (top-left), capped + ellipsised so it clears the close button.
+  this->history_title_ = lv_label_create(this->history_sheet_);
+  lv_label_set_text(this->history_title_, "");
+  lv_obj_set_style_text_color(this->history_title_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(this->history_title_, &lv_font_montserrat_18, 0);
+  lv_obj_set_width(this->history_title_, 380);
+  lv_label_set_long_mode(this->history_title_, LV_LABEL_LONG_DOT);
+  lv_obj_align(this->history_title_, LV_ALIGN_TOP_LEFT, 24, 16);
+
+  // Close ✕ (top-right). 44 px corner inset clears the rounded bezel.
+  lv_obj_t *close = lv_button_create(this->history_sheet_);
+  lv_obj_set_size(close, 44, 36);
+  lv_obj_set_style_bg_opa(close, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_bg_color(close, lv_color_hex(0x2E3640), LV_STATE_PRESSED);
+  lv_obj_set_style_bg_opa(close, LV_OPA_COVER, LV_STATE_PRESSED);
+  lv_obj_set_style_radius(close, 8, 0);
+  lv_obj_set_style_border_width(close, 0, 0);
+  lv_obj_set_style_shadow_width(close, 0, 0);
+  lv_obj_align(close, LV_ALIGN_TOP_RIGHT, -40, 8);
+  lv_obj_add_event_cb(close, &HAPanel::on_history_close_, LV_EVENT_CLICKED, this);
+  lv_obj_t *clbl = lv_label_create(close);
+  lv_label_set_text(clbl, LV_SYMBOL_CLOSE);
+  lv_obj_set_style_text_color(clbl, lv_color_hex(0xCCCCCC), 0);
+  lv_obj_set_style_text_font(clbl, &lv_font_montserrat_18, 0);
+  lv_obj_center(clbl);
+
+  // Current value, large.
+  this->history_value_ = lv_label_create(this->history_sheet_);
+  lv_label_set_text(this->history_value_, "");
+  lv_obj_set_style_text_color(this->history_value_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(this->history_value_, &lv_font_montserrat_24, 0);
+  lv_obj_align(this->history_value_, LV_ALIGN_TOP_LEFT, 24, 52);
+
+  // Numeric chart (line). Hidden when the open entity is a binary_sensor.
+  this->history_chart_ = lv_chart_create(this->history_sheet_);
+  lv_obj_set_size(this->history_chart_, 432, 230);
+  lv_obj_align(this->history_chart_, LV_ALIGN_TOP_MID, 0, 96);
+  lv_obj_set_style_bg_color(this->history_chart_, lv_color_hex(0x111111), 0);
+  lv_obj_set_style_bg_opa(this->history_chart_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(this->history_chart_, 0, 0);
+  lv_obj_set_style_radius(this->history_chart_, 8, 0);
+  lv_obj_set_style_pad_all(this->history_chart_, 4, 0);
+  lv_chart_set_type(this->history_chart_, LV_CHART_TYPE_LINE);
+  lv_chart_set_div_line_count(this->history_chart_, 3, 0);
+  lv_obj_set_style_line_color(this->history_chart_, lv_color_hex(0x333333),
+                              LV_PART_MAIN);
+  // 2 px line; hide the per-point dots for a clean trend line.
+  lv_obj_set_style_line_width(this->history_chart_, 2, LV_PART_ITEMS);
+  lv_obj_set_style_width(this->history_chart_, 0, LV_PART_INDICATOR);
+  lv_obj_set_style_height(this->history_chart_, 0, LV_PART_INDICATOR);
+  this->history_series_ = lv_chart_add_series(
+      this->history_chart_, lv_color_hex(0x44CCDD), LV_CHART_AXIS_PRIMARY_Y);
+
+  // Binary timeline strip (on/off bands). Same footprint as the chart; exactly
+  // one of the two is visible per open. Children (bands) are rebuilt on redraw.
+  this->history_strip_ = lv_obj_create(this->history_sheet_);
+  lv_obj_remove_style_all(this->history_strip_);
+  lv_obj_set_size(this->history_strip_, 432, 230);
+  lv_obj_align(this->history_strip_, LV_ALIGN_TOP_MID, 0, 96);
+  lv_obj_set_style_bg_color(this->history_strip_, lv_color_hex(0x111111), 0);
+  lv_obj_set_style_bg_opa(this->history_strip_, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(this->history_strip_, 8, 0);
+  lv_obj_set_style_pad_all(this->history_strip_, 0, 0);
+  lv_obj_set_style_clip_corner(this->history_strip_, true, 0);
+  lv_obj_clear_flag(this->history_strip_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
+
+  // Min / max value labels under the chart.
+  this->history_min_label_ = lv_label_create(this->history_sheet_);
+  lv_label_set_text(this->history_min_label_, "");
+  lv_obj_set_style_text_color(this->history_min_label_, lv_color_hex(0x888888), 0);
+  lv_obj_set_style_text_font(this->history_min_label_, &lv_font_montserrat_18, 0);
+  lv_obj_align(this->history_min_label_, LV_ALIGN_TOP_LEFT, 24, 332);
+
+  this->history_max_label_ = lv_label_create(this->history_sheet_);
+  lv_label_set_text(this->history_max_label_, "");
+  lv_obj_set_style_text_color(this->history_max_label_, lv_color_hex(0x888888), 0);
+  lv_obj_set_style_text_font(this->history_max_label_, &lv_font_montserrat_18, 0);
+  lv_obj_align(this->history_max_label_, LV_ALIGN_TOP_RIGHT, -24, 332);
+
+  // Window chips: 1h / 6h / 24h segmented row.
+  lv_obj_t *chips = lv_obj_create(this->history_sheet_);
+  lv_obj_remove_style_all(chips);
+  lv_obj_set_size(chips, 480, 56);
+  lv_obj_set_pos(chips, 0, 372);
+  lv_obj_set_style_bg_opa(chips, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_pad_left(chips, 32, 0);
+  lv_obj_set_style_pad_right(chips, 32, 0);
+  lv_obj_set_style_pad_column(chips, 12, 0);
+  lv_obj_set_flex_flow(chips, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(chips, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(chips, LV_OBJ_FLAG_SCROLLABLE);
+
+  const char *chip_text[3] = {"1h", "6h", "24h"};
+  for (int i = 0; i < 3; i++) {
+    lv_obj_t *chip = lv_button_create(chips);
+    lv_obj_set_size(chip, 124, 44);
+    lv_obj_set_style_bg_color(chip, lv_color_hex(0x1A1A1A), 0);
+    lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(chip, 8, 0);
+    lv_obj_set_style_border_width(chip, 0, 0);
+    lv_obj_set_user_data(chip, (void *) (uintptr_t) i);
+    lv_obj_add_event_cb(chip, &HAPanel::on_history_chip_, LV_EVENT_CLICKED, this);
+    lv_obj_t *lbl = lv_label_create(chip);
+    lv_label_set_text(lbl, chip_text[i]);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+    lv_obj_center(lbl);
+    this->history_chips_[i] = chip;
+  }
+}
+
+void HAPanel::open_history_(size_t entity_idx) {
+  if (this->history_sheet_ == nullptr || entity_idx >= this->entities_.size())
+    return;
+  const Entity &e = this->entities_[entity_idx];
+  this->history_entity_idx_ = entity_idx;
+  this->history_window_idx_ = 0;  // default 1 h on every open
+  lv_label_set_text(this->history_title_, e.friendly_name.c_str());
+  lv_obj_clear_flag(this->history_sheet_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(this->history_sheet_);
+  this->history_open_ = true;
+  this->redraw_history_();
+  ESP_LOGI(TAG, "history open: %s", e.entity_id.c_str());
+}
+
+void HAPanel::close_history_() {
+  if (this->history_sheet_ == nullptr)
+    return;
+  lv_obj_add_flag(this->history_sheet_, LV_OBJ_FLAG_HIDDEN);
+  this->history_open_ = false;
+  ESP_LOGD(TAG, "history close");
+}
+
+void HAPanel::redraw_history_() {
+  if (this->history_sheet_ == nullptr ||
+      this->history_entity_idx_ >= this->entities_.size())
+    return;
+  const Entity &e = this->entities_[this->history_entity_idx_];
+
+  // Highlight the active window chip.
+  for (int i = 0; i < 3; i++) {
+    if (this->history_chips_[i] == nullptr)
+      continue;
+    lv_obj_set_style_bg_color(
+        this->history_chips_[i],
+        lv_color_hex(i == this->history_window_idx_ ? 0x3A4A6A : 0x1A1A1A), 0);
+  }
+
+  // Current value (raw state — we don't carry the unit).
+  lv_label_set_text(this->history_value_, e.has_state ? e.state.c_str() : "...");
+
+  const uint32_t now = millis();
+  const uint32_t window_ms = HISTORY_WINDOW_S[this->history_window_idx_] * 1000u;
+  const uint32_t cutoff = now > window_ms ? now - window_ms : 0u;
+  const bool is_binary = e.domain == "binary_sensor";
+
+  if (is_binary) {
+    // ---- on/off band strip ----
+    lv_obj_add_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clean(this->history_strip_);
+    lv_label_set_text(this->history_min_label_, "");
+    lv_label_set_text(this->history_max_label_, "");
+
+    // Anchor state = the last sample at/before the cutoff, so the leading band
+    // is coloured even if the last change predates the window.
+    bool have_state = false;
+    float cur_val = 0.0f;
+    uint32_t seg_start = cutoff;
+    const int32_t strip_w = 432;
+    const int32_t strip_h = 230;
+    for (const auto &s : e.history) {
+      if (s.t_ms <= cutoff) {
+        cur_val = s.value;
+        have_state = true;
+        continue;
+      }
+      // s.t_ms in (cutoff, now]: close the band [seg_start, s.t_ms) at cur_val.
+      if (have_state) {
+        float frac = (float) (s.t_ms - seg_start) / (float) window_ms;
+        int32_t x0 = (int32_t) ((float) (seg_start - cutoff) / window_ms * strip_w);
+        int32_t w = (int32_t) (frac * strip_w);
+        if (w > 0) {
+          lv_obj_t *band = lv_obj_create(this->history_strip_);
+          lv_obj_remove_style_all(band);
+          lv_obj_set_size(band, w, strip_h);
+          lv_obj_set_pos(band, x0, 0);
+          lv_obj_set_style_bg_color(
+              band, lv_color_hex(cur_val > 0.5f ? 0x66BB66 : 0x444444), 0);
+          lv_obj_set_style_bg_opa(band, LV_OPA_COVER, 0);
+        }
+      }
+      seg_start = s.t_ms;
+      cur_val = s.value;
+      have_state = true;
+    }
+    // Final band from the last transition (or cutoff) up to now.
+    if (have_state) {
+      int32_t x0 = (int32_t) ((float) (seg_start - cutoff) / window_ms * strip_w);
+      int32_t w = strip_w - x0;
+      if (w > 0) {
+        lv_obj_t *band = lv_obj_create(this->history_strip_);
+        lv_obj_remove_style_all(band);
+        lv_obj_set_size(band, w, strip_h);
+        lv_obj_set_pos(band, x0, 0);
+        lv_obj_set_style_bg_color(
+            band, lv_color_hex(cur_val > 0.5f ? 0x66BB66 : 0x444444), 0);
+        lv_obj_set_style_bg_opa(band, LV_OPA_COVER, 0);
+      }
+    } else {
+      lv_obj_t *empty = lv_label_create(this->history_strip_);
+      lv_label_set_text(empty, "No data yet");
+      lv_obj_set_style_text_color(empty, lv_color_hex(0x888888), 0);
+      lv_obj_set_style_text_font(empty, &lv_font_montserrat_18, 0);
+      lv_obj_center(empty);
+    }
+    return;
+  }
+
+  // ---- numeric line chart ----
+  lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
+
+  // Collect in-window values in order.
+  std::vector<float> vals;
+  for (const auto &s : e.history) {
+    if (s.t_ms >= cutoff)
+      vals.push_back(s.value);
+  }
+  if (vals.empty()) {
+    lv_chart_set_point_count(this->history_chart_, 0);
+    lv_chart_refresh(this->history_chart_);
+    lv_label_set_text(this->history_value_, "No data yet");
+    lv_label_set_text(this->history_min_label_, "");
+    lv_label_set_text(this->history_max_label_, "");
+    return;
+  }
+
+  // Decimate to MAX_CHART_POINTS by striding so a 24 h window stays light.
+  std::vector<float> pts;
+  if (vals.size() > MAX_CHART_POINTS) {
+    float stride = (float) vals.size() / (float) MAX_CHART_POINTS;
+    for (size_t i = 0; i < MAX_CHART_POINTS; i++)
+      pts.push_back(vals[(size_t) (i * stride)]);
+  } else {
+    pts = vals;
+  }
+
+  float vmin = pts[0], vmax = pts[0];
+  for (float v : pts) {
+    if (v < vmin) vmin = v;
+    if (v > vmax) vmax = v;
+  }
+  // Chart stores int32 — scale ×10 to keep one decimal of precision.
+  int32_t lo = (int32_t) std::floor(vmin * 10.0f);
+  int32_t hi = (int32_t) std::ceil(vmax * 10.0f);
+  if (lo == hi) { lo -= 10; hi += 10; }  // flat series → give it vertical room
+  lv_chart_set_axis_range(this->history_chart_, LV_CHART_AXIS_PRIMARY_Y, lo, hi);
+  lv_chart_set_point_count(this->history_chart_, (uint32_t) pts.size());
+  for (size_t i = 0; i < pts.size(); i++) {
+    lv_chart_set_series_value_by_id(this->history_chart_, this->history_series_,
+                                    (uint32_t) i,
+                                    (int32_t) std::lround(pts[i] * 10.0f));
+  }
+  lv_chart_refresh(this->history_chart_);
+
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%.1f", vmin);
+  lv_label_set_text(this->history_min_label_, buf);
+  snprintf(buf, sizeof(buf), "%.1f", vmax);
+  lv_label_set_text(this->history_max_label_, buf);
+}
+
+void HAPanel::on_history_close_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->close_history_();
+}
+
+void HAPanel::on_history_bg_clicked_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  // Only a tap on the sheet backdrop itself (not a child) closes it.
+  if (lv_event_get_target_obj(e) == self->history_sheet_)
+    self->close_history_();
+}
+
+void HAPanel::on_history_chip_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  lv_obj_t *chip = lv_event_get_target_obj(e);
+  size_t idx = (size_t) (uintptr_t) lv_obj_get_user_data(chip);
+  if (idx > 2)
+    return;
+  self->history_window_idx_ = (uint8_t) idx;
+  self->redraw_history_();
 }
 
 }  // namespace ha_panel

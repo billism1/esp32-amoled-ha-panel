@@ -39,6 +39,7 @@ esphome:
       - "-DLV_USE_SLIDER=1"   # P7 settings tile brightness slider
       - "-DLV_USE_SWITCH=1"   # P7c per-domain row widget (binary entities)
       - "-DLV_USE_DROPDOWN=1" # P7d detail modal (HVAC mode, select options)
+      - "-DLV_USE_CHART=1"    # E9 read-only entity history line chart
 
 esp32:
   board: esp32-s3-devkitc-1

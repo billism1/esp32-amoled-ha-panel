@@ -66,7 +66,7 @@ All three below are promoted to phases. Future ideas land here first.
 - [x] Rename areas → pages + bottom-bar Home button → **E6**
 - [x] Light detail modal: real brightness, no fake 100% → **E7**
 - [x] Per-entity component size (small / medium / large) → **E8**
-- [ ] Read-only entity history chart sheet → **E9**
+- [~] Read-only entity history chart sheet → **E9** (ring-buffer shipped; REST backfill deferred)
 
 ---
 
@@ -733,7 +733,16 @@ Tasks:
 
 ### Phase E9 — Read-only entity history chart sheet
 
-**Status:** ⬜ not started · target tag: `e9-history-chart`
+**Status:** 🟡 ring-buffer mode implemented (REST backfill deferred) · target
+tag: `e9-history-chart`
+
+**Scope decision (2026-05-30):** shipped the chart sheet on the in-device ring
+buffer first — fully self-contained, always compiles/runs, no external deps. The
+REST/`http_request` backfill (blocking TLS GET in the LVGL loop, on-device JSON
+parse, needs a HA token to test) is a deliberate follow-up, not abandoned. The
+no-token "since-boot samples" behaviour the plan documents is therefore the
+*current* behaviour, not a degraded fallback. Docs (README + `secrets.example`)
+reserve `ha_history_token` and describe it as not-yet-consumed.
 
 **Goal:** Tapping a read-only entity (a sensor with no action) opens a
 full-screen overlay sheet showing a chart of its recent values. Default window
@@ -825,19 +834,25 @@ ring buffer only + live tail.
   `secrets.yaml`** — the user fills that in themselves.
 
 Tasks:
-- [ ] Add the `http_request` component + `ha_history_token` secret wiring and HA
-      base-URL config (no-token build still compiles and runs).
-- [ ] Per-entity ring buffer in `struct Entity` (fixed cap); append in
-      `on_state_` with numeric parse / binary mapping.
-- [ ] `build_history_sheet_` overlay (title, current value, chart, min/max
-      labels, window chips, `✕`); `open_history_` / `close_history_`.
-- [ ] REST fetch + JSON parse → chart points keyed on window; graceful no-token
-      fallback to the ring buffer.
-- [ ] Live append from `on_state_` while the sheet is open; redraw.
-- [ ] Binary `state`-timeline render path.
-- [ ] Route chartable read-only row-tap → `open_history_`; other read-only rows
-      stay no-op.
-- [ ] README + `secrets.example.yaml` token docs (leave `secrets.yaml` alone).
+- [ ] **DEFERRED** — `http_request` component + `ha_history_token` secret wiring
+      and HA base-URL config. Not wired yet; build compiles without it.
+- [x] Per-entity ring buffer in `struct Entity` (`HistorySample` + `history`,
+      cap `HISTORY_CAP` = 240); append in `on_state_` via `record_history_`
+      with numeric parse / binary mapping (`state_to_value_`). Only chartable
+      entities (`is_chartable_`) allocate one.
+- [x] `build_history_sheet_` overlay (title, current value, `lv_chart`, min/max
+      labels, 1h/6h/24h window chips, `✕`); `open_history_` / `close_history_` /
+      `redraw_history_`. Added `-DLV_USE_CHART=1` to the board build flags.
+- [ ] **DEFERRED** — REST fetch + JSON parse → chart points keyed on window.
+      Sheet currently reads only the ring buffer.
+- [x] Live append from `on_state_` while the sheet is open; `redraw_history_`.
+- [x] Binary `state`-timeline render path (filled on/off bands in
+      `history_strip_`, anchored to the last pre-window sample).
+- [x] Route chartable read-only row-tap → `open_history_` in
+      `on_entity_row_clicked_`; other read-only rows stay no-op.
+- [x] README ("Entity history chart" section) + `secrets.example.yaml`
+      `ha_history_token` placeholder (marked reserved / not-yet-consumed); left
+      `secrets.yaml` alone.
 
 **Exit criteria:**
 - Tapping a numeric read-only sensor opens the sheet with a line chart, default
