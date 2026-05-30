@@ -736,10 +736,9 @@ void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
   lv_obj_set_style_pad_all(this->settings_sheet_, 0, 0);
   lv_obj_set_style_border_width(this->settings_sheet_, 0, 0);
   lv_obj_add_flag(this->settings_sheet_, LV_OBJ_FLAG_HIDDEN);
+  // CLICKABLE so backdrop taps are absorbed (not passed to the page beneath),
+  // but no close-on-backdrop handler: only Apply / Cancel close this sheet.
   lv_obj_add_flag(this->settings_sheet_, LV_OBJ_FLAG_CLICKABLE);
-  // Bg tap (on the sheet itself, not a child) = revert + close.
-  lv_obj_add_event_cb(this->settings_sheet_, &HAPanel::on_settings_bg_clicked_,
-                      LV_EVENT_CLICKED, this);
   lv_obj_t *parent = this->settings_sheet_;
 
   // Scrollable content area below the rounded top corner; Apply/Cancel sit in a
@@ -1728,18 +1727,6 @@ void HAPanel::on_cancel_clicked_(lv_event_t *e) {
   self->revert_brightness_();
   self->revert_sleep_();
   self->close_settings_();  // E1: Cancel reverts then closes the sheet.
-}
-
-void HAPanel::on_settings_bg_clicked_(lv_event_t *e) {
-  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
-  if (self == nullptr)
-    return;
-  // Bg tap (on the sheet itself, not a child widget) = revert + close.
-  if (lv_event_get_target_obj(e) != self->settings_sheet_)
-    return;
-  self->revert_brightness_();
-  self->revert_sleep_();
-  self->close_settings_();
 }
 
 void HAPanel::on_gear_clicked_(lv_event_t *e) {
@@ -3215,9 +3202,9 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   lv_obj_set_style_pad_all(this->history_sheet_, 0, 0);
   lv_obj_set_style_border_width(this->history_sheet_, 0, 0);
   lv_obj_add_flag(this->history_sheet_, LV_OBJ_FLAG_HIDDEN);
+  // CLICKABLE so backdrop taps are absorbed (not passed to the page beneath),
+  // but no close-on-backdrop handler: only the ✕ button closes this sheet.
   lv_obj_add_flag(this->history_sheet_, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(this->history_sheet_, &HAPanel::on_history_bg_clicked_,
-                      LV_EVENT_CLICKED, this);
 
   // Title (top-left), capped + ellipsised so it clears the close button.
   this->history_title_ = lv_label_create(this->history_sheet_);
@@ -3536,15 +3523,6 @@ void HAPanel::redraw_history_() {
 void HAPanel::on_history_close_(lv_event_t *e) {
   auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
   if (self != nullptr)
-    self->close_history_();
-}
-
-void HAPanel::on_history_bg_clicked_(lv_event_t *e) {
-  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
-  if (self == nullptr)
-    return;
-  // Only a tap on the sheet backdrop itself (not a child) closes it.
-  if (lv_event_get_target_obj(e) == self->history_sheet_)
     self->close_history_();
 }
 

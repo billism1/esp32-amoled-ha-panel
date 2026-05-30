@@ -308,8 +308,6 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_brightness_slider_(lv_event_t *e);
   static void on_apply_clicked_(lv_event_t *e);
   static void on_cancel_clicked_(lv_event_t *e);
-  // E1: settings bg-tap (revert + close) and bottom-bar controls.
-  static void on_settings_bg_clicked_(lv_event_t *e);
   static void on_nav_left_(lv_event_t *e);
   static void on_nav_right_(lv_event_t *e);
   static void on_gear_clicked_(lv_event_t *e);
@@ -353,7 +351,6 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // E9 history-sheet trampolines. close/bg dismiss; chip selects the window
   // (1h/6h/24h) from the chip's user_data and redraws.
   static void on_history_close_(lv_event_t *e);
-  static void on_history_bg_clicked_(lv_event_t *e);
   static void on_history_chip_(lv_event_t *e);
 
   std::vector<Page> pages_;
