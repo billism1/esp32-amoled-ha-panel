@@ -96,6 +96,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void set_sleep_settings(bool enabled, uint8_t mode);
   void set_clock_text(const std::string &text);
   void set_api_connected(bool connected);
+  // E2: Wi-Fi link state, fed by wifi on_connect/on_disconnect. ESPHome
+  // auto-reconnects after a drop, so "disconnected" is rendered as "connecting".
+  void set_wifi_connected(bool connected);
   // P7b: header status icons.
   void set_wifi_rssi(int rssi);
   void set_battery_voltage(float volts);
@@ -157,6 +160,10 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void update_status_dot_();
   void update_wifi_icon_();
   void update_battery_icon_();
+  // E2: start/stop the shared blink timer based on whether any indicator is in
+  // a pending (amber) state. Called whenever wifi/api connection state changes.
+  void update_blink_timer_();
+  static void blink_timer_cb_(lv_timer_t *t);
   bool is_settings_active_() const;
   // P7b: stage / commit / revert brightness slider edits.
   void apply_brightness_();
@@ -303,6 +310,14 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   uint8_t staged_brightness_{0xD0};
   bool brightness_dirty_{false};
   bool api_connected_{false};
+  // E2: Wi-Fi link state. Starts false — boot shows the amber "connecting"
+  // indicator until wifi on_connect fires.
+  bool wifi_connected_{false};
+  // E2: shared 500 ms blink. blink_on_ toggles each tick; pending (amber)
+  // indicators read it for their lit/dim phase. Timer is created only while at
+  // least one indicator is pending and deleted when all states are stable.
+  bool blink_on_{true};
+  lv_timer_t *blink_timer_{nullptr};
   int wifi_rssi_{0};
   bool have_wifi_rssi_{false};
   float battery_voltage_{0.0f};

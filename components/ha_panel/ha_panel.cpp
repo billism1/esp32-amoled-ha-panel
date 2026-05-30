@@ -1161,8 +1161,18 @@ void HAPanel::step_area_(int delta) {
 void HAPanel::update_status_dot_() {
   if (this->status_dot_ == nullptr)
     return;
-  lv_obj_set_style_bg_color(this->status_dot_,
-                            lv_color_hex(this->api_connected_ ? 0x66BB66 : 0xCC4444), 0);
+  // E2: three states.
+  //   wifi down            → red (can't even attempt the HA link yet).
+  //   wifi up, api down     → amber blink ("link not yet re-established").
+  //   api connected        → green.
+  uint32_t col;
+  if (!this->wifi_connected_)
+    col = 0xCC4444;
+  else if (this->api_connected_)
+    col = 0x66BB66;
+  else
+    col = this->blink_on_ ? 0xDDAA33 : 0x5A4A1A;
+  lv_obj_set_style_bg_color(this->status_dot_, lv_color_hex(col), 0);
 }
 
 bool HAPanel::is_settings_active_() const {
@@ -1180,11 +1190,47 @@ void HAPanel::set_api_connected(bool connected) {
   if (this->api_connected_ == connected)
     return;
   this->api_connected_ = connected;
+  this->update_blink_timer_();
   this->update_status_dot_();
   if (connected && this->splash_ != nullptr) {
     lv_obj_add_flag(this->splash_, LV_OBJ_FLAG_HIDDEN);
   }
   ESP_LOGI(TAG, "api %s", connected ? "connected" : "disconnected");
+}
+
+void HAPanel::set_wifi_connected(bool connected) {
+  if (this->wifi_connected_ == connected)
+    return;
+  this->wifi_connected_ = connected;
+  this->update_blink_timer_();
+  this->update_wifi_icon_();
+  this->update_status_dot_();
+  ESP_LOGI(TAG, "wifi %s", connected ? "connected" : "disconnected");
+}
+
+void HAPanel::update_blink_timer_() {
+  // Pending = at least one indicator is amber. Wi-Fi down makes the Wi-Fi icon
+  // pending; wifi-up-api-down makes the dot pending. Either way the condition is
+  // "not fully connected".
+  const bool pending = !this->wifi_connected_ || !this->api_connected_;
+  if (pending && this->blink_timer_ == nullptr) {
+    this->blink_on_ = true;
+    this->blink_timer_ = lv_timer_create(&HAPanel::blink_timer_cb_, 500, this);
+  } else if (!pending && this->blink_timer_ != nullptr) {
+    lv_timer_delete(this->blink_timer_);
+    this->blink_timer_ = nullptr;
+    // Reset so the next redraw of a stable indicator uses its full colour.
+    this->blink_on_ = true;
+  }
+}
+
+void HAPanel::blink_timer_cb_(lv_timer_t *t) {
+  auto *self = static_cast<HAPanel *>(lv_timer_get_user_data(t));
+  if (self == nullptr)
+    return;
+  self->blink_on_ = !self->blink_on_;
+  self->update_wifi_icon_();
+  self->update_status_dot_();
 }
 
 void HAPanel::set_active_brightness(uint8_t v) {
@@ -1307,6 +1353,14 @@ void HAPanel::set_battery_voltage(float volts) {
 void HAPanel::update_wifi_icon_() {
   if (this->wifi_icon_ == nullptr)
     return;
+  // E2: Wi-Fi down → "connecting" (ESPHome auto-reconnects), shown amber and
+  // blinking. The dim phase uses a darkened amber so the glyph pulses rather
+  // than fully vanishing.
+  if (!this->wifi_connected_) {
+    lv_obj_set_style_text_color(
+        this->wifi_icon_, lv_color_hex(this->blink_on_ ? 0xDDAA33 : 0x5A4A1A), 0);
+    return;
+  }
   // RSSI bucketing (typical 2.4 GHz indoor):
   //   >= -55  excellent (green)
   //   >= -65  good      (lime)

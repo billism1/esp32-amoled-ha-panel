@@ -158,7 +158,7 @@ Tasks:
 
 ### Phase E2 — Connection status indicators (Wi-Fi + HA)
 
-**Status:** ⬜ not started · target tag: `e2-status`
+**Status:** ✅ done · target tag: `e2-status`
 
 **Goal:** The Wi-Fi icon and HA status dot show a distinct "connecting /
 re-establishing" state instead of going stale or showing a bare red dot during
@@ -199,10 +199,10 @@ user now sees an active "reconnecting" animation instead of a stale icon + red
 dot.
 
 Tasks:
-- [ ] `set_wifi_connected(bool)` + `wifi_connected_` member; wire
+- [x] `set_wifi_connected(bool)` + `wifi_connected_` member; wire
       `on_connect`/`on_disconnect` in `base.yaml`.
-- [ ] Rework `update_wifi_icon_` and `update_status_dot_` to the 3-state model.
-- [ ] Shared 500 ms blink `lv_timer` refreshing pending indicators.
+- [x] Rework `update_wifi_icon_` and `update_status_dot_` to the 3-state model.
+- [x] Shared 500 ms blink `lv_timer` refreshing pending indicators.
 
 **Exit criteria:**
 - After sleep/wake, the Wi-Fi icon blinks amber while reassociating, then

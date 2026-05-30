@@ -16,6 +16,14 @@ wifi:
   ap:
     ssid: "${friendly_name} AP"
     password: !secret ap_password
+  # E2: feed link state into the header indicators. ESPHome auto-reconnects on a
+  # drop, so the panel renders "disconnected" as an amber "connecting" state.
+  on_connect:
+    then:
+      - lambda: "id(ha_panel_id).set_wifi_connected(true);"
+  on_disconnect:
+    then:
+      - lambda: "id(ha_panel_id).set_wifi_connected(false);"
 
 captive_portal:
 
