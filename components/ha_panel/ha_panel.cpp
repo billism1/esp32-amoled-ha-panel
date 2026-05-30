@@ -2197,7 +2197,37 @@ void HAPanel::build_detail_fan_(lv_obj_t *parent, size_t entity_idx) {
   lv_obj_center(l);
 }
 
+// Maps a cover's Entity::state to a "Currently: …" line text + colour for the
+// detail modal and confirm sheet. Mirrors the COVER_TEXT area-row cues
+// (green = open, grey = closed, neutral for the transient/unknown states).
+static void cover_state_line_(const std::string &state, const char **text,
+                              uint32_t *color) {
+  if (state == "open") {
+    *text = "Currently: Open";
+    *color = 0x66BB66;
+  } else if (state == "closed") {
+    *text = "Currently: Closed";
+    *color = 0x888888;
+  } else if (state == "opening") {
+    *text = "Currently: Opening...";
+    *color = 0xCCCCCC;
+  } else if (state == "closing") {
+    *text = "Currently: Closing...";
+    *color = 0xCCCCCC;
+  } else {
+    *text = "Currently: Unknown";
+    *color = 0xCC4444;
+  }
+}
+
 void HAPanel::build_detail_cover_(lv_obj_t *parent, size_t entity_idx) {
+  // Current state line (from Entity::state, no extra subscription). Replaces
+  // the old bare "Position not reported" for position-less covers.
+  const char *state_txt;
+  uint32_t state_col;
+  cover_state_line_(this->entities_[entity_idx].state, &state_txt, &state_col);
+  add_section_label(parent, state_txt, state_col);
+
   // Three-button transport row, immediate (no Apply).
   lv_obj_t *row = lv_obj_create(parent);
   lv_obj_remove_style_all(row);
@@ -2234,7 +2264,8 @@ void HAPanel::build_detail_cover_(lv_obj_t *parent, size_t entity_idx) {
   // cover is open/closed only and the buttons above are the whole interface.
   int cur_pos = this->get_attr_int_(entity_idx, "current_position", -1);
   if (cur_pos < 0) {
-    add_section_label(parent, "Position not reported", 0xAAAAAA);
+    // Position-less cover (e.g. ratgdo): transport buttons + state line above
+    // are the whole interface. No slider, no misleading "not reported" note.
     return;
   }
   if (cur_pos > 100) cur_pos = 100;
@@ -2746,6 +2777,10 @@ void HAPanel::open_confirm_action_(size_t entity_idx) {
     add_confirm_button(this->confirm_body_, "Unlock", 0x553A2A, 0xFFFFFF,
                        &HAPanel::on_confirm_unlock_, this, avail);
   } else if (d == "cover") {
+    const char *state_txt;
+    uint32_t state_col;
+    cover_state_line_(e.state, &state_txt, &state_col);
+    add_section_label(this->confirm_body_, state_txt, state_col);
     add_confirm_button(this->confirm_body_, LV_SYMBOL_UP "  Open", 0x2A553A,
                        0xFFFFFF, &HAPanel::on_confirm_cover_open_, this, avail);
     add_confirm_button(this->confirm_body_, "Stop", 0x2E3640, 0xFFFFFF,

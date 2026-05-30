@@ -257,7 +257,7 @@ Tasks:
 
 ### Phase E4 — Cover detail modal: show current state
 
-**Status:** ⬜ not started · target tag: `e4-cover-state`
+**Status:** ✅ done · target tag: `e4-cover-state`
 
 **Goal:** The cover detail modal shows the cover's current open/closed state, so
 a cover that doesn't report a position percentage no longer reads as a bare
@@ -285,10 +285,10 @@ state the user already saw.
   for consistency. (Optional within this phase; same data, no extra cost.)
 
 Tasks:
-- [ ] State-line helper that maps cover `Entity::state` → label text + colour.
-- [ ] Add it to the top of `build_detail_cover_`; drop the bare "Position not
+- [x] State-line helper that maps cover `Entity::state` → label text + colour.
+- [x] Add it to the top of `build_detail_cover_`; drop the bare "Position not
       reported" branch; keep the slider gated on `current_position`.
-- [ ] Mirror the state line under the cover confirm-sheet title.
+- [x] Mirror the state line under the cover confirm-sheet title.
 
 **Exit criteria:**
 - Opening the detail modal for a position-less cover shows its open/closed
