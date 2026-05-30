@@ -1,8 +1,13 @@
-# Build Plan — esp32-amoled-ha-panel
+# Build Plan — esp32-amoled-ha-panel (MVP)
 
 Phased plan from empty repo → working **handheld, battery-powered** HA remote
 on the Waveshare ESP32-S3-Touch-AMOLED-2.16, with a structure that lets us
 add other AMOLED boards later by dropping in a new board package.
+
+**Follow-on plans** (split out of this one):
+- [plan-multi-board-support.md](plan-multi-board-support.md) — Phase 9, portability across AMOLED boards.
+- [plan-dynamic-discovery.md](plan-dynamic-discovery.md) — Phase 10, HA-driven dynamic area/entity discovery.
+- [plan-enhance-ui.md](plan-enhance-ui.md) — placeholder for post-MVP UI enhancements.
 
 Device runs on a LiPo cell in a hand-held enclosure. Idle screen behaviour
 (dim → blank → wake on touch or IMU motion) is a **first-class feature**,
@@ -1166,94 +1171,18 @@ Sleep is **opt-out, not opt-in** — on by default, user can disable it.
 
 ## Phase 9 — Multi-board support
 
-**Status:** ⬜ not started · target tag: `p9-multiboard`
-
-**Goal:** Adding a second AMOLED board = adding one board package, nothing else.
-
-Tasks:
-- [ ] Extract anything still board-specific from `ha-amoled-panel.yaml` into the board package.
-- [ ] Add a second board: `boards/waveshare-1.75.yaml`. Same UI YAML, different pins + dimensions.
-- [ ] Document the "add a new board" recipe in `README.md`.
-
-**Exit criteria:** Switching boards by changing one `!include` line, no other edits, panel works.
-
-**Risks / unknowns:**
-- Different touch ICs across boards = different external_component for each. Make the touch component an include from the board package, not the top YAML.
-- 480×480 vs 466×466 vs other sizes — LVGL layout should pull dimensions from substitutions defined in the board package.
+**Moved to its own plan:** [plan-multi-board-support.md](plan-multi-board-support.md).
+Status, goal, tasks, exit criteria, and risks now live there. This MVP plan
+targets the Waveshare ESP32-S3-Touch-AMOLED-2.16 only.
 
 ---
 
 ## Phase 10 — Dynamic area + entity discovery (replaces static YAML)
 
-**Status:** ⬜ not started · target tag: `p10-dynamic`
-
-**Goal:** Move source-of-truth for areas + entities from `packages/ha-entities.yaml` into Home Assistant itself. Re-arranging a home no longer requires a firmware rebuild.
-
-### Mechanism
-
-Single HA template sensor exposes the full area→entity map as a JSON attribute. Device subscribes to that attribute, parses, and builds LVGL tiles at runtime.
-
-**HA side** (lives in HA's `configuration.yaml`, not in this repo — but we'll ship a sample snippet in `docs/ha-template-sensor.yaml`):
-
-```yaml
-template:
-  - sensor:
-      - name: "AMOLED Panel Config"
-        unique_id: amoled_panel_config
-        state: "ok"
-        attributes:
-          # Areas in carousel order. Override by sorting via labels or a manual list.
-          areas: >
-            {{ areas() | map('area_name') | list | tojson }}
-          # { "Living Room": ["light.lamp", "switch.fan", ...], ... }
-          entities_by_area: >
-            {%- set ns = namespace(out={}) -%}
-            {%- for a in areas() -%}
-              {%- set ents = area_entities(a)
-                  | reject('match', '^(sun|zone|person|device_tracker|update)\\.')
-                  | list -%}
-              {%- set ns.out = dict(ns.out, **{area_name(a): ents}) -%}
-            {%- endfor -%}
-            {{ ns.out | tojson }}
-```
-
-User can refine the reject/include filter to taste. Optionally support a `label` ("show_on_panel") on entities and filter to only labelled ones — cleaner than blacklist.
-
-**Device side:**
-
-```yaml
-text_sensor:
-  - platform: homeassistant
-    id: panel_config_json
-    entity_id: sensor.amoled_panel_config
-    attribute: entities_by_area
-    on_value:
-      - lambda: |-
-          // 1. Parse x via ArduinoJson
-          // 2. Diff against currently-rendered area/entity set
-          // 3. Rebuild LVGL tiles via lv_obj_create / lv_label_create / lv_btn_create
-          // 4. Subscribe to per-entity states for the new set
-```
-
-### Hard parts (call out so we don't kid ourselves)
-
-1. **Runtime LVGL widget creation.** ESPHome's YAML LVGL is declarative; building tiles in a lambda means calling the underlying LVGL C API directly. Works, but examples are sparse — budget a real spike. Pre-build by Phase 6 a small lambda that creates one tile programmatically as a proof.
-2. **Runtime per-entity state subscriptions.** `homeassistant.text_sensor` is declared at compile time. Workaround: declare a *pool* of N (say 64) generic subscriptions at compile time, bind each one to whichever entity_id we currently care about via the C++ `set_entity_id()` setter. Confirm that ESPHome's native API client supports re-subscribing on `set_entity_id()` change — if not, a Phase 10 blocker.
-3. **JSON payload size.** Native API protobuf message limit isn't tiny but isn't infinite. A 50-entity home is fine; a 500-entity home may overflow. Filter on the HA side aggressively.
-4. **Domain → behaviour map stays in firmware.** Even with dynamic entity lists, knowing that `light.*` toggles and `sensor.*` is read-only is still a compile-time table. Acceptable.
-
-### Migration
-
-- Keep `packages/ha-entities.yaml` schema working. Add a top-level `discovery_mode: static | dynamic` substitution. `dynamic` ignores the static file; `static` keeps the MVP path. Lets us flip per board / per install without deleting code.
-
-**Exit criteria:**
-- Adding a new HA area + light + flashing nothing → panel reflects the change within a few seconds.
-- Removing an entity from HA → panel drops the tile.
-- Reordering areas via the HA template → panel carousel order updates.
-
-**Risks / unknowns:**
-- Re-subscription via `set_entity_id()` at runtime is the single biggest unknown. If it doesn't work, fallback: at boot, read the JSON once, restart device with state cached, declare subscriptions on next boot via generated config — much worse UX, only as a backstop.
-- LVGL teardown on reconfigure must not leak memory. Track widget pointers and delete cleanly when an entity disappears.
+**Moved to its own plan:** [plan-dynamic-discovery.md](plan-dynamic-discovery.md).
+Mechanism (HA template sensor → JSON attribute → runtime LVGL build), hard
+parts, migration, exit criteria, and risks now live there. The MVP path stays
+the static, gitignored `packages/ha-entities.yaml` from Phase 5.
 
 ---
 
