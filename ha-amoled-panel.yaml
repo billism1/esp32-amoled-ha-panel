@@ -6,6 +6,12 @@ substitutions:
   node_name: ha-amoled-panel
   friendly_name: "HA AMOLED Panel"
 
+# Settings (brightness / sleep) are restore_value globals. Default flash batching
+# is 60 s; drop to 2 s so an Apply commits to NVS well within the 3 s power-button
+# hold — i.e. it survives an immediate power-off.
+preferences:
+  flash_write_interval: 2s
+
 esphome:
   name: ${node_name}
   friendly_name: ${friendly_name}
@@ -27,8 +33,17 @@ esphome:
             });
             id(ha_panel_id).set_brightness_committer([](uint8_t v) {
               id(active_brightness_g) = v;
+              // Persistence: GlobalsComponent::loop() saves the changed value to
+              // the pending NVS buffer next tick; the top-level `preferences:`
+              // flash_write_interval (2 s) commits it. 2 s < the 3 s power-button
+              // hold, so even an immediate power-off persists.
             });
             id(ha_panel_id).set_active_brightness(id(active_brightness_g));
+            // Apply the restored brightness at boot. idle_state starts = active
+            // but nothing drives the display to the persisted level until the
+            // first wake/input fires enter_active, so without this the screen
+            // sits at the display component's init default after a cold boot.
+            id(amoled_display).set_brightness(id(active_brightness_g));
             // P8: sleep settings — committer writes the persisted globals on
             // Apply; set_sleep_settings seeds the settings-tile controls from
             // the restored values at boot.
