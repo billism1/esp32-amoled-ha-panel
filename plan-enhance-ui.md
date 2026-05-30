@@ -377,6 +377,27 @@ missing-glyph box.
 - `wifi.on_connect` may fire before `build_ui_`; the build-time
   `update_splash_status_()` call covers that ordering.
 
+**Follow-up — per-stage rows + green checkmarks:**
+The single swapping status label + single blinking dot were replaced by one row
+per init stage. Each row is a phrase label (`"Connecting to Wi-Fi..."`,
+`"Connecting to Home Assistant..."`) with a status indicator to its **right,
+after the `...`**: an amber dot that blinks off the shared 500 ms timer while the
+stage is in progress, swapped for a green `LV_SYMBOL_OK` check once the stage
+completes. Wi-Fi is the first gate, HA API the second.
+- `splash_status_`/`splash_dot_` members were dropped in favour of a `SplashStage`
+  struct (`{dot, check}`) with one instance per stage (`splash_wifi_stage_`,
+  `splash_ha_stage_`).
+- `build_splash_stage_(parent, text, y)` builds a row; `update_splash_stage_(st,
+  done, active)` drives it — green check when done, amber dot blinking when
+  active, dim-steady when not yet reached.
+- `update_splash_status_()` now just maps link state to per-stage done/active:
+  Wi-Fi done = `wifi_connected_`, HA done = `api_connected_`.
+- The HA (last) stage flips to its green check in `set_api_connected` just before
+  the splash hides — not on-screen long, but kept consistent so future extra
+  stages behave uniformly.
+- Adding a stage later = add a `SplashStage` member + a `build_splash_stage_`
+  call + an `update_splash_stage_` line.
+
 ---
 
 ### Phase E6 — Rename areas → pages + bottom-bar Home button

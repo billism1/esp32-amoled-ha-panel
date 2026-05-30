@@ -1215,22 +1215,15 @@ void HAPanel::build_ui_() {
   lv_obj_set_style_text_font(splash_name, &lv_font_montserrat_18, 0);
   lv_obj_align(splash_name, LV_ALIGN_CENTER, 0, -20);
 
-  this->splash_status_ = lv_label_create(this->splash_);
-  lv_obj_set_style_text_color(this->splash_status_, lv_color_hex(0xAAAAAA), 0);
-  lv_obj_set_style_text_font(this->splash_status_, &lv_font_montserrat_18, 0);
-  lv_obj_align(this->splash_status_, LV_ALIGN_CENTER, 0, 20);
+  // E5: one row per init stage. Each row's amber dot blinks while in progress,
+  // then becomes a green check when done. Wi-Fi first, HA API second.
+  this->splash_wifi_stage_ =
+      this->build_splash_stage_(this->splash_, "Connecting to Wi-Fi...", 20);
+  this->splash_ha_stage_ =
+      this->build_splash_stage_(this->splash_, "Connecting to Home Assistant...", 54);
 
-  // E5: pulsing dot — small amber circle that blinks via the shared blink timer
-  // so the splash visibly signals the current stage is being worked on.
-  this->splash_dot_ = lv_obj_create(this->splash_);
-  lv_obj_remove_style_all(this->splash_dot_);
-  lv_obj_set_size(this->splash_dot_, 12, 12);
-  lv_obj_set_style_radius(this->splash_dot_, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(this->splash_dot_, lv_color_hex(0xDDAA33), 0);
-  lv_obj_set_style_bg_opa(this->splash_dot_, LV_OPA_COVER, 0);
-  lv_obj_align(this->splash_dot_, LV_ALIGN_CENTER, 0, 52);
-
-  // E5: pick text from current link state (on_connect may have fired before build).
+  // E5: set indicator states from current link state (on_connect may have fired
+  // before build).
   this->update_splash_status_();
 
   this->update_status_dot_();
@@ -1320,16 +1313,63 @@ void HAPanel::update_status_dot_() {
   lv_obj_set_style_bg_color(this->status_dot_, lv_color_hex(col), 0);
 }
 
-void HAPanel::update_splash_status_() {
-  // E5: two honest gates. No "done" text — the splash hides on API connect.
-  if (this->splash_status_ != nullptr) {
-    const char *text = this->wifi_connected_ ? "Connecting to Home Assistant..."
-                                             : "Connecting to Wi-Fi...";
-    lv_label_set_text(this->splash_status_, text);
+HAPanel::SplashStage HAPanel::build_splash_stage_(lv_obj_t *parent, const char *text,
+                                                  lv_coord_t y) {
+  SplashStage st;
+  // Phrase, nudged left so the indicator to its right keeps the row centred.
+  lv_obj_t *row = lv_label_create(parent);
+  lv_label_set_text(row, text);
+  lv_obj_set_style_text_color(row, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(row, &lv_font_montserrat_18, 0);
+  lv_obj_align(row, LV_ALIGN_CENTER, -14, y);
+
+  // Amber pending dot — sits just right of the phrase, after the "...".
+  st.dot = lv_obj_create(parent);
+  lv_obj_remove_style_all(st.dot);
+  lv_obj_set_size(st.dot, 12, 12);
+  lv_obj_set_style_radius(st.dot, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(st.dot, lv_color_hex(0xDDAA33), 0);
+  lv_obj_set_style_bg_opa(st.dot, LV_OPA_COVER, 0);
+  lv_obj_align_to(st.dot, row, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+
+  // Green checkmark — same spot, hidden until the stage completes.
+  st.check = lv_label_create(parent);
+  lv_label_set_text(st.check, LV_SYMBOL_OK);
+  lv_obj_set_style_text_color(st.check, lv_color_hex(0x66BB66), 0);
+  lv_obj_set_style_text_font(st.check, &lv_font_montserrat_18, 0);
+  lv_obj_align_to(st.check, row, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+  lv_obj_add_flag(st.check, LV_OBJ_FLAG_HIDDEN);
+  return st;
+}
+
+void HAPanel::update_splash_stage_(const SplashStage &st, bool done, bool active) {
+  if (st.dot == nullptr || st.check == nullptr)
+    return;
+  if (done) {
+    // Stage complete: swap amber dot for the green check.
+    lv_obj_add_flag(st.dot, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(st.check, LV_OBJ_FLAG_HIDDEN);
+    return;
   }
-  // E5: pulse the dot with the shared blink phase to show work in progress.
-  if (this->splash_dot_ != nullptr)
-    lv_obj_set_style_bg_opa(this->splash_dot_, this->blink_on_ ? LV_OPA_COVER : LV_OPA_30, 0);
+  lv_obj_clear_flag(st.dot, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(st.check, LV_OBJ_FLAG_HIDDEN);
+  // Active stage pulses with the shared blink phase; a not-yet-reached stage
+  // sits dim and steady.
+  lv_opa_t opa = active ? (this->blink_on_ ? LV_OPA_COVER : LV_OPA_30) : LV_OPA_30;
+  lv_obj_set_style_bg_opa(st.dot, opa, 0);
+}
+
+void HAPanel::update_splash_status_() {
+  // E5: Wi-Fi is the first gate, the HA API the second. A stage is "done" once
+  // its link is up, "active" while it is the current gate being worked on. The
+  // HA stage flips to its green check on api-connect just before the splash
+  // hides (set_api_connected) — done for consistency / future extra stages,
+  // even though it is not on-screen long enough to see.
+  const bool wifi_done = this->wifi_connected_;
+  const bool ha_done = this->api_connected_;
+  this->update_splash_stage_(this->splash_wifi_stage_, wifi_done, /*active=*/!wifi_done);
+  this->update_splash_stage_(this->splash_ha_stage_, ha_done,
+                             /*active=*/wifi_done && !ha_done);
 }
 
 bool HAPanel::is_settings_active_() const {
@@ -1349,6 +1389,9 @@ void HAPanel::set_api_connected(bool connected) {
   this->api_connected_ = connected;
   this->update_blink_timer_();
   this->update_status_dot_();
+  // E5: flip the HA stage to its green check before hiding the splash — not
+  // visible for long, but keeps every stage consistent for future extra ones.
+  this->update_splash_status_();
   if (connected && this->splash_ != nullptr) {
     lv_obj_add_flag(this->splash_, LV_OBJ_FLAG_HIDDEN);
   }
@@ -1362,7 +1405,7 @@ void HAPanel::set_wifi_connected(bool connected) {
   this->update_blink_timer_();
   this->update_wifi_icon_();
   this->update_status_dot_();
-  this->update_splash_status_();  // E5: flip text Wi-Fi → HA once Wi-Fi lands.
+  this->update_splash_status_();  // E5: Wi-Fi stage → green check, HA stage → active.
   ESP_LOGI(TAG, "wifi %s", connected ? "connected" : "disconnected");
 }
 

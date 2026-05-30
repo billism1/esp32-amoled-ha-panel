@@ -208,6 +208,18 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void close_picker_();
   void update_status_dot_();
   void update_splash_status_();
+  // E5: a splash init-stage's indicator handles — an amber dot that blinks
+  // while the stage is in progress, swapped for a green check when it is done.
+  struct SplashStage {
+    lv_obj_t *dot{nullptr};    // amber pending indicator (blinks while active)
+    lv_obj_t *check{nullptr};  // green LV_SYMBOL_OK shown when stage done
+  };
+  // E5: build one splash init-stage row (phrase + amber dot + hidden green
+  // check) at vertical offset y; returns the stage's indicator handles.
+  SplashStage build_splash_stage_(lv_obj_t *parent, const char *text, lv_coord_t y);
+  // E5: drive a stage's indicator — green check when done, else amber dot
+  // (blinking when active, dim-steady when not yet reached).
+  void update_splash_stage_(const SplashStage &st, bool done, bool active);
   void update_wifi_icon_();
   void update_battery_icon_();
   // E2: start/stop the shared blink timer based on whether any indicator is in
@@ -356,11 +368,14 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *tileview_{nullptr};
   lv_obj_t *picker_{nullptr};
   lv_obj_t *splash_{nullptr};
-  // E5: splash status label, updated after build to show the current
-  // connection gate (Wi-Fi vs HA API). splash_dot_ pulses with blink_on_ to
-  // signal "this stage is being worked on".
-  lv_obj_t *splash_status_{nullptr};
-  lv_obj_t *splash_dot_{nullptr};
+  // E5: splash shows one row per init stage (Wi-Fi, then HA API). Each row is a
+  // phrase label with a status indicator to its right (after the "..."): an
+  // amber dot that blinks while that stage is in progress, swapped for a green
+  // checkmark once the stage completes. Built once; update_splash_status_
+  // drives the states off wifi_connected_ / api_connected_. Add more stages by
+  // adding SplashStage members + build/update calls.
+  SplashStage splash_wifi_stage_{};
+  SplashStage splash_ha_stage_{};
   // E1: settings overlay sheet (was a tileview tile). settings_open_ tracks
   // visibility; the revert-on-close trigger replaces the old
   // revert-on-navigate-away-from-tile path.
