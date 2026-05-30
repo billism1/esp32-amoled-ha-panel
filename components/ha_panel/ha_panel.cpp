@@ -3077,6 +3077,22 @@ static const uint32_t HISTORY_WINDOW_S[3] = {3600u, 6u * 3600u, 24u * 3600u};
 // Cap the points fed to lv_chart so a long window decimates to ~screen width.
 static const size_t MAX_CHART_POINTS = 100;
 
+// Format an elapsed duration as a compact "-12s" / "-45m" / "-2.5h" axis label.
+static void fmt_age_(uint32_t age_ms, char *buf, size_t n) {
+  uint32_t s = (age_ms + 500u) / 1000u;
+  if (s < 90u) {
+    snprintf(buf, n, "-%us", (unsigned) s);
+    return;
+  }
+  uint32_t m = (s + 30u) / 60u;
+  if (m < 90u) {
+    snprintf(buf, n, "-%um", (unsigned) m);
+    return;
+  }
+  uint32_t h10 = (s * 10u + 1800u) / 3600u;  // tenths of an hour, rounded
+  snprintf(buf, n, "-%u.%uh", (unsigned) (h10 / 10u), (unsigned) (h10 % 10u));
+}
+
 bool HAPanel::state_to_value_(const Entity &e, float *out) {
   const std::string &s = e.state;
   if (!e.has_state || s.empty() || s == "unavailable" || s == "unknown")
@@ -3205,18 +3221,26 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   lv_obj_clear_flag(this->history_strip_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
 
-  // Min / max value labels under the chart.
-  this->history_min_label_ = lv_label_create(this->history_sheet_);
-  lv_label_set_text(this->history_min_label_, "");
-  lv_obj_set_style_text_color(this->history_min_label_, lv_color_hex(0x888888), 0);
-  lv_obj_set_style_text_font(this->history_min_label_, &lv_font_montserrat_18, 0);
-  lv_obj_align(this->history_min_label_, LV_ALIGN_TOP_LEFT, 24, 332);
+  // Bottom row under the chart: time span (left = oldest visible sample age,
+  // right = "now") + centered value range. Time markers make the x-axis legible
+  // and stop a data-starved window from looking like a populated one.
+  this->history_time_left_ = lv_label_create(this->history_sheet_);
+  lv_label_set_text(this->history_time_left_, "");
+  lv_obj_set_style_text_color(this->history_time_left_, lv_color_hex(0x888888), 0);
+  lv_obj_set_style_text_font(this->history_time_left_, &lv_font_montserrat_18, 0);
+  lv_obj_align(this->history_time_left_, LV_ALIGN_TOP_LEFT, 24, 332);
 
-  this->history_max_label_ = lv_label_create(this->history_sheet_);
-  lv_label_set_text(this->history_max_label_, "");
-  lv_obj_set_style_text_color(this->history_max_label_, lv_color_hex(0x888888), 0);
-  lv_obj_set_style_text_font(this->history_max_label_, &lv_font_montserrat_18, 0);
-  lv_obj_align(this->history_max_label_, LV_ALIGN_TOP_RIGHT, -24, 332);
+  this->history_range_label_ = lv_label_create(this->history_sheet_);
+  lv_label_set_text(this->history_range_label_, "");
+  lv_obj_set_style_text_color(this->history_range_label_, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(this->history_range_label_, &lv_font_montserrat_18, 0);
+  lv_obj_align(this->history_range_label_, LV_ALIGN_TOP_MID, 0, 332);
+
+  this->history_time_right_ = lv_label_create(this->history_sheet_);
+  lv_label_set_text(this->history_time_right_, "");
+  lv_obj_set_style_text_color(this->history_time_right_, lv_color_hex(0x888888), 0);
+  lv_obj_set_style_text_font(this->history_time_right_, &lv_font_montserrat_18, 0);
+  lv_obj_align(this->history_time_right_, LV_ALIGN_TOP_RIGHT, -24, 332);
 
   // Window chips: 1h / 6h / 24h segmented row.
   lv_obj_t *chips = lv_obj_create(this->history_sheet_);
@@ -3301,8 +3325,9 @@ void HAPanel::redraw_history_() {
     lv_obj_add_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clean(this->history_strip_);
-    lv_label_set_text(this->history_min_label_, "");
-    lv_label_set_text(this->history_max_label_, "");
+    // The strip's x-axis is genuinely time-proportional, so it spans the full
+    // window (clamped to uptime when the device booted more recently).
+    lv_label_set_text(this->history_range_label_, "");
 
     // Anchor state = the last sample at/before the cutoff, so the leading band
     // is coloured even if the last change predates the window.
@@ -3356,6 +3381,15 @@ void HAPanel::redraw_history_() {
       lv_obj_set_style_text_font(empty, &lv_font_montserrat_18, 0);
       lv_obj_center(empty);
     }
+    if (have_state) {
+      char buf[24];
+      fmt_age_(now - cutoff, buf, sizeof(buf));
+      lv_label_set_text(this->history_time_left_, buf);
+      lv_label_set_text(this->history_time_right_, "now");
+    } else {
+      lv_label_set_text(this->history_time_left_, "");
+      lv_label_set_text(this->history_time_right_, "");
+    }
     return;
   }
 
@@ -3363,18 +3397,26 @@ void HAPanel::redraw_history_() {
   lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
 
-  // Collect in-window values in order.
+  // Collect in-window values in order, tracking the oldest visible timestamp so
+  // the left axis label reflects the real data span. The line chart spaces
+  // points evenly (not time-proportionally), so labelling the actual span — not
+  // the chosen window — is what keeps a data-starved 6h view honest.
   std::vector<float> vals;
+  uint32_t oldest_t = now;
   for (const auto &s : e.history) {
-    if (s.t_ms >= cutoff)
+    if (s.t_ms >= cutoff) {
+      if (vals.empty())
+        oldest_t = s.t_ms;
       vals.push_back(s.value);
+    }
   }
   if (vals.empty()) {
     lv_chart_set_point_count(this->history_chart_, 0);
     lv_chart_refresh(this->history_chart_);
     lv_label_set_text(this->history_value_, "No data yet");
-    lv_label_set_text(this->history_min_label_, "");
-    lv_label_set_text(this->history_max_label_, "");
+    lv_label_set_text(this->history_time_left_, "");
+    lv_label_set_text(this->history_time_right_, "");
+    lv_label_set_text(this->history_range_label_, "");
     return;
   }
 
@@ -3406,11 +3448,14 @@ void HAPanel::redraw_history_() {
   }
   lv_chart_refresh(this->history_chart_);
 
+  // Time span (oldest visible → now) on the ends, value range centered.
   char buf[24];
-  snprintf(buf, sizeof(buf), "%.1f", vmin);
-  lv_label_set_text(this->history_min_label_, buf);
-  snprintf(buf, sizeof(buf), "%.1f", vmax);
-  lv_label_set_text(this->history_max_label_, buf);
+  fmt_age_(now - oldest_t, buf, sizeof(buf));
+  lv_label_set_text(this->history_time_left_, buf);
+  lv_label_set_text(this->history_time_right_, "now");
+  char range[40];
+  snprintf(range, sizeof(range), "%.1f - %.1f", vmin, vmax);
+  lv_label_set_text(this->history_range_label_, range);
 }
 
 void HAPanel::on_history_close_(lv_event_t *e) {

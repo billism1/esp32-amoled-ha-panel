@@ -468,8 +468,13 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *history_chart_{nullptr};
   lv_chart_series_t *history_series_{nullptr};
   lv_obj_t *history_strip_{nullptr};
-  lv_obj_t *history_min_label_{nullptr};
-  lv_obj_t *history_max_label_{nullptr};
+  // Bottom row under the chart: left/right are the time span of the *displayed
+  // data* (oldest visible sample's age → "now"), so a window with no older data
+  // reads honestly instead of looking identical at every chip. Center shows the
+  // numeric value range (min–max); empty for binary_sensor.
+  lv_obj_t *history_time_left_{nullptr};
+  lv_obj_t *history_time_right_{nullptr};
+  lv_obj_t *history_range_label_{nullptr};
   lv_obj_t *history_chips_[3]{nullptr, nullptr, nullptr};
   size_t history_entity_idx_{0};
   bool history_open_{false};
