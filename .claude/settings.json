@@ -19,7 +19,8 @@
       "Bash(echo \"exit=$?\")",
       "Bash(ls *.yaml)",
       "Bash(python -m esphome version)",
-      "Bash(git log *)"
+      "Bash(git log *)",
+      "PowerShell(\\(Get-Command esphome -ErrorAction SilentlyContinue\\).Source)"
     ]
   }
 }
