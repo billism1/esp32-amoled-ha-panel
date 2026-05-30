@@ -10,6 +10,8 @@
 #include "esphome/core/string_ref.h"
 #include "esphome/components/api/custom_api_device.h"
 #include "esphome/components/font/font.h"
+#include "esphome/components/http_request/http_request.h"
+#include "esphome/components/time/real_time_clock.h"
 
 #include "lvgl.h"
 
@@ -107,6 +109,12 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // back to the base 24 px font (icon just looks relatively smaller).
   void set_mdi_font_medium(font::Font *f) { this->mdi_font_med_ = f; }
   void set_mdi_font_large(font::Font *f) { this->mdi_font_lg_ = f; }
+  // E9: REST history backfill wiring. All four must be set for backfill to run;
+  // otherwise the chart falls back to the in-device ring buffer.
+  void set_history_http(http_request::HttpRequestComponent *c) { this->history_http_ = c; }
+  void set_history_time(time::RealTimeClock *t) { this->history_time_ = t; }
+  void set_history_base_url(const std::string &u) { this->history_base_url_ = u; }
+  void set_history_token(const std::string &t) { this->history_token_ = t; }
 
   // Programmatic action (tests / future automations).
   bool tap(size_t page_idx, size_t entity_idx);
@@ -255,6 +263,18 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // non-numeric / unavailable / unknown so the sample is skipped. binary_sensor
   // maps on→1, off→0; everything else uses strtof.
   static bool state_to_value_(const Entity &e, float *out);
+  // E9: true when all four REST-backfill dependencies are wired.
+  bool history_rest_enabled_() const;
+  // E9: populate history_samples_ for the open sheet. Tries REST backfill when
+  // enabled (sets history_rest_mode_ on success); otherwise copies the entity's
+  // ring buffer. Window selects the fetch span / filter.
+  void load_history_samples_(size_t entity_idx, uint8_t window_idx);
+  // E9: blocking GET /api/history/period/... → history_samples_. Returns false
+  // on any failure (caller falls back to the ring buffer). Converts HA's
+  // absolute timestamps to device-clock millis so the chart/labels are uniform.
+  bool fetch_history_(size_t entity_idx, uint8_t window_idx);
+  // E9: parse a leading ISO-8601 "YYYY-MM-DDTHH:MM:SS" into a UTC epoch.
+  static bool iso_to_epoch_(const char *s, int64_t *out);
 
   // Attribute lookup helpers — return value via out param, false if missing.
   bool get_attr_(size_t entity_idx, const char *name, std::string *out) const;
@@ -479,6 +499,17 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   size_t history_entity_idx_{0};
   bool history_open_{false};
   uint8_t history_window_idx_{0};  // 0 = 1h, 1 = 6h, 2 = 24h
+  // E9: working sample set for the open sheet — REST-backfilled points or a copy
+  // of the entity's ring buffer. redraw_history_ reads this; the live tail
+  // appends to it. history_rest_mode_ gates whether a window change re-fetches.
+  std::vector<HistorySample> history_samples_;
+  bool history_rest_mode_{false};
+
+  // E9 REST backfill dependencies (all four required; unset → ring-buffer only).
+  http_request::HttpRequestComponent *history_http_{nullptr};
+  time::RealTimeClock *history_time_{nullptr};
+  std::string history_base_url_;
+  std::string history_token_;
 };
 
 }  // namespace ha_panel

@@ -12,8 +12,10 @@
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
+#include "esphome/core/time.h"
 #include "esphome/core/version.h"
 #include "esphome/components/api/api_server.h"
+#include "esphome/components/json/json_util.h"
 
 namespace esphome {
 namespace ha_panel {
@@ -364,8 +366,14 @@ void HAPanel::on_state_(const std::string &entity_id, StringRef state) {
     // E9: capture chartable values into the history ring buffer, and live-tail
     // the chart if its sheet is currently open on this entity.
     this->record_history_(i);
-    if (this->history_open_ && this->history_entity_idx_ == i)
+    if (this->history_open_ && this->history_entity_idx_ == i) {
+      // Live tail: extend the open sheet's working set (REST-backfilled or
+      // ring-buffer) with the new value, then redraw.
+      float v;
+      if (HAPanel::state_to_value_(this->entities_[i], &v))
+        this->history_samples_.push_back({millis(), v});
       this->redraw_history_();
+    }
     return;
   }
   ESP_LOGW(TAG, "state callback for unknown entity %s", entity_id.c_str());
@@ -3285,6 +3293,7 @@ void HAPanel::open_history_(size_t entity_idx) {
   lv_obj_clear_flag(this->history_sheet_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(this->history_sheet_);
   this->history_open_ = true;
+  this->load_history_samples_(entity_idx, this->history_window_idx_);
   this->redraw_history_();
   ESP_LOGI(TAG, "history open: %s", e.entity_id.c_str());
 }
@@ -3336,7 +3345,7 @@ void HAPanel::redraw_history_() {
     uint32_t seg_start = cutoff;
     const int32_t strip_w = 432;
     const int32_t strip_h = 230;
-    for (const auto &s : e.history) {
+    for (const auto &s : this->history_samples_) {
       if (s.t_ms <= cutoff) {
         cur_val = s.value;
         have_state = true;
@@ -3403,7 +3412,7 @@ void HAPanel::redraw_history_() {
   // the chosen window — is what keeps a data-starved 6h view honest.
   std::vector<float> vals;
   uint32_t oldest_t = now;
-  for (const auto &s : e.history) {
+  for (const auto &s : this->history_samples_) {
     if (s.t_ms >= cutoff) {
       if (vals.empty())
         oldest_t = s.t_ms;
@@ -3482,7 +3491,193 @@ void HAPanel::on_history_chip_(lv_event_t *e) {
   if (idx > 2)
     return;
   self->history_window_idx_ = (uint8_t) idx;
+  // REST mode re-fetches the new span; ring-buffer mode just re-windows the
+  // copy it already holds (load_history_samples_ re-copies — cheap).
+  self->load_history_samples_(self->history_entity_idx_, self->history_window_idx_);
   self->redraw_history_();
+}
+
+// ---------- E9 REST history backfill ----------
+
+bool HAPanel::history_rest_enabled_() const {
+  return this->history_http_ != nullptr && this->history_time_ != nullptr &&
+         !this->history_base_url_.empty() && !this->history_token_.empty();
+}
+
+void HAPanel::load_history_samples_(size_t entity_idx, uint8_t window_idx) {
+  this->history_samples_.clear();
+  this->history_rest_mode_ = false;
+  if (this->history_rest_enabled_()) {
+    // Blocking fetch — paint a "Loading..." state first so the UI isn't frozen
+    // mid-stall with stale content. (montserrat_18 has no ellipsis glyph.)
+    lv_label_set_text(this->history_value_, "Loading...");
+    lv_refr_now(NULL);
+    if (this->fetch_history_(entity_idx, window_idx)) {
+      this->history_rest_mode_ = true;
+      return;
+    }
+    ESP_LOGW(TAG, "history REST fetch failed — falling back to ring buffer");
+  }
+  // Ring-buffer fallback: the entity's since-boot samples.
+  if (entity_idx < this->entities_.size())
+    this->history_samples_ = this->entities_[entity_idx].history;
+}
+
+bool HAPanel::iso_to_epoch_(const char *s, int64_t *out) {
+  int y, mo, d, h, mi, se;
+  if (s == nullptr ||
+      sscanf(s, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6)
+    return false;
+  // days_from_civil (Howard Hinnant) → days since 1970-01-01, UTC.
+  int yy = y - (mo <= 2 ? 1 : 0);
+  int64_t era = (yy >= 0 ? yy : yy - 399) / 400;
+  int64_t yoe = yy - era * 400;
+  int64_t doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  int64_t days = era * 146097 + doe - 719468;
+  *out = days * 86400 + h * 3600 + mi * 60 + se;
+  return true;
+}
+
+bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
+  if (entity_idx >= this->entities_.size() || window_idx > 2)
+    return false;
+  auto t = this->history_time_->utcnow();
+  if (!t.is_valid()) {
+    ESP_LOGW(TAG, "history: time not valid yet — cannot build request");
+    return false;
+  }
+  const int64_t now_epoch = (int64_t) t.timestamp;
+  const uint32_t window_s = HISTORY_WINDOW_S[window_idx];
+  const int64_t start_epoch = now_epoch - (int64_t) window_s;
+
+  auto st = ESPTime::from_epoch_utc((time_t) start_epoch);
+  // ISO-8601 UTC with the URL-significant chars pre-encoded (':'→%3A, '+'→%2B).
+  char start_iso[48];
+  snprintf(start_iso, sizeof(start_iso),
+           "%04d-%02d-%02dT%02d%%3A%02d%%3A%02d%%2B00%%3A00", st.year,
+           st.month, st.day_of_month, st.hour, st.minute, st.second);
+
+  std::string base = this->history_base_url_;
+  while (!base.empty() && base.back() == '/')
+    base.pop_back();
+  const Entity &e = this->entities_[entity_idx];
+  std::string url = base + "/api/history/period/" + start_iso +
+                    "?filter_entity_id=" + e.entity_id +
+                    "&minimal_response&no_attributes&significant_changes_only";
+
+  std::vector<http_request::Header> headers;
+  http_request::Header auth;
+  auth.name = "Authorization";
+  auth.value = std::string("Bearer ") + this->history_token_;
+  headers.push_back(auth);
+
+  ESP_LOGI(TAG, "history GET %s", url.c_str());
+  auto container = this->history_http_->get(url, headers);
+  if (container == nullptr) {
+    ESP_LOGW(TAG, "history: null response container");
+    return false;
+  }
+  if (!http_request::is_success(container->status_code)) {
+    ESP_LOGW(TAG, "history: HTTP %d", container->status_code);
+    container->end();
+    return false;
+  }
+
+  // Read the body fully, bounded — a runaway response falls back to the ring
+  // buffer rather than exhausting heap.
+  static const size_t BODY_CAP = 48u * 1024u;
+  std::string body;
+  if (container->content_length > 0 && container->content_length < BODY_CAP)
+    body.reserve(container->content_length);
+  uint8_t buf[512];
+  uint32_t last = millis();
+  bool read_ok = true;
+  while (true) {
+    int r = container->read(buf, sizeof(buf));
+    App.feed_wdt();
+    yield();
+    if (r > 0) {
+      if (body.size() + (size_t) r > BODY_CAP) {
+        ESP_LOGW(TAG, "history: response exceeds %u B cap", (unsigned) BODY_CAP);
+        read_ok = false;
+        break;
+      }
+      body.append((const char *) buf, (size_t) r);
+      last = millis();
+      continue;
+    }
+    if (r < 0) {
+      ESP_LOGW(TAG, "history: read error %d", r);
+      read_ok = false;
+      break;
+    }
+    if (container->is_read_complete())
+      break;
+    if (millis() - last > 8000u) {
+      ESP_LOGW(TAG, "history: read timeout");
+      read_ok = false;
+      break;
+    }
+    delay(1);
+  }
+  container->end();
+  if (!read_ok)
+    return false;
+
+  // Response: [ [ {state,last_changed}, ... ] ] — one inner array per entity.
+  JsonDocument doc = json::parse_json(body);
+  if (doc.isNull()) {
+    ESP_LOGW(TAG, "history: JSON parse failed (%u B)", (unsigned) body.size());
+    return false;
+  }
+  JsonArray outer = doc.as<JsonArray>();
+  if (outer.isNull() || outer.size() == 0) {
+    ESP_LOGW(TAG, "history: empty result");
+    return false;
+  }
+  JsonArray series = outer[0].as<JsonArray>();
+  if (series.isNull())
+    return false;
+
+  const bool is_binary = e.domain == "binary_sensor";
+  const uint32_t now_ms = millis();
+  this->history_samples_.clear();
+  for (JsonObject pt : series) {
+    const char *state = pt["state"] | "";
+    if (state[0] == '\0')
+      continue;
+    float v;
+    if (is_binary) {
+      if (strcmp(state, "on") == 0)
+        v = 1.0f;
+      else if (strcmp(state, "off") == 0)
+        v = 0.0f;
+      else
+        continue;
+    } else {
+      char *end = nullptr;
+      v = strtof(state, &end);
+      if (end == state)
+        continue;
+    }
+    const char *ts = pt["last_changed"] | "";
+    if (ts[0] == '\0')
+      ts = pt["last_updated"] | "";
+    int64_t ep;
+    if (!HAPanel::iso_to_epoch_(ts, &ep))
+      continue;
+    // Map the absolute timestamp onto this device's millis() timeline so the
+    // chart, cutoff filter and time labels stay uniform with the live tail.
+    int64_t t_ms = (int64_t) now_ms - (now_epoch - ep) * 1000;
+    if (t_ms < 0)
+      t_ms = 0;
+    this->history_samples_.push_back({(uint32_t) t_ms, v});
+  }
+  ESP_LOGI(TAG, "history: %u points for %s (%u B)",
+           (unsigned) this->history_samples_.size(), e.entity_id.c_str(),
+           (unsigned) body.size());
+  return !this->history_samples_.empty();
 }
 
 }  // namespace ha_panel

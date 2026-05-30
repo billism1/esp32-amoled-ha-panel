@@ -158,18 +158,24 @@ Numeric sensors render as a line; binary sensors render as an on/off band strip.
 The chart updates live while it's open as new states arrive. Non-numeric text
 sensors stay inert on tap.
 
-**Data source today: in-device samples since boot.** The panel records each
-charted entity's value changes into a small RAM ring buffer. This means the
-chart only shows data observed since the last boot, the trace is sparse (HA
-pushes on change, not on an interval), and it is wiped on every reboot and on
-each light-sleep wake.
+**With a token: true backfilled history (recommended).** Configure the
+optional `history:` block on `ha_panel` (see `ha-entities.example.yaml`) with a
+HA long-lived access token (`ha_history_token`) and your HA base URL (`ha_url`).
+On open — and on each window-chip change — the sheet issues
+`GET /api/history/period/…?minimal_response&no_attributes&significant_changes_only`
+over the `http_request` client and backfills the full selected window. The fetch
+is blocking, so the sheet shows a brief "Loading..." while it runs. A live tail
+then extends the chart from the existing state subscription (no extra HA sub).
 
-**Planned: true backfilled history.** A future build will add an
-`ha_history_token` secret (a HA long-lived access token) so the sheet can
-`GET /api/history/period/…` over REST and backfill the full window. Without that
-token the chart degrades to the since-boot ring buffer described above — no
-error, no crash, just less history. The `ha_history_token` placeholder is
-reserved in `secrets.example.yaml`; it is not consumed by firmware yet.
+**Without a token: in-device samples since boot (fallback).** Omit the
+`history:` block (or if a fetch fails / times out / returns non-2xx) and the
+panel uses a small RAM ring buffer fed from the live state stream. That trace
+only covers since the last boot, is sparse (HA pushes on change, not on an
+interval), and is wiped on reboot and on each light-sleep wake. No error, no
+crash — just less history.
+
+To create the token: HA → Profile → Security → Long-lived access tokens, then
+put it in `secrets.yaml` as `ha_history_token`.
 
 ---
 
@@ -180,11 +186,11 @@ reserved in `secrets.example.yaml`; it is not consumed by firmware yet.
 | Key | What |
 |---|---|
 | `wifi_ssid` / `wifi_password` | Wi-Fi network |
-| `ha_url` | HA base URL — reference only, not consumed by firmware in v1 |
+| `ha_url` | HA base URL — used by the history chart's REST backfill when the `history:` block is configured (otherwise reference only) |
 | `api_encryption_key` | ESPHome ↔ HA native API encryption key (base64, 32 bytes). HA generates its half automatically; no long-lived token needed |
 | `ota_password` | OTA update password |
 | `ap_password` | Fallback AP password if Wi-Fi fails |
-| `ha_history_token` | *(reserved)* HA long-lived access token for backfilled history in the entity chart. Not consumed by firmware yet — see [Entity history chart](#entity-history-chart) |
+| `ha_history_token` | HA long-lived access token enabling backfilled history in the entity chart (optional — see [Entity history chart](#entity-history-chart)) |
 
 `secrets.yaml` is in `.gitignore`. Use `secrets.example.yaml` as a template.
 

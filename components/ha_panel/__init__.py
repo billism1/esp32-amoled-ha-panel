@@ -12,8 +12,8 @@ import logging
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import font
-from esphome.const import CONF_ENTITY_ID, CONF_ICON, CONF_ID, CONF_NAME
+from esphome.components import font, http_request, time
+from esphome.const import CONF_ENTITY_ID, CONF_ICON, CONF_ID, CONF_NAME, CONF_TIME_ID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +37,13 @@ CONF_CONFIRM = "confirm"
 # E8: per-entity render size. Scales the whole row (height, name font, icon,
 # right-side widget). Strict enum — an unrecognised value is a compile error.
 CONF_SIZE = "size"
+# E9: optional REST history backfill. When this block is present the history
+# chart sheet fetches GET /api/history/period/... over http_request; when it's
+# absent the chart uses only the in-device ring buffer (since-boot samples).
+CONF_HISTORY = "history"
+CONF_HTTP_REQUEST_ID = "http_request_id"
+CONF_BASE_URL = "base_url"
+CONF_TOKEN = "token"
 
 # Domains where `confirm: true` has a meaningful surface (detail modal or
 # action confirm sheet). Everything else is read-only — the flag is ignored and
@@ -85,6 +92,18 @@ PAGE_SCHEMA = cv.Schema(
     }
 )
 
+# E9: all four keys required when the block is present — REST backfill needs an
+# HTTP client, the HA base URL, a long-lived token, and a time source (to build
+# the start timestamp + convert returned timestamps to the device clock).
+HISTORY_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_HTTP_REQUEST_ID): cv.use_id(http_request.HttpRequestComponent),
+        cv.Required(CONF_BASE_URL): cv.string,
+        cv.Required(CONF_TOKEN): cv.string,
+        cv.Required(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
+    }
+)
+
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(HAPanel),
@@ -92,6 +111,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_MDI_FONT): cv.use_id(font.Font),
         cv.Optional(CONF_MDI_FONT_MEDIUM): cv.use_id(font.Font),
         cv.Optional(CONF_MDI_FONT_LARGE): cv.use_id(font.Font),
+        cv.Optional(CONF_HISTORY): HISTORY_SCHEMA,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -105,6 +125,12 @@ async def to_code(config):
         cg.add(var.set_mdi_font_medium(await cg.get_variable(config[CONF_MDI_FONT_MEDIUM])))
     if CONF_MDI_FONT_LARGE in config:
         cg.add(var.set_mdi_font_large(await cg.get_variable(config[CONF_MDI_FONT_LARGE])))
+    if CONF_HISTORY in config:
+        h = config[CONF_HISTORY]
+        cg.add(var.set_history_http(await cg.get_variable(h[CONF_HTTP_REQUEST_ID])))
+        cg.add(var.set_history_time(await cg.get_variable(h[CONF_TIME_ID])))
+        cg.add(var.set_history_base_url(h[CONF_BASE_URL]))
+        cg.add(var.set_history_token(h[CONF_TOKEN]))
     for page in config[CONF_PAGES]:
         cg.add(var.add_page(page[CONF_NAME]))
         for ent in page[CONF_ENTITIES]:

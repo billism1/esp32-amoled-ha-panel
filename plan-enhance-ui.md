@@ -66,7 +66,7 @@ All three below are promoted to phases. Future ideas land here first.
 - [x] Rename areas → pages + bottom-bar Home button → **E6**
 - [x] Light detail modal: real brightness, no fake 100% → **E7**
 - [x] Per-entity component size (small / medium / large) → **E8**
-- [~] Read-only entity history chart sheet → **E9** (ring-buffer shipped; REST backfill deferred)
+- [x] Read-only entity history chart sheet → **E9** (ring-buffer + REST backfill)
 
 ---
 
@@ -733,8 +733,9 @@ Tasks:
 
 ### Phase E9 — Read-only entity history chart sheet
 
-**Status:** 🟡 ring-buffer mode shipped — verified on-device 2026-05-30 (REST
-backfill deferred) · target tag: `e9-history-chart`
+**Status:** 🟢 ring-buffer mode verified on-device 2026-05-30; REST backfill
+implemented (build-verified, on-device validation pending) · target tag:
+`e9-history-chart`
 
 **Scope decision (2026-05-30):** shipped the chart sheet on the in-device ring
 buffer first — fully self-contained, always compiles/runs, no external deps. The
@@ -834,8 +835,9 @@ ring buffer only + live tail.
   `secrets.yaml`** — the user fills that in themselves.
 
 Tasks:
-- [ ] **DEFERRED** — `http_request` component + `ha_history_token` secret wiring
-      and HA base-URL config. Not wired yet; build compiles without it.
+- [x] `http_request` component (`ha_http` in base.yaml) + optional `history:`
+      block on `ha_panel` (`http_request_id` / `time_id` / `base_url` / `token`).
+      No-history build still compiles (block is optional).
 - [x] Per-entity ring buffer in `struct Entity` (`HistorySample` + `history`,
       cap `HISTORY_CAP` = 240); append in `on_state_` via `record_history_`
       with numeric parse / binary mapping (`state_to_value_`). Only chartable
@@ -843,8 +845,11 @@ Tasks:
 - [x] `build_history_sheet_` overlay (title, current value, `lv_chart`, min/max
       labels, 1h/6h/24h window chips, `✕`); `open_history_` / `close_history_` /
       `redraw_history_`. Added `-DLV_USE_CHART=1` to the board build flags.
-- [ ] **DEFERRED** — REST fetch + JSON parse → chart points keyed on window.
-      Sheet currently reads only the ring buffer.
+- [x] REST fetch + JSON parse → `history_samples_` keyed on window
+      (`fetch_history_` / `load_history_samples_`). Blocking GET with a
+      "Loading..." paint; bounded 48 KB body read; HA timestamps mapped to the
+      device millis() timeline; graceful fallback to the ring buffer on any
+      failure (null/non-2xx/timeout/parse/empty). Window chip re-fetches.
 - [x] Live append from `on_state_` while the sheet is open; `redraw_history_`.
 - [x] Binary `state`-timeline render path (filled on/off bands in
       `history_strip_`, anchored to the last pre-window sample).
