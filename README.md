@@ -133,6 +133,7 @@ esphome run ha-amoled-panel.yaml
 - ✅ Vertical scroll = entities within current area
 - ✅ Tap to toggle for: `light`, `switch`, `fan`, `input_boolean`, `automation`, `script`, `cover`
 - ✅ Read-only status display for unsupported types (`sensor`, `binary_sensor`, `climate`, `media_player`, etc.)
+- ✅ Tap a numeric `sensor` or `binary_sensor` → **history chart sheet** (1h / 6h / 24h windows)
 - ✅ Battery voltage readout via AXP2101 (best-effort — no native ESPHome component)
 - 🔜 **Dynamic area/entity discovery** via a single HA-side template sensor — re-arrange your home in HA, panel updates without a firmware rebuild. MVP ships with static YAML; dynamic comes in Phase 9 (see [plan.md](plan.md)).
 
@@ -149,6 +150,29 @@ See [plan.md](plan.md) for the phased delivery plan.
 
 ---
 
+## Entity history chart
+
+Tapping a numeric `sensor` (or a `binary_sensor`) opens a full-screen chart of
+its recent values, with `1h` / `6h` / `24h` window chips and an `✕` to close.
+Numeric sensors render as a line; binary sensors render as an on/off band strip.
+The chart updates live while it's open as new states arrive. Non-numeric text
+sensors stay inert on tap.
+
+**Data source today: in-device samples since boot.** The panel records each
+charted entity's value changes into a small RAM ring buffer. This means the
+chart only shows data observed since the last boot, the trace is sparse (HA
+pushes on change, not on an interval), and it is wiped on every reboot and on
+each light-sleep wake.
+
+**Planned: true backfilled history.** A future build will add an
+`ha_history_token` secret (a HA long-lived access token) so the sheet can
+`GET /api/history/period/…` over REST and backfill the full window. Without that
+token the chart degrades to the since-boot ring buffer described above — no
+error, no crash, just less history. The `ha_history_token` placeholder is
+reserved in `secrets.example.yaml`; it is not consumed by firmware yet.
+
+---
+
 ## Secrets
 
 `secrets.yaml` must define:
@@ -160,6 +184,7 @@ See [plan.md](plan.md) for the phased delivery plan.
 | `api_encryption_key` | ESPHome ↔ HA native API encryption key (base64, 32 bytes). HA generates its half automatically; no long-lived token needed |
 | `ota_password` | OTA update password |
 | `ap_password` | Fallback AP password if Wi-Fi fails |
+| `ha_history_token` | *(reserved)* HA long-lived access token for backfilled history in the entity chart. Not consumed by firmware yet — see [Entity history chart](#entity-history-chart) |
 
 `secrets.yaml` is in `.gitignore`. Use `secrets.example.yaml` as a template.
 

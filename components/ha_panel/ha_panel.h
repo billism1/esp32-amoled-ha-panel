@@ -38,6 +38,14 @@ enum class RenderClass : uint8_t {
   READ_ONLY_TEXT,   // sensor/binary_sensor/everything else → text badge
 };
 
+// E9: one captured value in a read-only entity's history ring buffer. t_ms is
+// the millis() timestamp at capture (since-boot, used for window filtering);
+// value is the parsed numeric reading, or 1/0 for a binary_sensor on/off.
+struct HistorySample {
+  uint32_t t_ms;
+  float value;
+};
+
 struct Entity {
   std::string entity_id;
   std::string friendly_name;
@@ -61,6 +69,12 @@ struct Entity {
   // E8: per-entity render size. Defaults to SMALL (today's look) so existing
   // configs render byte-for-byte unchanged.
   EntitySize size{EntitySize::SMALL};
+  // E9: in-device history ring buffer. Only populated for chartable read-only
+  // entities (numeric sensor / binary_sensor); empty for everything else. Fed
+  // from on_state_ since boot, capped at HISTORY_CAP, wiped on reboot / sleep
+  // wake. This is the no-token data source for the history chart sheet (REST
+  // backfill is a deferred follow-up).
+  std::vector<HistorySample> history;
   // Cached UTF-8 glyph for the icon column. v1 resolution (override → domain
   // default → fallback) never changes at runtime, so resolve once on first
   // render. The HA-`icon` attribute tier (P9 batched sensor) will invalidate
@@ -224,6 +238,24 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void build_detail_fan_(lv_obj_t *parent, size_t entity_idx);
   void build_detail_cover_(lv_obj_t *parent, size_t entity_idx);
 
+  // E9 read-only history chart sheet. Built once at setup, hidden; same overlay
+  // recipe as detail_modal_ / settings_sheet_. open_history_ snapshots the
+  // entity, redraw_history_ rebuilds the chart/timeline for the current window.
+  void build_history_sheet_(lv_obj_t *scr);
+  void open_history_(size_t entity_idx);
+  void close_history_();
+  void redraw_history_();
+  // E9: append the current state to an entity's history ring buffer. No-op for
+  // non-chartable entities. Called from on_state_ on every state change.
+  void record_history_(size_t entity_idx);
+  // E9: chartable = numeric sensor (state parses as a number) or binary_sensor.
+  // Other read-only rows (text sensors) stay inert on tap.
+  static bool is_chartable_(const Entity &e);
+  // E9: parse a state string into a chartable value. Returns false for
+  // non-numeric / unavailable / unknown so the sample is skipped. binary_sensor
+  // maps on→1, off→0; everything else uses strtof.
+  static bool state_to_value_(const Entity &e, float *out);
+
   // Attribute lookup helpers — return value via out param, false if missing.
   bool get_attr_(size_t entity_idx, const char *name, std::string *out) const;
   float get_attr_float_(size_t entity_idx, const char *name, float def) const;
@@ -284,6 +316,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_confirm_cover_open_(lv_event_t *e);
   static void on_confirm_cover_stop_(lv_event_t *e);
   static void on_confirm_cover_close_(lv_event_t *e);
+  // E9 history-sheet trampolines. close/bg dismiss; chip selects the window
+  // (1h/6h/24h) from the chip's user_data and redraws.
+  static void on_history_close_(lv_event_t *e);
+  static void on_history_bg_clicked_(lv_event_t *e);
+  static void on_history_chip_(lv_event_t *e);
 
   std::vector<Page> pages_;
   std::vector<Entity> entities_;
@@ -421,6 +458,27 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *confirm_unavail_label_{nullptr};
   size_t confirm_entity_idx_{0};
   bool confirm_open_{false};
+
+  // E9 history chart sheet. Built once, hidden. Numeric sensors render in
+  // history_chart_ (line); binary_sensors in history_strip_ (on/off bands) —
+  // exactly one is visible per open. history_window_idx_ selects 1h/6h/24h.
+  lv_obj_t *history_sheet_{nullptr};
+  lv_obj_t *history_title_{nullptr};
+  lv_obj_t *history_value_{nullptr};
+  lv_obj_t *history_chart_{nullptr};
+  lv_chart_series_t *history_series_{nullptr};
+  lv_obj_t *history_strip_{nullptr};
+  // Bottom row under the chart: left/right are the time span of the *displayed
+  // data* (oldest visible sample's age → "now"), so a window with no older data
+  // reads honestly instead of looking identical at every chip. Center shows the
+  // numeric value range (min–max); empty for binary_sensor.
+  lv_obj_t *history_time_left_{nullptr};
+  lv_obj_t *history_time_right_{nullptr};
+  lv_obj_t *history_range_label_{nullptr};
+  lv_obj_t *history_chips_[3]{nullptr, nullptr, nullptr};
+  size_t history_entity_idx_{0};
+  bool history_open_{false};
+  uint8_t history_window_idx_{0};  // 0 = 1h, 1 = 6h, 2 = 24h
 };
 
 }  // namespace ha_panel
