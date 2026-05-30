@@ -1,9 +1,9 @@
-# ha_panel — Phase 5 static area + entity model.
+# ha_panel — Phase 5 static page + entity model.
 #
-# Reads an `areas: [{name, entities: [{entity_id, friendly_name}]}]` list at
+# Reads a `pages: [{name, entities: [{entity_id, friendly_name}]}]` list at
 # codegen time and emits initializer calls into a single C++ HAPanel
 # component. At runtime the component subscribes to each entity's state via
-# the native API and exposes a `tap(area_idx, entity_idx)` method that
+# the native API and exposes a `tap(page_idx, entity_idx)` method that
 # dispatches to the right HA service based on domain.
 #
 # Phase 9 will replace this static schema with a live HA template sensor.
@@ -19,7 +19,7 @@ _LOGGER = logging.getLogger(__name__)
 
 DEPENDENCIES = ["api", "lvgl"]
 
-CONF_AREAS = "areas"
+CONF_PAGES = "pages"
 CONF_ENTITIES = "entities"
 CONF_FRIENDLY_NAME = "friendly_name"
 # P7e: font id holding the baked MDI glyph subset (packages/mdi-font.yaml). The
@@ -58,7 +58,7 @@ ENTITY_SCHEMA = cv.Schema(
     }
 )
 
-AREA_SCHEMA = cv.Schema(
+PAGE_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_NAME): cv.string,
         cv.Required(CONF_ENTITIES): cv.ensure_list(ENTITY_SCHEMA),
@@ -68,7 +68,7 @@ AREA_SCHEMA = cv.Schema(
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(HAPanel),
-        cv.Required(CONF_AREAS): cv.ensure_list(AREA_SCHEMA),
+        cv.Required(CONF_PAGES): cv.ensure_list(PAGE_SCHEMA),
         cv.Optional(CONF_MDI_FONT): cv.use_id(font.Font),
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -79,9 +79,9 @@ async def to_code(config):
     await cg.register_component(var, config)
     if CONF_MDI_FONT in config:
         cg.add(var.set_mdi_font(await cg.get_variable(config[CONF_MDI_FONT])))
-    for area in config[CONF_AREAS]:
-        cg.add(var.add_area(area[CONF_NAME]))
-        for ent in area[CONF_ENTITIES]:
+    for page in config[CONF_PAGES]:
+        cg.add(var.add_page(page[CONF_NAME]))
+        for ent in page[CONF_ENTITIES]:
             confirm = ent[CONF_CONFIRM]
             if confirm:
                 domain = ent[CONF_ENTITY_ID].split(".", 1)[0]

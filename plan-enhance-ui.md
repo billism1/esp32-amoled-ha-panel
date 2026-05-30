@@ -63,7 +63,7 @@ All three below are promoted to phases. Future ideas land here first.
 - [x] Area-label chevron overlap fix → **E3**
 - [x] Cover detail modal: show current state → **E4**
 - [x] Boot splash: show current connection stage → **E5**
-- [ ] Rename areas → pages + bottom-bar Home button → **E6**
+- [x] Rename areas → pages + bottom-bar Home button → **E6**
 - [ ] Light detail modal: real brightness, no fake 100% → **E7**
 - [ ] Per-entity component size (small / medium / large) → **E8**
 
@@ -380,7 +380,7 @@ missing-glyph box.
 
 ### Phase E6 — Rename areas → pages + bottom-bar Home button
 
-**Status:** ⬜ not started · target tag: `e6-pages-home`
+**Status:** ✅ done · target tag: `e6-pages-home`
 
 **Goal:** Rebrand the panel's top-level entity grouping from "areas" to "pages"
 throughout the config schema, code, and example YAML, and add a Home button to
@@ -438,16 +438,19 @@ Current bar: `◀ left-step (LEFT_MID +44) · ⚙ gear (CENTER) · ▶ right-ste
   font/glyph cost.
 
 Tasks:
-- [ ] Rename areas → pages in `__init__.py` (`CONF_PAGES`, `PAGE_SCHEMA`,
+- [x] Rename areas → pages in `__init__.py` (`CONF_PAGES`, `PAGE_SCHEMA`,
       `add_page`, comments).
-- [ ] Rename in `ha_panel.h` (`Page`, `pages_`, `add_page`, `num_pages`,
+- [x] Rename in `ha_panel.h` (`Page`, `pages_`, `add_page`, `num_pages`,
       `step_page_`, `tap(page_idx)`, docs) and declare `on_home_clicked_` +
       `go_to_page_`.
-- [ ] Rename all ~48 "area" hits in `ha_panel.cpp`; verify clean compile.
-- [ ] `areas:` → `pages:` + comments in `ha-entities.example.yaml`; leave
-      `ha-entities.yaml` alone.
-- [ ] Add Home to the `nav_btns[]` table; move gear to CENTER +44, Home CENTER
-      −44; implement `on_home_clicked_` → `go_to_page_(0)`.
+- [x] Rename all "area" hits in `ha_panel.cpp` (incidental "content area" /
+      "Private Use Area" left as-is).
+- [x] `areas:` → `pages:` + comments in `ha-entities.example.yaml`; leave
+      `ha-entities.yaml` alone (user updates the real config — still on `areas:`,
+      so the firmware won't compile until that one key is renamed).
+- [x] Add Home to the `nav_btns[]` table; move gear to CENTER +44, Home CENTER
+      −44; `step_page_` tail factored into `go_to_page_`; `on_home_clicked_` →
+      `go_to_page_(0)`.
 
 **Exit criteria:**
 - Config uses `pages:`; the build compiles and the panel renders identically to

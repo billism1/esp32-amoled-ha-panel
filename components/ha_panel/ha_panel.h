@@ -52,7 +52,7 @@ struct Entity {
   mutable bool icon_cached_{false};
 };
 
-struct Area {
+struct Page {
   std::string name;
   std::vector<size_t> entity_indices;  // indexes into HAPanel::entities_
 };
@@ -65,7 +65,7 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   float get_setup_priority() const override { return setup_priority::AFTER_CONNECTION; }
 
   // Codegen-time API.
-  void add_area(const std::string &name);
+  void add_page(const std::string &name);
   void add_entity(const std::string &entity_id, const std::string &friendly_name,
                   const std::string &icon_override = "", bool confirm = false);
   // P7e: MDI glyph font for the per-entity icon column. nullptr → icons off,
@@ -73,9 +73,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void set_mdi_font(font::Font *f) { this->mdi_font_ = f; }
 
   // Programmatic action (tests / future automations).
-  bool tap(size_t area_idx, size_t entity_idx);
+  bool tap(size_t page_idx, size_t entity_idx);
 
-  size_t num_areas() const { return this->areas_.size(); }
+  size_t num_pages() const { return this->pages_.size(); }
 
   // YAML-side hooks (P7).
   void set_brightness_setter(std::function<void(uint8_t)> setter) {
@@ -151,8 +151,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void build_settings_sheet_(lv_obj_t *scr);
   void open_settings_();
   void close_settings_();
-  // E1: step the active area by ±1 with wrap-around (bottom-bar arrows).
-  void step_area_(int delta);
+  // E1: step the active page by ±1 with wrap-around (bottom-bar arrows).
+  void step_page_(int delta);
+  // E6: jump to a page by index (tile-set + header-update tail shared by
+  // step_page_ and the bottom-bar Home button).
+  void go_to_page_(size_t page_idx);
   // P7c: dispatches on Entity::render_class to update the right child widget.
   void rebuild_entity_row_(size_t entity_idx);
   void open_picker_();
@@ -222,6 +225,8 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_nav_left_(lv_event_t *e);
   static void on_nav_right_(lv_event_t *e);
   static void on_gear_clicked_(lv_event_t *e);
+  // E6: bottom-bar Home button → jump to the first page.
+  static void on_home_clicked_(lv_event_t *e);
   // P8 sleep controls.
   static void on_sleep_switch_(lv_event_t *e);
   static void on_sleep_mode_dropdown_(lv_event_t *e);
@@ -255,7 +260,7 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_confirm_cover_stop_(lv_event_t *e);
   static void on_confirm_cover_close_(lv_event_t *e);
 
-  std::vector<Area> areas_;
+  std::vector<Page> pages_;
   std::vector<Entity> entities_;
 
   // LVGL refs. nullptr until build_ui_ runs.
@@ -282,7 +287,7 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // P8 settings-tile sleep controls.
   lv_obj_t *sleep_switch_{nullptr};
   lv_obj_t *sleep_mode_dropdown_{nullptr};
-  std::vector<lv_obj_t *> tile_objs_;            // [area_idx]
+  std::vector<lv_obj_t *> tile_objs_;            // [page_idx]
   // P7c: per-entity right-side widget — lv_switch for binaries, lv_label
   // for everything else. Renamed from badges_by_entity_ since it's no longer
   // always a label.

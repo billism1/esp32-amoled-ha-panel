@@ -21,16 +21,16 @@ static const char *const TAG = "ha_panel";
 
 // ---------- codegen-time builders ----------
 
-void HAPanel::add_area(const std::string &name) {
-  Area a;
-  a.name = name;
-  this->areas_.push_back(std::move(a));
+void HAPanel::add_page(const std::string &name) {
+  Page p;
+  p.name = name;
+  this->pages_.push_back(std::move(p));
 }
 
 void HAPanel::add_entity(const std::string &entity_id, const std::string &friendly_name,
                          const std::string &icon_override, bool confirm) {
-  if (this->areas_.empty()) {
-    ESP_LOGE(TAG, "add_entity called before any area — codegen bug");
+  if (this->pages_.empty()) {
+    ESP_LOGE(TAG, "add_entity called before any page — codegen bug");
     return;
   }
   Entity e;
@@ -42,7 +42,7 @@ void HAPanel::add_entity(const std::string &entity_id, const std::string &friend
   e.confirm = confirm;
   size_t idx = this->entities_.size();
   this->entities_.push_back(std::move(e));
-  this->areas_.back().entity_indices.push_back(idx);
+  this->pages_.back().entity_indices.push_back(idx);
 }
 
 std::string HAPanel::extract_domain_(const std::string &entity_id) {
@@ -248,8 +248,8 @@ const std::string &HAPanel::resolve_icon_(const Entity &e) const {
 // ---------- setup / dump ----------
 
 void HAPanel::setup() {
-  ESP_LOGCONFIG(TAG, "Subscribing to %u entities across %u areas",
-                (unsigned) this->entities_.size(), (unsigned) this->areas_.size());
+  ESP_LOGCONFIG(TAG, "Subscribing to %u entities across %u pages",
+                (unsigned) this->entities_.size(), (unsigned) this->pages_.size());
   for (const auto &e : this->entities_) {
     this->subscribe_homeassistant_state(&HAPanel::on_state_, e.entity_id);
   }
@@ -310,10 +310,10 @@ void HAPanel::on_attr_(size_t entity_idx, const std::string &attr_name,
 
 void HAPanel::dump_config() {
   ESP_LOGCONFIG(TAG, "HA Panel model:");
-  for (size_t ai = 0; ai < this->areas_.size(); ai++) {
-    const auto &area = this->areas_[ai];
-    ESP_LOGCONFIG(TAG, "  [%u] %s (%u entities)", (unsigned) ai, area.name.c_str(),
-                  (unsigned) area.entity_indices.size());
+  for (size_t pi = 0; pi < this->pages_.size(); pi++) {
+    const auto &page = this->pages_[pi];
+    ESP_LOGCONFIG(TAG, "  [%u] %s (%u entities)", (unsigned) pi, page.name.c_str(),
+                  (unsigned) page.entity_indices.size());
   }
 }
 
@@ -522,13 +522,13 @@ bool HAPanel::tap_entity_(size_t entity_idx) {
   return false;
 }
 
-bool HAPanel::tap(size_t area_idx, size_t entity_idx) {
-  if (area_idx >= this->areas_.size())
+bool HAPanel::tap(size_t page_idx, size_t entity_idx) {
+  if (page_idx >= this->pages_.size())
     return false;
-  const auto &ai = this->areas_[area_idx].entity_indices;
-  if (entity_idx >= ai.size())
+  const auto &ents = this->pages_[page_idx].entity_indices;
+  if (entity_idx >= ents.size())
     return false;
-  return this->tap_entity_(ai[entity_idx]);
+  return this->tap_entity_(ents[entity_idx]);
 }
 
 // ---------- LVGL UI build ----------
@@ -823,8 +823,8 @@ void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
 }
 
 void HAPanel::build_ui_() {
-  if (this->areas_.empty()) {
-    ESP_LOGW(TAG, "no areas; skipping UI build");
+  if (this->pages_.empty()) {
+    ESP_LOGW(TAG, "no pages; skipping UI build");
     return;
   }
   lv_obj_t *scr = lv_scr_act();
@@ -837,7 +837,7 @@ void HAPanel::build_ui_() {
   lv_obj_set_style_border_width(scr, 0, 0);
   lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-  // ---- Header (top 40 px). Tappable to open area picker. ----
+  // ---- Header (top 40 px). Tappable to open page picker. ----
   lv_obj_t *header = lv_obj_create(scr);
   lv_obj_remove_style_all(header);
   lv_obj_set_size(header, 480, 40);
@@ -851,8 +851,8 @@ void HAPanel::build_ui_() {
   lv_obj_add_event_cb(header, &HAPanel::on_header_clicked_, LV_EVENT_CLICKED, this);
 
   // P7b header layout:
-  //   [ HH:MM ────── Area ▼ ──────  📶 🔋 ● ]
-  // Clock left, area + chevron center, wifi → battery → status right.
+  //   [ HH:MM ────── Page ▼ ──────  📶 🔋 ● ]
+  // Clock left, page + chevron center, wifi → battery → status right.
   // 44 px corner inset on both far ends per the empirically-measured panel
   // radius (see P7a notes).
 
@@ -863,12 +863,12 @@ void HAPanel::build_ui_() {
   lv_obj_set_style_text_font(this->clock_label_, &lv_font_montserrat_18, 0);
   lv_obj_align(this->clock_label_, LV_ALIGN_LEFT_MID, 44, 0);
 
-  // E3: area name + chevron live in a centered horizontal flex row. The label
+  // E3: page name + chevron live in a centered horizontal flex row. The label
   // sizes to its content but is capped at 200 px via max_width with LONG_DOT,
   // so a long name ellipsizes ("Living Roo…") instead of overrunning. The flex
   // container lays the chevron immediately right of the (possibly truncated)
   // label and re-runs on every text change — no more one-shot align_to that
-  // went stale when the area name grew. 200 px cap clears the worst-case clock
+  // went stale when the page name grew. 200 px cap clears the worst-case clock
   // ("12:00 pm", left) and the Wi-Fi/battery/dot cluster (right).
   lv_obj_t *center = lv_obj_create(header);
   lv_obj_remove_style_all(center);
@@ -886,7 +886,7 @@ void HAPanel::build_ui_() {
   lv_obj_align(center, LV_ALIGN_CENTER, 0, 0);
 
   this->header_label_ = lv_label_create(center);
-  lv_label_set_text(this->header_label_, this->areas_[0].name.c_str());
+  lv_label_set_text(this->header_label_, this->pages_[0].name.c_str());
   lv_obj_set_style_text_color(this->header_label_, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_style_text_font(this->header_label_, &lv_font_montserrat_18, 0);
   lv_obj_set_width(this->header_label_, LV_SIZE_CONTENT);
@@ -938,17 +938,17 @@ void HAPanel::build_ui_() {
   lv_obj_add_event_cb(this->tileview_, &HAPanel::on_tileview_changed_,
                       LV_EVENT_VALUE_CHANGED, this);
 
-  this->tile_objs_.reserve(this->areas_.size());
-  // E1: settings is no longer a tile — tiles = areas only.
-  for (size_t ai = 0; ai < this->areas_.size(); ai++) {
-    // E1: with settings gone, the last area is the right boundary (no swipe
-    // past it). First area is the left boundary; middle areas swipe both ways.
+  this->tile_objs_.reserve(this->pages_.size());
+  // E1: settings is no longer a tile — tiles = pages only.
+  for (size_t pi = 0; pi < this->pages_.size(); pi++) {
+    // E1: with settings gone, the last page is the right boundary (no swipe
+    // past it). First page is the left boundary; middle pages swipe both ways.
     lv_dir_t dir = LV_DIR_HOR;
-    if (ai == 0)
-      dir = (this->areas_.size() == 1) ? (lv_dir_t) LV_DIR_NONE : LV_DIR_RIGHT;
-    else if (ai == this->areas_.size() - 1)
+    if (pi == 0)
+      dir = (this->pages_.size() == 1) ? (lv_dir_t) LV_DIR_NONE : LV_DIR_RIGHT;
+    else if (pi == this->pages_.size() - 1)
       dir = LV_DIR_LEFT;
-    lv_obj_t *tile = lv_tileview_add_tile(this->tileview_, (uint8_t) ai, 0, dir);
+    lv_obj_t *tile = lv_tileview_add_tile(this->tileview_, (uint8_t) pi, 0, dir);
     lv_obj_set_style_pad_all(tile, 0, 0);
     this->tile_objs_.push_back(tile);
 
@@ -971,7 +971,7 @@ void HAPanel::build_ui_() {
     // belongs out of the per-row loop). nullptr when no mdi_font configured.
     const lv_font_t *mdi_lv_font =
         this->mdi_font_ != nullptr ? this->mdi_font_->get_lv_font() : nullptr;
-    for (size_t ei : this->areas_[ai].entity_indices) {
+    for (size_t ei : this->pages_[pi].entity_indices) {
       Entity &e = this->entities_[ei];
       lv_obj_t *widget = nullptr;
       lv_obj_t *unavail = nullptr;
@@ -996,7 +996,9 @@ void HAPanel::build_ui_() {
     }
   }
   // ---- E1: bottom navigation bar (y = 432–480, 48 px) ----
-  // Persistent across all areas: ◀ area-step / ⚙ settings / ▶ area-step.
+  // Persistent across all pages: ◀ page-step / 🏠 home + ⚙ settings (centered
+  // pair) / ▶ page-step. E6: Home jumps to the first page; gear shifted off
+  // dead-center to +44 to make room, leaving a ~32 px gap between the pair.
   lv_obj_t *navbar = lv_obj_create(scr);
   lv_obj_remove_style_all(navbar);
   lv_obj_set_size(navbar, 480, 48);
@@ -1016,7 +1018,8 @@ void HAPanel::build_ui_() {
     lv_event_cb_t cb;
   } nav_btns[] = {
       {LV_SYMBOL_LEFT, LV_ALIGN_LEFT_MID, 44, &HAPanel::on_nav_left_},
-      {LV_SYMBOL_SETTINGS, LV_ALIGN_CENTER, 0, &HAPanel::on_gear_clicked_},
+      {LV_SYMBOL_HOME, LV_ALIGN_CENTER, -44, &HAPanel::on_home_clicked_},
+      {LV_SYMBOL_SETTINGS, LV_ALIGN_CENTER, 44, &HAPanel::on_gear_clicked_},
       {LV_SYMBOL_RIGHT, LV_ALIGN_RIGHT_MID, -44, &HAPanel::on_nav_right_},
   };
   for (auto &nb : nav_btns) {
@@ -1037,7 +1040,7 @@ void HAPanel::build_ui_() {
     lv_obj_center(lbl);
   }
 
-  // ---- Area picker (full-screen modal, hidden until header tapped) ----
+  // ---- Page picker (full-screen modal, hidden until header tapped) ----
   this->picker_ = lv_obj_create(scr);
   lv_obj_remove_style_all(this->picker_);
   lv_obj_set_size(this->picker_, 480, 480);
@@ -1051,7 +1054,7 @@ void HAPanel::build_ui_() {
   lv_obj_add_event_cb(this->picker_, &HAPanel::on_picker_bg_clicked_, LV_EVENT_CLICKED, this);
 
   lv_obj_t *ptitle = lv_label_create(this->picker_);
-  lv_label_set_text(ptitle, "Pick area");
+  lv_label_set_text(ptitle, "Pick page");
   lv_obj_set_style_text_color(ptitle, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_style_text_font(ptitle, &lv_font_montserrat_18, 0);
   lv_obj_align(ptitle, LV_ALIGN_TOP_MID, 0, 10);
@@ -1063,14 +1066,14 @@ void HAPanel::build_ui_() {
   lv_obj_set_style_bg_color(plist, lv_color_hex(0x000000), 0);
   lv_obj_set_style_bg_opa(plist, LV_OPA_COVER, 0);
   lv_obj_set_style_pad_all(plist, 4, 0);
-  // Same 28 px bottom inset as the entity list — keeps the last area row in
+  // Same 28 px bottom inset as the entity list — keeps the last page row in
   // the picker from being clipped by the bottom rounded corners.
   lv_obj_set_style_pad_bottom(plist, 28, 0);
   lv_obj_set_style_pad_row(plist, 4, 0);
   lv_obj_set_flex_flow(plist, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_scroll_dir(plist, LV_DIR_VER);
 
-  for (size_t ai = 0; ai < this->areas_.size(); ai++) {
+  for (size_t pi = 0; pi < this->pages_.size(); pi++) {
     lv_obj_t *row = lv_button_create(plist);
     lv_obj_set_width(row, LV_PCT(100));
     lv_obj_set_height(row, 56);
@@ -1080,16 +1083,16 @@ void HAPanel::build_ui_() {
     lv_obj_set_style_radius(row, 8, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
-    lv_obj_set_user_data(row, (void *) (uintptr_t) ai);
+    lv_obj_set_user_data(row, (void *) (uintptr_t) pi);
     lv_obj_add_event_cb(row, &HAPanel::on_picker_row_clicked_, LV_EVENT_CLICKED, this);
 
     lv_obj_t *lbl = lv_label_create(row);
-    lv_label_set_text(lbl, this->areas_[ai].name.c_str());
+    lv_label_set_text(lbl, this->pages_[pi].name.c_str());
     lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
     lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
   }
-  // E1: the picker lists areas only — Settings moved to the bottom-bar gear.
+  // E1: the picker lists pages only — Settings moved to the bottom-bar gear.
 
   // ---- P7d detail modal (built once, hidden) ----
   this->build_detail_modal_(scr);
@@ -1174,27 +1177,35 @@ void HAPanel::close_settings_() {
   ESP_LOGD(TAG, "settings close");
 }
 
-void HAPanel::step_area_(int delta) {
-  if (this->tileview_ == nullptr || this->areas_.empty())
+void HAPanel::step_page_(int delta) {
+  if (this->tileview_ == nullptr || this->pages_.empty())
     return;
-  // Find the current area index from the active tile, step by delta with
-  // wrap-around, then set the tile programmatically (not bound by the per-tile
-  // LV_DIR_* swipe constraints).
+  // Find the current page index from the active tile, step by delta with
+  // wrap-around, then jump there (not bound by the per-tile LV_DIR_* swipe
+  // constraints — go_to_page_ uses a programmatic tile-set).
   lv_obj_t *active = lv_tileview_get_tile_active(this->tileview_);
   size_t cur = 0;
-  for (size_t ai = 0; ai < this->tile_objs_.size(); ai++) {
-    if (this->tile_objs_[ai] == active) {
-      cur = ai;
+  for (size_t pi = 0; pi < this->tile_objs_.size(); pi++) {
+    if (this->tile_objs_[pi] == active) {
+      cur = pi;
       break;
     }
   }
-  const size_t n = this->areas_.size();
+  const size_t n = this->pages_.size();
   size_t next = (size_t)(((int) cur + delta % (int) n + (int) n) % (int) n);
   if (next == cur)
     return;
-  lv_tileview_set_tile_by_index(this->tileview_, (uint32_t) next, 0, LV_ANIM_ON);
+  this->go_to_page_(next);
+}
+
+// E6: shared tile-set + header-update tail used by step_page_ and the Home
+// button. Programmatic tile-set bypasses the per-tile LV_DIR_* swipe limits.
+void HAPanel::go_to_page_(size_t page_idx) {
+  if (this->tileview_ == nullptr || page_idx >= this->pages_.size())
+    return;
+  lv_tileview_set_tile_by_index(this->tileview_, (uint32_t) page_idx, 0, LV_ANIM_ON);
   if (this->header_label_ != nullptr)
-    lv_label_set_text(this->header_label_, this->areas_[next].name.c_str());
+    lv_label_set_text(this->header_label_, this->pages_[page_idx].name.c_str());
 }
 
 void HAPanel::update_status_dot_() {
@@ -1474,13 +1485,13 @@ void HAPanel::on_tileview_changed_(lv_event_t *e) {
     return;
   lv_obj_t *tile = lv_tileview_get_tile_active(self->tileview_);
   // E1: settings is no longer a tile, and its dirty state can only exist while
-  // the (full-screen) sheet is open over the tileview — so swiping areas no
+  // the (full-screen) sheet is open over the tileview — so swiping pages no
   // longer needs the navigate-away revert. Just retitle the header.
-  for (size_t ai = 0; ai < self->tile_objs_.size(); ai++) {
-    if (self->tile_objs_[ai] != tile)
+  for (size_t pi = 0; pi < self->tile_objs_.size(); pi++) {
+    if (self->tile_objs_[pi] != tile)
       continue;
     if (self->header_label_ != nullptr)
-      lv_label_set_text(self->header_label_, self->areas_[ai].name.c_str());
+      lv_label_set_text(self->header_label_, self->pages_[pi].name.c_str());
     return;
   }
 }
@@ -1519,11 +1530,11 @@ void HAPanel::on_picker_row_clicked_(lv_event_t *e) {
   self->close_picker_();
   if (self->tileview_ == nullptr)
     return;
-  if (col >= self->areas_.size())  // E1: picker lists areas only
+  if (col >= self->pages_.size())  // E1: picker lists pages only
     return;
   lv_tileview_set_tile_by_index(self->tileview_, (uint32_t) col, 0, LV_ANIM_ON);
   if (self->header_label_ != nullptr)
-    lv_label_set_text(self->header_label_, self->areas_[col].name.c_str());
+    lv_label_set_text(self->header_label_, self->pages_[col].name.c_str());
 }
 
 void HAPanel::on_picker_bg_clicked_(lv_event_t *e) {
@@ -1595,13 +1606,20 @@ void HAPanel::on_gear_clicked_(lv_event_t *e) {
 void HAPanel::on_nav_left_(lv_event_t *e) {
   auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
   if (self != nullptr)
-    self->step_area_(-1);
+    self->step_page_(-1);
 }
 
 void HAPanel::on_nav_right_(lv_event_t *e) {
   auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
   if (self != nullptr)
-    self->step_area_(+1);
+    self->step_page_(+1);
+}
+
+// E6: Home → first page.
+void HAPanel::on_home_clicked_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->go_to_page_(0);
 }
 
 void HAPanel::on_sleep_switch_(lv_event_t *e) {
@@ -2228,7 +2246,7 @@ void HAPanel::build_detail_fan_(lv_obj_t *parent, size_t entity_idx) {
 }
 
 // Maps a cover's Entity::state to a "Currently: …" line text + colour for the
-// detail modal and confirm sheet. Mirrors the COVER_TEXT area-row cues
+// detail modal and confirm sheet. Mirrors the COVER_TEXT page-row cues
 // (green = open, grey = closed, neutral for the transient/unknown states).
 static void cover_state_line_(const std::string &state, const char **text,
                               uint32_t *color) {

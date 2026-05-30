@@ -1,13 +1,13 @@
-# Static area + entity map for the panel — example template.
+# Static page + entity map for the panel — example template.
 #
 # USAGE:
 #   1. Copy this file to `packages/ha-entities.yaml`.
-#   2. Replace every area and entity with your own.
+#   2. Replace every page and entity with your own.
 #   3. `packages/ha-entities.yaml` is gitignored; your real config never leaves
 #      this machine.
 #
-# Areas render left-to-right in the carousel in the order declared here.
-# Entities render top-to-bottom inside an area in the order declared here.
+# Pages render left-to-right in the carousel in the order declared here.
+# Entities render top-to-bottom inside a page in the order declared here.
 # Phase 5 reads this; Phase 9 will replace it with a live HA template sensor.
 #
 # Filter recommendation: keep domains the panel actually does something with —
@@ -35,7 +35,7 @@
 ha_panel:
   id: ha_panel_id      # referenced by id(ha_panel_id) in lambdas (clock, api triggers, brightness setter)
   mdi_font: mdi_icons  # P7e: font id from packages/mdi-font.yaml (icon column)
-  areas:
+  pages:
     - name: "Living Room"
       entities:
         - entity_id: light.living_room_lamp
