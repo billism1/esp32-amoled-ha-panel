@@ -14,7 +14,9 @@
       "Bash(git check-ignore *)",
       "Bash(ls *.yaml packages/)",
       "Bash(which esphome *)",
-      "Bash(python -c \"import esphome; print\\('esphome', esphome.__version__\\)\")"
+      "Bash(python -c \"import esphome; print\\('esphome', esphome.__version__\\)\")",
+      "Bash(timeout 280 esphome config ha-amoled-panel.yaml)",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }
