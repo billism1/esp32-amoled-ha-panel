@@ -62,8 +62,8 @@ All three below are promoted to phases. Future ideas land here first.
 - [x] Wi-Fi / HA connecting-state indicators → **E2**
 - [x] Area-label chevron overlap fix → **E3**
 - [x] Cover detail modal: show current state → **E4**
-- [ ] Per-entity component size (small / medium / large) → **E5**
-- [ ] Boot splash: show current connection stage → **E7**
+- [ ] Boot splash: show current connection stage → **E5**
+- [ ] Per-entity component size (small / medium / large) → **E7**
 
 ---
 
@@ -304,131 +304,65 @@ Tasks:
 
 ---
 
-### Phase E5 — Per-entity component size (small / medium / large)
+### Phase E5 — Boot splash: show current connection stage
 
-**Status:** ⬜ not started · target tag: `e5-entity-size`
+**Status:** ⬜ not started · target tag: `e5-splash-stage`
 
-**Goal:** Let a user make individual entity rows bigger for easier reading. A
-new optional `size:` node on each entity selects `small` (default, today's
-look), `medium`, or `large`. Size scales the whole row together — height, name
-font, icon glyph, and the right-side widget — not just the row height.
+**Goal:** The boot splash tells the user *which* connection gate it's waiting on
+instead of always reading "Connecting to Home Assistant...".
 
-#### Motivation / context
+**Root cause:** The splash hides on exactly one trigger —
+`set_api_connected(true)` ([ha_panel.cpp:1195](components/ha_panel/ha_panel.cpp#L1195)),
+fired by `api.on_client_connected` ([base.yaml:45](packages/base.yaml#L45)).
+There are two sequential gates before that fires: Wi-Fi must associate, then the
+HA API client must connect + handshake. The splash status label is a hard-coded
+local string ([ha_panel.cpp:1098](components/ha_panel/ha_panel.cpp#L1098)) that
+reads "Connecting to Home Assistant..." the whole time — so a panel stuck on the
+Wi-Fi gate (or stuck because HA is down / wrong key / restarting) shows the same
+text either way.
 
-Every entity row is rendered at a fixed 60 px height with `montserrat_18`
-([make_entity_row](components/ha_panel/ha_panel.cpp#L536)), regardless of
-importance or how far away the panel sits. A nightstand or hallway panel viewed
-from across the room benefits from a few large, glanceable rows (e.g. the room's
-main light) while keeping the rest compact. Today there's no way to express
-"make this one bigger."
+**Approach (no new signals — both link states are already wired):**
+- Promote the splash status label to a member `splash_status_{nullptr}`
+  ([ha_panel.h:268](components/ha_panel/ha_panel.h#L268)) so it can be updated
+  after build.
+- Add `update_splash_status_()` that picks text from current state:
 
-#### Schema (`ha-entities.yaml`)
+  | State | Text |
+  |-------|------|
+  | `!wifi_connected_` | `"Connecting to Wi-Fi…"` |
+  | wifi up, `!api_connected_` | `"Connecting to Home Assistant…"` |
 
-- Add an optional `size:` node to the entity schema in
-  [\_\_init\_\_.py](components/ha_panel/__init__.py#L48), validated as a **strict
-  enum** `cv.one_of("small", "medium", "large", lower=True)`. Default `small`.
-  An unrecognised value is a **compile-time error** (same strictness intent as
-  `confirm`/`icon` validation).
-- Example:
-  ```yaml
-  - name: "Foyer"
-    entities:
-      - entity_id: light.foyer_1
-        friendly_name: "Foyer Lamp 1"
-        size: "medium"
-      - entity_id: light.foyer_2
-        friendly_name: "Foyer Lamp 2"
-        size: "large"
-      - entity_id: light.foyer_3
-        friendly_name: "Foyer Lamp 3"   # no size → defaults to "small"
-  ```
-- Update the header comment block in
-  [ha-entities.example.yaml](packages/ha-entities.example.yaml) documenting the
-  three values, the small default, and the flash-cost note (below).
-
-#### Data model + codegen
-
-- Add an `EntitySize { SMALL, MEDIUM, LARGE }` enum and a
-  `size{EntitySize::SMALL}` field to `struct Entity`
-  ([ha_panel.h:31](components/ha_panel/ha_panel.h#L31)).
-- Extend `add_entity(...)` with a trailing `size` argument (defaulted to keep the
-  programmatic `tap()`/test callers source-compatible); `to_code` maps the YAML
-  string → enum and passes it through.
-
-#### Dimensions (full scale)
-
-`small` is exactly today's render — zero visual change for existing configs.
-
-| size   | row height | name font        | icon glyph (MDI) | switch widget | left insets (icon / name) |
-|--------|-----------:|------------------|------------------|---------------|---------------------------|
-| small  | 60 px      | `montserrat_18`  | 24 px            | 50 × 26       | +12 / +48 (or +12 no-icon)|
-| medium | 84 px      | `montserrat_24`  | 36 px            | ~66 × 34      | scaled ∝                  |
-| large  | 108 px     | `montserrat_32`  | 48 px            | ~84 × 44      | scaled ∝                  |
-
-The right-side state/chevron/lock/action labels reuse the row's name font so
-they grow with it. The unavailable-overlay label likewise tracks the row font.
-The per-size insets/widget dimensions are codified in a small lookup (struct or
-`switch`) read by `make_entity_row`, replacing today's hard-coded `60`,
-`&lv_font_montserrat_18`, `48/12`, `240/280`, `50×26`, `-16/-12` constants.
-
-#### Fonts (the real cost — read before building)
-
-Full scale needs glyphs that don't exist in the firmware today:
-
-- **Name/text font:** enable `montserrat_24` and `montserrat_32` so
-  `lv_font_montserrat_24/32` link, the same way `montserrat_18` is forced to
-  link via `default_font` in [lvgl-ui.yaml](packages/lvgl-ui.yaml#L15). Built-in
-  LVGL fonts, but each baked size costs flash.
-- **MDI icon font:** the icon column draws from a single baked size-24 font
-  ([mdi-font.yaml](packages/mdi-font.yaml#L17)). Crisp medium/large icons need
-  the **same glyph subset re-baked at 36 px and 48 px** → two additional font
-  objects (`mdi_icons_36`, `mdi_icons_48`). `ha_panel` selects the MDI font by
-  row size. Teach [tools/build-mdi-glyphs.py](tools/build-mdi-glyphs.py) to emit
-  all three sizes from one glyph list so they can't drift, and add a matching
-  `set_mdi_font_*` setter (or a small font-by-size array passed in).
-- Board has 16 MB flash ([waveshare-2.16.yaml](boards/waveshare-2.16.yaml#L46));
-  five extra fonts (2 montserrat + 2 MDI re-bakes, glyph subset is small) is
-  comfortably affordable, but it is the main reason this is its own phase.
-- **Fallback if flash/effort is tight:** keep the icon glyph at a single baked
-  size and only scale row height + name/text font (still readable; icon just
-  looks relatively smaller in big rows). The enum/schema/layout work is
-  identical — only the MDI re-bake step is dropped.
-
-#### Layout impact
-
-- Rows live in a vertical scrolling flex list inside each tile, so taller rows
-  simply mean fewer visible at once + more scroll — no layout breakage, no
-  column reflow.
-- Mixed sizes within one area are fine; each row sizes independently.
-- `rebuild_entity_row_` ([ha_panel.cpp:341](components/ha_panel/ha_panel.cpp#L341))
-  already rebuilds a row in place — verify it carries the size through (it reads
-  the `Entity`, so it should once the field exists).
+  No "done" text — the splash hides the moment the API connects.
+- Set initial text via `update_splash_status_()` at build time (reads current
+  `wifi_connected_`/`api_connected_`, so it's correct even if `on_connect` fired
+  before `build_ui_` ran).
+- Call `update_splash_status_()` from `set_wifi_connected`
+  ([ha_panel.cpp:1201](components/ha_panel/ha_panel.cpp#L1201)) so the text flips
+  to "Home Assistant" once Wi-Fi lands. `set_api_connected` already hides the
+  splash — no text change needed there.
+- All label writes guard on `splash_status_ != nullptr` (link-state setters can
+  fire before the UI is built).
 
 Tasks:
-- [ ] `size:` enum in `__init__.py` (strict `one_of`, default small); thread
-      through `to_code` → `add_entity`.
-- [ ] `EntitySize` enum + `Entity::size` field; extend `add_entity` signature.
-- [ ] Per-size dimension lookup; rework `make_entity_row` to read row height,
-      name font, insets, and widget size from it (small = current values).
-- [ ] Enable `montserrat_24`/`montserrat_32` linkage in `lvgl-ui.yaml`.
-- [ ] Re-bake MDI glyphs at 36/48 px via `build-mdi-glyphs.py`; add the font
-      objects + size-aware MDI font selection in `ha_panel`.
-- [ ] Document `size:` + flash note in `ha-entities.example.yaml`.
+- [ ] Add `splash_status_` member + `update_splash_status_()` declaration.
+- [ ] Store the status label in `splash_status_`; set initial text via the
+      helper instead of the hard-coded string.
+- [ ] Implement `update_splash_status_()` (2-stage Wi-Fi → HA text, nullptr
+      guard).
+- [ ] Call it from `set_wifi_connected`.
 
 **Exit criteria:**
-- An entity with no `size:` renders byte-for-byte as it does today (small).
-- `size: medium` / `size: large` produce visibly taller rows with proportionally
-  larger name text, icon, and right-side widget.
-- An invalid `size:` value fails the build with a clear validation error.
-- Mixed sizes in one area render and scroll cleanly.
+- On a cold boot with no Wi-Fi yet, the splash reads "Connecting to Wi-Fi…".
+- Once Wi-Fi associates but HA hasn't connected, it reads "Connecting to Home
+  Assistant…".
+- The splash still hides on HA API connect, unchanged.
 
 **Risks / unknowns:**
-- Flash budget for the extra fonts — measure the build-size delta; fall back to
-  text-only scaling (icon fixed at 24 px) if it's tighter than expected.
-- Vertical centering of name vs. icon vs. widget must hold at every size; the
-  `LV_ALIGN_*_MID` anchors should make this automatic but verify on-device.
-- Detail modal / confirm sheet are full-screen overlays and are **out of scope**
-  for E5 — `size:` only affects the area-row rendering, not the modals.
+- Only two stages are honestly distinguishable from wired signals (Wi-Fi, HA
+  API). There's no separate "subscribing to entities" stage to show — out of
+  scope, and it adds no TX-budget cost to keep it that way.
+- `wifi.on_connect` may fire before `build_ui_`; the build-time
+  `update_splash_status_()` call covers that ordering.
 
 ---
 
@@ -561,72 +495,138 @@ Tasks:
 
 ---
 
-### Phase E7 — Boot splash: show current connection stage
+### Phase E7 — Per-entity component size (small / medium / large)
 
-**Status:** ⬜ not started · target tag: `e7-splash-stage`
+**Status:** ⬜ not started · target tag: `e7-entity-size`
 
-**Goal:** The boot splash tells the user *which* connection gate it's waiting on
-instead of always reading "Connecting to Home Assistant...".
+**Goal:** Let a user make individual entity rows bigger for easier reading. A
+new optional `size:` node on each entity selects `small` (default, today's
+look), `medium`, or `large`. Size scales the whole row together — height, name
+font, icon glyph, and the right-side widget — not just the row height.
 
-**Root cause:** The splash hides on exactly one trigger —
-`set_api_connected(true)` ([ha_panel.cpp:1195](components/ha_panel/ha_panel.cpp#L1195)),
-fired by `api.on_client_connected` ([base.yaml:45](packages/base.yaml#L45)).
-There are two sequential gates before that fires: Wi-Fi must associate, then the
-HA API client must connect + handshake. The splash status label is a hard-coded
-local string ([ha_panel.cpp:1098](components/ha_panel/ha_panel.cpp#L1098)) that
-reads "Connecting to Home Assistant..." the whole time — so a panel stuck on the
-Wi-Fi gate (or stuck because HA is down / wrong key / restarting) shows the same
-text either way.
+#### Motivation / context
 
-**Approach (no new signals — both link states are already wired):**
-- Promote the splash status label to a member `splash_status_{nullptr}`
-  ([ha_panel.h:268](components/ha_panel/ha_panel.h#L268)) so it can be updated
-  after build.
-- Add `update_splash_status_()` that picks text from current state:
+Every entity row is rendered at a fixed 60 px height with `montserrat_18`
+([make_entity_row](components/ha_panel/ha_panel.cpp#L536)), regardless of
+importance or how far away the panel sits. A nightstand or hallway panel viewed
+from across the room benefits from a few large, glanceable rows (e.g. the room's
+main light) while keeping the rest compact. Today there's no way to express
+"make this one bigger."
 
-  | State | Text |
-  |-------|------|
-  | `!wifi_connected_` | `"Connecting to Wi-Fi…"` |
-  | wifi up, `!api_connected_` | `"Connecting to Home Assistant…"` |
+#### Schema (`ha-entities.yaml`)
 
-  No "done" text — the splash hides the moment the API connects.
-- Set initial text via `update_splash_status_()` at build time (reads current
-  `wifi_connected_`/`api_connected_`, so it's correct even if `on_connect` fired
-  before `build_ui_` ran).
-- Call `update_splash_status_()` from `set_wifi_connected`
-  ([ha_panel.cpp:1201](components/ha_panel/ha_panel.cpp#L1201)) so the text flips
-  to "Home Assistant" once Wi-Fi lands. `set_api_connected` already hides the
-  splash — no text change needed there.
-- All label writes guard on `splash_status_ != nullptr` (link-state setters can
-  fire before the UI is built).
+- Add an optional `size:` node to the entity schema in
+  [\_\_init\_\_.py](components/ha_panel/__init__.py#L48), validated as a **strict
+  enum** `cv.one_of("small", "medium", "large", lower=True)`. Default `small`.
+  An unrecognised value is a **compile-time error** (same strictness intent as
+  `confirm`/`icon` validation).
+- Example:
+  ```yaml
+  - name: "Foyer"
+    entities:
+      - entity_id: light.foyer_1
+        friendly_name: "Foyer Lamp 1"
+        size: "medium"
+      - entity_id: light.foyer_2
+        friendly_name: "Foyer Lamp 2"
+        size: "large"
+      - entity_id: light.foyer_3
+        friendly_name: "Foyer Lamp 3"   # no size → defaults to "small"
+  ```
+- Update the header comment block in
+  [ha-entities.example.yaml](packages/ha-entities.example.yaml) documenting the
+  three values, the small default, and the flash-cost note (below).
+
+#### Data model + codegen
+
+- Add an `EntitySize { SMALL, MEDIUM, LARGE }` enum and a
+  `size{EntitySize::SMALL}` field to `struct Entity`
+  ([ha_panel.h:31](components/ha_panel/ha_panel.h#L31)).
+- Extend `add_entity(...)` with a trailing `size` argument (defaulted to keep the
+  programmatic `tap()`/test callers source-compatible); `to_code` maps the YAML
+  string → enum and passes it through.
+
+#### Dimensions (full scale)
+
+`small` is exactly today's render — zero visual change for existing configs.
+
+| size   | row height | name font        | icon glyph (MDI) | switch widget | left insets (icon / name) |
+|--------|-----------:|------------------|------------------|---------------|---------------------------|
+| small  | 60 px      | `montserrat_18`  | 24 px            | 50 × 26       | +12 / +48 (or +12 no-icon)|
+| medium | 84 px      | `montserrat_24`  | 36 px            | ~66 × 34      | scaled ∝                  |
+| large  | 108 px     | `montserrat_32`  | 48 px            | ~84 × 44      | scaled ∝                  |
+
+The right-side state/chevron/lock/action labels reuse the row's name font so
+they grow with it. The unavailable-overlay label likewise tracks the row font.
+The per-size insets/widget dimensions are codified in a small lookup (struct or
+`switch`) read by `make_entity_row`, replacing today's hard-coded `60`,
+`&lv_font_montserrat_18`, `48/12`, `240/280`, `50×26`, `-16/-12` constants.
+
+#### Fonts (the real cost — read before building)
+
+Full scale needs glyphs that don't exist in the firmware today:
+
+- **Name/text font:** enable `montserrat_24` and `montserrat_32` so
+  `lv_font_montserrat_24/32` link, the same way `montserrat_18` is forced to
+  link via `default_font` in [lvgl-ui.yaml](packages/lvgl-ui.yaml#L15). Built-in
+  LVGL fonts, but each baked size costs flash.
+- **MDI icon font:** the icon column draws from a single baked size-24 font
+  ([mdi-font.yaml](packages/mdi-font.yaml#L17)). Crisp medium/large icons need
+  the **same glyph subset re-baked at 36 px and 48 px** → two additional font
+  objects (`mdi_icons_36`, `mdi_icons_48`). `ha_panel` selects the MDI font by
+  row size. Teach [tools/build-mdi-glyphs.py](tools/build-mdi-glyphs.py) to emit
+  all three sizes from one glyph list so they can't drift, and add a matching
+  `set_mdi_font_*` setter (or a small font-by-size array passed in).
+- Board has 16 MB flash ([waveshare-2.16.yaml](boards/waveshare-2.16.yaml#L46));
+  five extra fonts (2 montserrat + 2 MDI re-bakes, glyph subset is small) is
+  comfortably affordable, but it is the main reason this is its own phase.
+- **Fallback if flash/effort is tight:** keep the icon glyph at a single baked
+  size and only scale row height + name/text font (still readable; icon just
+  looks relatively smaller in big rows). The enum/schema/layout work is
+  identical — only the MDI re-bake step is dropped.
+
+#### Layout impact
+
+- Rows live in a vertical scrolling flex list inside each tile, so taller rows
+  simply mean fewer visible at once + more scroll — no layout breakage, no
+  column reflow.
+- Mixed sizes within one area are fine; each row sizes independently.
+- `rebuild_entity_row_` ([ha_panel.cpp:341](components/ha_panel/ha_panel.cpp#L341))
+  already rebuilds a row in place — verify it carries the size through (it reads
+  the `Entity`, so it should once the field exists).
 
 Tasks:
-- [ ] Add `splash_status_` member + `update_splash_status_()` declaration.
-- [ ] Store the status label in `splash_status_`; set initial text via the
-      helper instead of the hard-coded string.
-- [ ] Implement `update_splash_status_()` (2-stage Wi-Fi → HA text, nullptr
-      guard).
-- [ ] Call it from `set_wifi_connected`.
+- [ ] `size:` enum in `__init__.py` (strict `one_of`, default small); thread
+      through `to_code` → `add_entity`.
+- [ ] `EntitySize` enum + `Entity::size` field; extend `add_entity` signature.
+- [ ] Per-size dimension lookup; rework `make_entity_row` to read row height,
+      name font, insets, and widget size from it (small = current values).
+- [ ] Enable `montserrat_24`/`montserrat_32` linkage in `lvgl-ui.yaml`.
+- [ ] Re-bake MDI glyphs at 36/48 px via `build-mdi-glyphs.py`; add the font
+      objects + size-aware MDI font selection in `ha_panel`.
+- [ ] Document `size:` + flash note in `ha-entities.example.yaml`.
 
 **Exit criteria:**
-- On a cold boot with no Wi-Fi yet, the splash reads "Connecting to Wi-Fi…".
-- Once Wi-Fi associates but HA hasn't connected, it reads "Connecting to Home
-  Assistant…".
-- The splash still hides on HA API connect, unchanged.
+- An entity with no `size:` renders byte-for-byte as it does today (small).
+- `size: medium` / `size: large` produce visibly taller rows with proportionally
+  larger name text, icon, and right-side widget.
+- An invalid `size:` value fails the build with a clear validation error.
+- Mixed sizes in one area render and scroll cleanly.
 
 **Risks / unknowns:**
-- Only two stages are honestly distinguishable from wired signals (Wi-Fi, HA
-  API). There's no separate "subscribing to entities" stage to show — out of
-  scope, and it adds no TX-budget cost to keep it that way.
-- `wifi.on_connect` may fire before `build_ui_`; the build-time
-  `update_splash_status_()` call covers that ordering.
+- Flash budget for the extra fonts — measure the build-size delta; fall back to
+  text-only scaling (icon fixed at 24 px) if it's tighter than expected.
+- Vertical centering of name vs. icon vs. widget must hold at every size; the
+  `LV_ALIGN_*_MID` anchors should make this automatic but verify on-device.
+- Detail modal / confirm sheet are full-screen overlays and are **out of scope**
+  for E7 — `size:` only affects the area-row rendering, not the modals.
 
 ---
 
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks
-  amber with a solid-amber fallback. E5: full scale — height + name font + icon
+  amber with a solid-amber fallback. E7: full scale — height + name font + icon
   + widget; sizes 60/84/108 px with montserrat 18/24/32; strict-enum `size:`.)
 
 ---
