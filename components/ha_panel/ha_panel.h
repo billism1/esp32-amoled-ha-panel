@@ -158,6 +158,7 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void open_picker_();
   void close_picker_();
   void update_status_dot_();
+  void update_splash_status_();
   void update_wifi_icon_();
   void update_battery_icon_();
   // E2: start/stop the shared blink timer based on whether any indicator is in
@@ -266,6 +267,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *tileview_{nullptr};
   lv_obj_t *picker_{nullptr};
   lv_obj_t *splash_{nullptr};
+  // E5: splash status label, updated after build to show the current
+  // connection gate (Wi-Fi vs HA API). splash_dot_ pulses with blink_on_ to
+  // signal "this stage is being worked on".
+  lv_obj_t *splash_status_{nullptr};
+  lv_obj_t *splash_dot_{nullptr};
   // E1: settings overlay sheet (was a tileview tile). settings_open_ tracks
   // visibility; the revert-on-close trigger replaces the old
   // revert-on-navigate-away-from-tile path.

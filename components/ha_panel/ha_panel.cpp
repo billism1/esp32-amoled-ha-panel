@@ -1117,13 +1117,29 @@ void HAPanel::build_ui_() {
   lv_obj_set_style_text_font(splash_name, &lv_font_montserrat_18, 0);
   lv_obj_align(splash_name, LV_ALIGN_CENTER, 0, -20);
 
-  lv_obj_t *splash_status = lv_label_create(this->splash_);
-  lv_label_set_text(splash_status, "Connecting to Home Assistant...");
-  lv_obj_set_style_text_color(splash_status, lv_color_hex(0xAAAAAA), 0);
-  lv_obj_set_style_text_font(splash_status, &lv_font_montserrat_18, 0);
-  lv_obj_align(splash_status, LV_ALIGN_CENTER, 0, 20);
+  this->splash_status_ = lv_label_create(this->splash_);
+  lv_obj_set_style_text_color(this->splash_status_, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(this->splash_status_, &lv_font_montserrat_18, 0);
+  lv_obj_align(this->splash_status_, LV_ALIGN_CENTER, 0, 20);
+
+  // E5: pulsing dot — small amber circle that blinks via the shared blink timer
+  // so the splash visibly signals the current stage is being worked on.
+  this->splash_dot_ = lv_obj_create(this->splash_);
+  lv_obj_remove_style_all(this->splash_dot_);
+  lv_obj_set_size(this->splash_dot_, 12, 12);
+  lv_obj_set_style_radius(this->splash_dot_, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(this->splash_dot_, lv_color_hex(0xDDAA33), 0);
+  lv_obj_set_style_bg_opa(this->splash_dot_, LV_OPA_COVER, 0);
+  lv_obj_align(this->splash_dot_, LV_ALIGN_CENTER, 0, 52);
+
+  // E5: pick text from current link state (on_connect may have fired before build).
+  this->update_splash_status_();
 
   this->update_status_dot_();
+  // E5: start the blink timer at boot so the splash dot (and the header
+  // indicators) animate even when stuck on the very first gate — no setter
+  // fires when the initial state already matches.
+  this->update_blink_timer_();
 }
 
 void HAPanel::open_picker_() {
@@ -1198,6 +1214,18 @@ void HAPanel::update_status_dot_() {
   lv_obj_set_style_bg_color(this->status_dot_, lv_color_hex(col), 0);
 }
 
+void HAPanel::update_splash_status_() {
+  // E5: two honest gates. No "done" text — the splash hides on API connect.
+  if (this->splash_status_ != nullptr) {
+    const char *text = this->wifi_connected_ ? "Connecting to Home Assistant..."
+                                             : "Connecting to Wi-Fi...";
+    lv_label_set_text(this->splash_status_, text);
+  }
+  // E5: pulse the dot with the shared blink phase to show work in progress.
+  if (this->splash_dot_ != nullptr)
+    lv_obj_set_style_bg_opa(this->splash_dot_, this->blink_on_ ? LV_OPA_COVER : LV_OPA_30, 0);
+}
+
 bool HAPanel::is_settings_active_() const {
   // E1: settings is an overlay sheet now, not a tile.
   return this->settings_open_;
@@ -1228,6 +1256,7 @@ void HAPanel::set_wifi_connected(bool connected) {
   this->update_blink_timer_();
   this->update_wifi_icon_();
   this->update_status_dot_();
+  this->update_splash_status_();  // E5: flip text Wi-Fi → HA once Wi-Fi lands.
   ESP_LOGI(TAG, "wifi %s", connected ? "connected" : "disconnected");
 }
 
@@ -1254,6 +1283,7 @@ void HAPanel::blink_timer_cb_(lv_timer_t *t) {
   self->blink_on_ = !self->blink_on_;
   self->update_wifi_icon_();
   self->update_status_dot_();
+  self->update_splash_status_();  // E5: pulse the splash dot in step.
 }
 
 void HAPanel::set_active_brightness(uint8_t v) {

@@ -62,7 +62,7 @@ All three below are promoted to phases. Future ideas land here first.
 - [x] Wi-Fi / HA connecting-state indicators → **E2**
 - [x] Area-label chevron overlap fix → **E3**
 - [x] Cover detail modal: show current state → **E4**
-- [ ] Boot splash: show current connection stage → **E5**
+- [x] Boot splash: show current connection stage → **E5**
 - [ ] Per-entity component size (small / medium / large) → **E7**
 
 ---
@@ -306,7 +306,7 @@ Tasks:
 
 ### Phase E5 — Boot splash: show current connection stage
 
-**Status:** ⬜ not started · target tag: `e5-splash-stage`
+**Status:** ✅ done · target tag: `e5-splash-stage`
 
 **Goal:** The boot splash tells the user *which* connection gate it's waiting on
 instead of always reading "Connecting to Home Assistant...".
@@ -344,12 +344,22 @@ text either way.
   fire before the UI is built).
 
 Tasks:
-- [ ] Add `splash_status_` member + `update_splash_status_()` declaration.
-- [ ] Store the status label in `splash_status_`; set initial text via the
+- [x] Add `splash_status_` member + `update_splash_status_()` declaration.
+- [x] Store the status label in `splash_status_`; set initial text via the
       helper instead of the hard-coded string.
-- [ ] Implement `update_splash_status_()` (2-stage Wi-Fi → HA text, nullptr
+- [x] Implement `update_splash_status_()` (2-stage Wi-Fi → HA text, nullptr
       guard).
-- [ ] Call it from `set_wifi_connected`.
+- [x] Call it from `set_wifi_connected`.
+- [x] Per-stage "working" indicator: a `splash_dot_` amber circle that pulses
+      opacity off the shared 500 ms blink timer. Two extra wires were needed:
+      drive the dot from `blink_timer_cb_` (via `update_splash_status_()`), and
+      kick `update_blink_timer_()` once at the end of `build_ui_` so the timer
+      runs even when stuck on the first gate (no setter fires when the initial
+      state already matches).
+
+**Deviation:** kept the existing ASCII `...` (not the `…` glyph in the table) —
+built-in `lv_font_montserrat_18` carries ASCII only, so U+2026 would render as a
+missing-glyph box.
 
 **Exit criteria:**
 - On a cold boot with no Wi-Fi yet, the splash reads "Connecting to Wi-Fi…".
