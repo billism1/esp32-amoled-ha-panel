@@ -63,6 +63,7 @@ All three below are promoted to phases. Future ideas land here first.
 - [x] Area-label chevron overlap fix → **E3**
 - [x] Cover detail modal: show current state → **E4**
 - [ ] Per-entity component size (small / medium / large) → **E5**
+- [ ] Boot splash: show current connection stage → **E6**
 
 ---
 
@@ -428,6 +429,68 @@ Tasks:
   `LV_ALIGN_*_MID` anchors should make this automatic but verify on-device.
 - Detail modal / confirm sheet are full-screen overlays and are **out of scope**
   for E5 — `size:` only affects the area-row rendering, not the modals.
+
+---
+
+### Phase E6 — Boot splash: show current connection stage
+
+**Status:** ⬜ not started · target tag: `e6-splash-stage`
+
+**Goal:** The boot splash tells the user *which* connection gate it's waiting on
+instead of always reading "Connecting to Home Assistant...".
+
+**Root cause:** The splash hides on exactly one trigger —
+`set_api_connected(true)` ([ha_panel.cpp:1195](components/ha_panel/ha_panel.cpp#L1195)),
+fired by `api.on_client_connected` ([base.yaml:45](packages/base.yaml#L45)).
+There are two sequential gates before that fires: Wi-Fi must associate, then the
+HA API client must connect + handshake. The splash status label is a hard-coded
+local string ([ha_panel.cpp:1098](components/ha_panel/ha_panel.cpp#L1098)) that
+reads "Connecting to Home Assistant..." the whole time — so a panel stuck on the
+Wi-Fi gate (or stuck because HA is down / wrong key / restarting) shows the same
+text either way.
+
+**Approach (no new signals — both link states are already wired):**
+- Promote the splash status label to a member `splash_status_{nullptr}`
+  ([ha_panel.h:268](components/ha_panel/ha_panel.h#L268)) so it can be updated
+  after build.
+- Add `update_splash_status_()` that picks text from current state:
+
+  | State | Text |
+  |-------|------|
+  | `!wifi_connected_` | `"Connecting to Wi-Fi…"` |
+  | wifi up, `!api_connected_` | `"Connecting to Home Assistant…"` |
+
+  No "done" text — the splash hides the moment the API connects.
+- Set initial text via `update_splash_status_()` at build time (reads current
+  `wifi_connected_`/`api_connected_`, so it's correct even if `on_connect` fired
+  before `build_ui_` ran).
+- Call `update_splash_status_()` from `set_wifi_connected`
+  ([ha_panel.cpp:1201](components/ha_panel/ha_panel.cpp#L1201)) so the text flips
+  to "Home Assistant" once Wi-Fi lands. `set_api_connected` already hides the
+  splash — no text change needed there.
+- All label writes guard on `splash_status_ != nullptr` (link-state setters can
+  fire before the UI is built).
+
+Tasks:
+- [ ] Add `splash_status_` member + `update_splash_status_()` declaration.
+- [ ] Store the status label in `splash_status_`; set initial text via the
+      helper instead of the hard-coded string.
+- [ ] Implement `update_splash_status_()` (2-stage Wi-Fi → HA text, nullptr
+      guard).
+- [ ] Call it from `set_wifi_connected`.
+
+**Exit criteria:**
+- On a cold boot with no Wi-Fi yet, the splash reads "Connecting to Wi-Fi…".
+- Once Wi-Fi associates but HA hasn't connected, it reads "Connecting to Home
+  Assistant…".
+- The splash still hides on HA API connect, unchanged.
+
+**Risks / unknowns:**
+- Only two stages are honestly distinguishable from wired signals (Wi-Fi, HA
+  API). There's no separate "subscribing to entities" stage to show — out of
+  scope, and it adds no TX-budget cost to keep it that way.
+- `wifi.on_connect` may fire before `build_ui_`; the build-time
+  `update_splash_status_()` call covers that ordering.
 
 ---
 
