@@ -733,9 +733,15 @@ Tasks:
 
 ### Phase E9 — Read-only entity history chart sheet
 
-**Status:** 🟢 ring-buffer mode verified on-device 2026-05-30; REST backfill
-implemented (build-verified, on-device validation pending) · target tag:
-`e9-history-chart`
+**Status:** ✅ done — ring-buffer + REST backfill verified on-device 2026-05-30
+· target tag: `e9-history-chart`
+
+**REST hardening (on-device fixes, 2026-05-30):** body read into a PSRAM buffer
+(internal heap fragmented → `bad_alloc` abort under repeated fetches); timeline
+switched to seconds with per-mode "now" (REST=epoch, ring=uptime) so the
+time-axis span is honest across windows; REST points decimated at ingestion to
+`SAMPLE_CAP` (300) to bound the internal-heap sample vector (a 24 h per-minute
+series is ~1440 pts).
 
 **Scope decision (2026-05-30):** shipped the chart sheet on the in-device ring
 buffer first — fully self-contained, always compiles/runs, no external deps. The
