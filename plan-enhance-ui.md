@@ -494,6 +494,135 @@ Tasks:
 
 ---
 
+### Phase E7 — Light detail modal: real brightness, no fake 100%
+
+**Status:** ⬜ not started · target tag: `e7-light-brightness`
+
+**Goal:** The light detail modal shows the light's *actual* brightness instead
+of seeding the slider at a misleading 100%. An on, dimmable light shows its true
+level instantly; an off / non-dimmable light shows an honest placeholder, never
+a number that reads as current state.
+
+**Root cause:** [build_detail_light_](components/ha_panel/ha_panel.cpp#L1909-L1913)
+defaults `cur_pct = 100` whenever the `brightness` attribute is absent:
+
+```cpp
+int cur_pct = 100;
+int b_raw = this->get_attr_int_(entity_idx, "brightness", -1);
+if (b_raw >= 0)
+  cur_pct = (b_raw * 100 + 127) / 255;
+```
+
+Persistent attribute subscriptions are deferred at setup
+([ha_panel.cpp:256-276](components/ha_panel/ha_panel.cpp#L256-L276)), so
+`brightness` is absent for **every** light on open — off lights (HA omits
+`brightness` when off) *and* on lights alike — and the slider always seeds 100%,
+reading as "current = 100%." The fully-correct lazy fetch was tried and parked:
+re-arming ESPHome's per-client `state_subs_at_` cursor re-walks all ~88 state
+subs at one msg/tick ≈ 3 s per modal open
+([ha_panel.cpp:1741-1820](components/ha_panel/ha_panel.cpp#L1741-L1820)) — the
+"couple seconds" lag. Subscribing *all* attrs at connect was the original
+failure: ~6 attrs × ~30 lights ≈ 180 extra subs bursted at connect → `Buffer
+full` → HA disconnect → silent service-call loss.
+
+**Approach (A + D): subscribe `brightness` only, at connect; honest placeholder for the rest.**
+
+*A — brightness-only connect-time subscription (truth, no burst, no re-arm):*
+- The flood was the **full** attr set bursted. Subscribing only `brightness` for
+  lights ≈ 30 extra subs, folded into the existing connect-time state-sub loop
+  ([ha_panel.cpp:253-254](components/ha_panel/ha_panel.cpp#L253-L254)) → ~88 →
+  ~118 total, well under the ~278 that broke iter 1. Because it rides the
+  initial cursor walk, there is **no re-arm and no per-open latency** — the value
+  is cached before the user ever opens a modal.
+- In `setup()`, after the state-sub loop, call `subscribe_attr_(idx,
+  "brightness")` for each `light` entity. Leave `ensure_attrs_subscribed_` /
+  `request_detail_attrs_` untouched for the other per-domain attrs
+  (color_temp, ranges) — those stay lazy-or-default; they are not the misleading
+  part.
+
+*D — honest placeholder (zero extra cost, covers the gaps A can't):*
+- In `build_detail_light_`, drop the `cur_pct = 100` default. When `brightness`
+  is absent (`b_raw < 0`): render the slider **disabled** (`LV_STATE_DISABLED`,
+  greyed) and set the value label to `"—"` / `"Off"`, never `"100 %"`.
+- Power-toggle reveal: flipping the Power switch **on** enables the brightness
+  slider, seeded from the last-known cached brightness (below) or a neutral
+  default — at which point the user is clearly setting a *target*, not reading a
+  current value.
+- The A subscription means an **on, dimmable** light almost always has a cached
+  brightness by first open → slider shows truth instantly. The disabled
+  placeholder only appears for: an **off** light (HA omits `brightness` even with
+  the sub), a **non-dimmable** light (no `brightness` attr ever), or the brief
+  window before the first value lands.
+
+*Last-known brightness cache (small, makes the off→on seed honest-ish):*
+- Retain the last non-null `brightness` seen per light (in `Entity` or a parallel
+  map). Seed the toggle-on case from it instead of a blind default. Optional
+  within this phase, but cheap and removes the last guess.
+
+**Live-update note:** v1 does not live-refresh an already-open modal; the value
+lands by next open. With the connect-time sub it's cached before first open in
+practice, so this is invisible.
+
+**Step 0 — validation gate (HARD STOP for explicit user acceptance).** Before
+any UI work, prototype *only* the A subscription (connect-time `brightness` sub
+for lights), flash to the real device against the real entity list, and **stop**.
+The user runs the test scenario and must **explicitly accept** the result before
+any further E7 work begins. No D/UI tasks, no commit past the prototype, until
+that sign-off.
+
+Test scenario the user runs:
+1. Cold-boot the panel; watch the connect log. **Pass:** no `Buffer full, ping
+   queued` and no `Home Assistant … is unresponsive; disconnecting`.
+2. Note the connect-time subscription count vs. the prior ~88 baseline.
+3. Tap an entity to confirm service calls still fire (regression check — iter 1's
+   real symptom was silent service-call loss, not just the log warnings).
+4. Open the detail modal for an **on, dimmable** light and confirm a real
+   brightness value arrived in `Entity::attrs` (logged), not a default.
+
+Outcome → next move:
+- **Accepted (headroom holds, calls work):** proceed to the D/UI tasks.
+- **Rejected (buffer saturates or calls drop):** abandon A; switch to the HA-side
+  batch-sensor fallback (see Risks) before building further.
+
+Tasks:
+- [ ] **Step 0:** build/flash the brightness-sub prototype only, then **STOP** for
+      user testing. User runs the scenario above and explicitly accepts or rejects;
+      the rest of the phase is gated on acceptance.
+- [ ] `setup()`: subscribe `brightness` for every `light` entity after the
+      state-sub loop. Measure connect-time sub count + buffer headroom on-device
+      (watch for `Buffer full` / disconnect).
+- [ ] `build_detail_light_`: remove the `cur_pct = 100` default; when brightness
+      absent, render the slider disabled + `"—"`/`"Off"` label instead of a fake
+      percent.
+- [ ] Power-toggle-on enables the brightness slider, seeded from last-known cache
+      or a neutral default.
+- [ ] (Optional) retain last non-null brightness per light to seed the off→on
+      case.
+- [ ] Update Out-of-scope to carve out the brightness-only connect-time sub.
+
+**Exit criteria:**
+- Opening the modal for an **on, dimmable** light shows its actual brightness %,
+  not 100%, with no perceptible delay.
+- Opening it for an **off** light shows a disabled / neutral brightness (no
+  misleading number); toggling Power on enables the slider.
+- A **non-dimmable** light shows no editable fake-100 brightness.
+- Connect-time logs show no `Buffer full` / unresponsive-disconnect — the sub
+  count stays within buffer headroom.
+
+**Risks / unknowns:**
+- **Sub-count headroom.** ~118 vs ~278 is a wide margin, but verify with the
+  real (not dev) entity list — a much larger install narrows it. Fallback if a
+  big install pushes the connect burst back toward the ceiling: a HA-side
+  template/batch sensor exposing all light brightnesses as attributes, subscribed
+  as **one** entity at connect (the [ha_panel.cpp:1750-1752](components/ha_panel/ha_panel.cpp#L1750-L1752)
+  comment's own suggestion).
+- Off lights never report `brightness` — the toggle-on seed is last-known /
+  neutral, a target not live truth. Acceptable.
+- This phase intentionally reverses the "no new subscriptions" rule, narrowly
+  (one attr, lights only, connect-time). See updated Out-of-scope.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks
@@ -506,6 +635,9 @@ Tasks:
 
 - No new HA entity subscriptions or attribute fetches (keeps the connect-time
   TX budget clean — see the P7e/P7d TX-saturation lesson in plan-mvp.md).
+  **Exception (E7):** one connect-time `brightness` subscription per light is
+  permitted — it rides the existing state-sub walk (~88 → ~118), well under the
+  ~278-sub burst that saturated iter 1, with no cursor re-arm.
 - No power-state / sleep-timer changes — E2 only re-reads connection state, it
   doesn't alter when the device sleeps or wakes.
 - No board / pin / driver changes; all three phases are LVGL + YAML wiring.
