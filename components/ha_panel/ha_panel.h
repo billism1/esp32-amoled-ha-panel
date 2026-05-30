@@ -39,6 +39,10 @@ struct Entity {
   // seen string). Populated as HA pushes updates via attribute subscriptions.
   // Shared scaffolding with P7e (HA icon attribute).
   std::map<std::string, std::string> attrs;
+  // E7: last non-null brightness seen for a light, as 0-100 %. -1 = never seen.
+  // Off lights report `brightness = None`, so this retains the prior on-level
+  // to seed the detail slider when the user toggles an off light back on.
+  int last_bri_pct{-1};
   // P7e: optional "mdi:foo" override from YAML. Empty = resolve from domain.
   std::string icon_override;
   // P7f: short-tap opens a confirm sheet / detail modal instead of firing the
@@ -233,6 +237,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_detail_apply_clicked_(lv_event_t *e);
   static void on_detail_cancel_clicked_(lv_event_t *e);
   static void on_detail_bg_clicked_(lv_event_t *e);
+  // E7: power switch in the light modal — toggling on reveals/enables the
+  // brightness slider (seeded from last-known), toggling off greys it.
+  static void on_detail_light_switch_(lv_event_t *e);
   // Live label updates as detail-modal sliders move.
   static void on_detail_brightness_slider_(lv_event_t *e);
   static void on_detail_ct_slider_(lv_event_t *e);
@@ -359,6 +366,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *dw_light_switch_{nullptr};
   lv_obj_t *dw_brightness_slider_{nullptr};
   lv_obj_t *dw_brightness_label_{nullptr};
+  // E7: true once the brightness slider holds a real target (a cached HA
+  // value, or a value the user set by enabling the slider). When false the
+  // slider is a disabled placeholder and apply_detail_ must NOT send
+  // brightness_pct — otherwise an untouched placeholder would push 0/100 %.
+  bool dw_brightness_known_{false};
   lv_obj_t *dw_ct_slider_{nullptr};
   lv_obj_t *dw_ct_label_{nullptr};
   lv_obj_t *dw_temp_slider_{nullptr};   // climate target temp, ×10 units

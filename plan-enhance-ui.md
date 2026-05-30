@@ -64,7 +64,7 @@ All three below are promoted to phases. Future ideas land here first.
 - [x] Cover detail modal: show current state → **E4**
 - [x] Boot splash: show current connection stage → **E5**
 - [x] Rename areas → pages + bottom-bar Home button → **E6**
-- [ ] Light detail modal: real brightness, no fake 100% → **E7**
+- [x] Light detail modal: real brightness, no fake 100% → **E7**
 - [ ] Per-entity component size (small / medium / large) → **E8**
 - [ ] Read-only entity history chart sheet → **E9**
 
@@ -471,7 +471,7 @@ Tasks:
 
 ### Phase E7 — Light detail modal: real brightness, no fake 100%
 
-**Status:** ⬜ not started · target tag: `e7-light-brightness`
+**Status:** ✅ done · target tag: `e7-light-brightness`
 
 **Goal:** The light detail modal shows the light's *actual* brightness instead
 of seeding the slider at a misleading 100%. An on, dimmable light shows its true
@@ -560,20 +560,21 @@ Outcome → next move:
   batch-sensor fallback (see Risks) before building further.
 
 Tasks:
-- [ ] **Step 0:** build/flash the brightness-sub prototype only, then **STOP** for
-      user testing. User runs the scenario above and explicitly accepts or rejects;
-      the rest of the phase is gated on acceptance.
-- [ ] `setup()`: subscribe `brightness` for every `light` entity after the
-      state-sub loop. Measure connect-time sub count + buffer headroom on-device
-      (watch for `Buffer full` / disconnect).
-- [ ] `build_detail_light_`: remove the `cur_pct = 100` default; when brightness
-      absent, render the slider disabled + `"—"`/`"Off"` label instead of a fake
-      percent.
-- [ ] Power-toggle-on enables the brightness slider, seeded from last-known cache
-      or a neutral default.
-- [ ] (Optional) retain last non-null brightness per light to seed the off→on
-      case.
-- [ ] Update Out-of-scope to carve out the brightness-only connect-time sub.
+- [x] **Step 0:** build/flash the brightness-sub prototype only, then **STOP** for
+      user testing. **Accepted** on-device 2026-05-30: 33 light brightness subs
+      (~88→~121 total), no `Buffer full`/disconnect, on dimmable lights cached
+      real values (bill_s_lamp=255, office_*=222), off lights report `None`.
+- [x] `setup()`: subscribe `brightness` for every `light` entity after the
+      state-sub loop. Measured: 33 subs, no buffer saturation on the real list.
+- [x] `build_detail_light_`: remove the `cur_pct = 100` default; when brightness
+      absent, render the slider disabled + `"Off"`/`"--"` label (ASCII — no
+      em-dash glyph in montserrat_18) instead of a fake percent.
+- [x] Power-toggle-on enables the brightness slider, seeded from last-known cache
+      or a neutral 50% default (`on_detail_light_switch_`); `apply_detail_` gates
+      `brightness_pct` on the new `dw_brightness_known_` flag.
+- [x] Retain last non-null brightness per light (`Entity::last_bri_pct`, set in
+      `on_attr_`) to seed the off→on case.
+- [x] Update Out-of-scope to carve out the brightness-only connect-time sub.
 
 **Exit criteria:**
 - Opening the modal for an **on, dimmable** light shows its actual brightness %,

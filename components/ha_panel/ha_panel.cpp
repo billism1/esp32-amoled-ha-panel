@@ -253,6 +253,24 @@ void HAPanel::setup() {
   for (const auto &e : this->entities_) {
     this->subscribe_homeassistant_state(&HAPanel::on_state_, e.entity_id);
   }
+  // E7 Step 0 prototype: connect-time `brightness` subscription for lights
+  // only. Rides the initial state_subs cursor walk (no re-arm), so the value
+  // is cached before the first modal open and the light detail slider can show
+  // truth instead of a fake 100 %. Scope is deliberately narrow — one attr,
+  // lights only — to stay well under the ~278-sub burst that saturated the
+  // P7d iter-1 attempt (the full per-domain attr set). ~88 state subs + ~30
+  // light brightness subs ≈ 118 total. Watch the connect log for `Buffer full`
+  // / unresponsive-disconnect before extending this to the D/UI tasks.
+  {
+    unsigned light_subs = 0;
+    for (size_t i = 0; i < this->entities_.size(); i++) {
+      if (this->entities_[i].domain == "light") {
+        this->subscribe_attr_(i, "brightness");
+        light_subs++;
+      }
+    }
+    ESP_LOGCONFIG(TAG, "E7: subscribed brightness for %u light entities", light_subs);
+  }
   // P7d follow-up: per-domain attribute subscriptions DISABLED.
   //
   // First on-device test (2026-05-29) showed `homeassistant.turn_on/off` calls
@@ -292,6 +310,13 @@ void HAPanel::on_attr_(size_t entity_idx, const std::string &attr_name,
   attrs[attr_name] = value.str();
   ESP_LOGD(TAG, "%s.%s = %s", this->entities_[entity_idx].entity_id.c_str(),
            attr_name.c_str(), value.c_str());
+  // E7: cache last non-null brightness (HA sends 0-255; "None" when off) so an
+  // off light's detail slider can seed from the prior on-level on toggle-on.
+  if (attr_name == "brightness") {
+    int raw = this->get_attr_int_(entity_idx, "brightness", -1);
+    if (raw >= 0)
+      this->entities_[entity_idx].last_bri_pct = (raw * 100 + 127) / 255;
+  }
   // Drive the pending counter ONLY on first arrival per attr. Subsequent
   // pushes (HA state change while modal still open) just refresh the cache
   // — modal stays sticky during user edit, picks up new values on next open.
@@ -1953,12 +1978,18 @@ void HAPanel::build_detail_light_(lv_obj_t *parent, size_t entity_idx) {
       (lv_style_selector_t) LV_PART_INDICATOR | LV_STATE_CHECKED);
   if (e.state == "on")
     lv_obj_add_state(this->dw_light_switch_, LV_STATE_CHECKED);
+  // E7: toggling power reveals/greys the brightness slider.
+  lv_obj_add_event_cb(this->dw_light_switch_, &HAPanel::on_detail_light_switch_,
+                      LV_EVENT_VALUE_CHANGED, this);
 
   // Brightness slider 0-100%. HA reports `brightness` 0-255; we display %.
-  int cur_pct = 100;
+  // E7: no fake 100% default. A present `brightness` (on, dimmable light) seeds
+  // the slider with the real value; when absent — off light (HA omits it),
+  // non-dimmable light (never reports it), or pre-arrival — the slider renders
+  // disabled with a "—"/"Off" placeholder rather than a misleading number.
   int b_raw = this->get_attr_int_(entity_idx, "brightness", -1);
-  if (b_raw >= 0)
-    cur_pct = (b_raw * 100 + 127) / 255;
+  this->dw_brightness_known_ = (b_raw >= 0);
+  int cur_pct = this->dw_brightness_known_ ? (b_raw * 100 + 127) / 255 : 0;
   add_section_label(parent, "Brightness", 0xFFFFFF);
   this->dw_brightness_slider_ = lv_slider_create(parent);
   lv_obj_set_width(this->dw_brightness_slider_, LV_PCT(100));
@@ -1970,7 +2001,15 @@ void HAPanel::build_detail_light_(lv_obj_t *parent, size_t entity_idx) {
                       LV_EVENT_VALUE_CHANGED, this);
   this->dw_brightness_label_ = lv_label_create(parent);
   char buf[32];
-  snprintf(buf, sizeof(buf), "%d %%", cur_pct);
+  if (this->dw_brightness_known_) {
+    snprintf(buf, sizeof(buf), "%d %%", cur_pct);
+  } else {
+    // Disable input + grey the slider, and show a non-numeric placeholder.
+    lv_obj_add_state(this->dw_brightness_slider_, LV_STATE_DISABLED);
+    lv_obj_clear_flag(this->dw_brightness_slider_, LV_OBJ_FLAG_CLICKABLE);
+    // ASCII only — built-in montserrat_18 has no em-dash glyph (see E5 note).
+    snprintf(buf, sizeof(buf), "%s", e.state == "off" ? "Off" : "--");
+  }
   lv_label_set_text(this->dw_brightness_label_, buf);
   lv_obj_set_style_text_color(this->dw_brightness_label_,
                               lv_color_hex(0xAAAAAA), 0);
@@ -2354,7 +2393,10 @@ void HAPanel::apply_detail_() {
       this->call_homeassistant_service("light.turn_off", data);
       ESP_LOGI(TAG, "apply %s → light.turn_off", e.entity_id.c_str());
     } else {
-      if (this->dw_brightness_slider_ != nullptr) {
+      // E7: only send brightness when the slider holds a real target. A
+      // disabled placeholder (non-dimmable light, or value never arrived)
+      // would otherwise push a misleading 0/100 % on a bare turn-on.
+      if (this->dw_brightness_slider_ != nullptr && this->dw_brightness_known_) {
         int v = lv_slider_get_value(this->dw_brightness_slider_);
         data["brightness_pct"] = std::to_string(v);
       }
@@ -2497,6 +2539,39 @@ void HAPanel::on_detail_bg_clicked_(lv_event_t *e) {
 
 // Slider live-update trampolines. Each just reads the slider value and
 // refreshes its companion label so the user sees the value as they drag.
+
+void HAPanel::on_detail_light_switch_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->dw_light_switch_ == nullptr ||
+      self->dw_brightness_slider_ == nullptr ||
+      self->dw_brightness_label_ == nullptr)
+    return;
+  bool on = lv_obj_has_state(self->dw_light_switch_, LV_STATE_CHECKED);
+  char buf[24];
+  if (on) {
+    // Reveal the slider as an editable target. If it didn't already hold a
+    // real value, seed from the last-known cache, else a neutral 50 %.
+    lv_obj_clear_state(self->dw_brightness_slider_, LV_STATE_DISABLED);
+    lv_obj_add_flag(self->dw_brightness_slider_, LV_OBJ_FLAG_CLICKABLE);
+    if (!self->dw_brightness_known_) {
+      int seed = 50;
+      size_t i = self->detail_entity_idx_;
+      if (i < self->entities_.size() && self->entities_[i].last_bri_pct >= 0)
+        seed = self->entities_[i].last_bri_pct;
+      lv_slider_set_value(self->dw_brightness_slider_, seed, LV_ANIM_OFF);
+      self->dw_brightness_known_ = true;
+    }
+    int v = lv_slider_get_value(self->dw_brightness_slider_);
+    snprintf(buf, sizeof(buf), "%d %%", v);
+  } else {
+    // Power off — grey the slider back to a placeholder, drop the target.
+    lv_obj_add_state(self->dw_brightness_slider_, LV_STATE_DISABLED);
+    lv_obj_clear_flag(self->dw_brightness_slider_, LV_OBJ_FLAG_CLICKABLE);
+    self->dw_brightness_known_ = false;
+    snprintf(buf, sizeof(buf), "Off");
+  }
+  lv_label_set_text(self->dw_brightness_label_, buf);
+}
 
 void HAPanel::on_detail_brightness_slider_(lv_event_t *e) {
   auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
