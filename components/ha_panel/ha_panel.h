@@ -40,11 +40,13 @@ enum class RenderClass : uint8_t {
   READ_ONLY_TEXT,   // sensor/binary_sensor/everything else → text badge
 };
 
-// E9: one captured value in a read-only entity's history ring buffer. t_ms is
-// the millis() timestamp at capture (since-boot, used for window filtering);
-// value is the parsed numeric reading, or 1/0 for a binary_sensor on/off.
+// E9: one captured value in a read-only entity's history series. t_s is a
+// timestamp in *seconds* whose origin depends on the source: uptime-seconds
+// (millis()/1000) for ring-buffer samples, UTC epoch-seconds for REST-backfilled
+// samples. redraw_history_ picks a matching "now" per mode, so only the relative
+// (now - t_s) is ever used. value is the numeric reading, or 1/0 for binary.
 struct HistorySample {
-  uint32_t t_ms;
+  uint32_t t_s;
   float value;
 };
 

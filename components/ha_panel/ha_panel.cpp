@@ -11,6 +11,7 @@
 
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "esphome/core/time.h"
 #include "esphome/core/version.h"
@@ -367,11 +368,19 @@ void HAPanel::on_state_(const std::string &entity_id, StringRef state) {
     // the chart if its sheet is currently open on this entity.
     this->record_history_(i);
     if (this->history_open_ && this->history_entity_idx_ == i) {
-      // Live tail: extend the open sheet's working set (REST-backfilled or
-      // ring-buffer) with the new value, then redraw.
+      // Live tail: extend the open sheet's working set with the new value,
+      // stamped in the same timebase as the sheet's current samples (epoch for
+      // REST mode, uptime-seconds otherwise), then redraw.
       float v;
-      if (HAPanel::state_to_value_(this->entities_[i], &v))
-        this->history_samples_.push_back({millis(), v});
+      if (HAPanel::state_to_value_(this->entities_[i], &v)) {
+        uint32_t ts = millis() / 1000u;
+        if (this->history_rest_mode_ && this->history_time_ != nullptr) {
+          auto t = this->history_time_->utcnow();
+          if (t.is_valid())
+            ts = (uint32_t) t.timestamp;
+        }
+        this->history_samples_.push_back({ts, v});
+      }
       this->redraw_history_();
     }
     return;
@@ -3085,9 +3094,9 @@ static const uint32_t HISTORY_WINDOW_S[3] = {3600u, 6u * 3600u, 24u * 3600u};
 // Cap the points fed to lv_chart so a long window decimates to ~screen width.
 static const size_t MAX_CHART_POINTS = 100;
 
-// Format an elapsed duration as a compact "-12s" / "-45m" / "-2.5h" axis label.
-static void fmt_age_(uint32_t age_ms, char *buf, size_t n) {
-  uint32_t s = (age_ms + 500u) / 1000u;
+// Format an elapsed duration (in seconds) as a compact "-12s" / "-45m" /
+// "-2.5h" axis label.
+static void fmt_age_(uint32_t s, char *buf, size_t n) {
   if (s < 90u) {
     snprintf(buf, n, "-%us", (unsigned) s);
     return;
@@ -3142,7 +3151,8 @@ void HAPanel::record_history_(size_t entity_idx) {
   float v;
   if (!HAPanel::state_to_value_(e, &v))
     return;  // skip unavailable/unknown/non-numeric transients
-  e.history.push_back({millis(), v});
+  // Ring-buffer samples are stamped in uptime-seconds (millis()/1000).
+  e.history.push_back({millis() / 1000u, v});
   if (e.history.size() > HISTORY_CAP)
     e.history.erase(e.history.begin());
 }
@@ -3324,9 +3334,18 @@ void HAPanel::redraw_history_() {
   // Current value (raw state — we don't carry the unit).
   lv_label_set_text(this->history_value_, e.has_state ? e.state.c_str() : "...");
 
-  const uint32_t now = millis();
-  const uint32_t window_ms = HISTORY_WINDOW_S[this->history_window_idx_] * 1000u;
-  const uint32_t cutoff = now > window_ms ? now - window_ms : 0u;
+  // Timeline is in seconds. "now" matches the sample origin per mode: UTC epoch
+  // for REST-backfilled data, uptime-seconds otherwise. This is what makes the
+  // axis labels honest across windows (REST oldest ≈ full window span).
+  uint32_t now;
+  if (this->history_rest_mode_ && this->history_time_ != nullptr) {
+    auto t = this->history_time_->utcnow();
+    now = t.is_valid() ? (uint32_t) t.timestamp : millis() / 1000u;
+  } else {
+    now = millis() / 1000u;
+  }
+  const uint32_t window_s = HISTORY_WINDOW_S[this->history_window_idx_];
+  const uint32_t cutoff = now > window_s ? now - window_s : 0u;
   const bool is_binary = e.domain == "binary_sensor";
 
   if (is_binary) {
@@ -3346,15 +3365,15 @@ void HAPanel::redraw_history_() {
     const int32_t strip_w = 432;
     const int32_t strip_h = 230;
     for (const auto &s : this->history_samples_) {
-      if (s.t_ms <= cutoff) {
+      if (s.t_s <= cutoff) {
         cur_val = s.value;
         have_state = true;
         continue;
       }
-      // s.t_ms in (cutoff, now]: close the band [seg_start, s.t_ms) at cur_val.
+      // s.t_s in (cutoff, now]: close the band [seg_start, s.t_s) at cur_val.
       if (have_state) {
-        float frac = (float) (s.t_ms - seg_start) / (float) window_ms;
-        int32_t x0 = (int32_t) ((float) (seg_start - cutoff) / window_ms * strip_w);
+        float frac = (float) (s.t_s - seg_start) / (float) window_s;
+        int32_t x0 = (int32_t) ((float) (seg_start - cutoff) / window_s * strip_w);
         int32_t w = (int32_t) (frac * strip_w);
         if (w > 0) {
           lv_obj_t *band = lv_obj_create(this->history_strip_);
@@ -3366,13 +3385,13 @@ void HAPanel::redraw_history_() {
           lv_obj_set_style_bg_opa(band, LV_OPA_COVER, 0);
         }
       }
-      seg_start = s.t_ms;
+      seg_start = s.t_s;
       cur_val = s.value;
       have_state = true;
     }
     // Final band from the last transition (or cutoff) up to now.
     if (have_state) {
-      int32_t x0 = (int32_t) ((float) (seg_start - cutoff) / window_ms * strip_w);
+      int32_t x0 = (int32_t) ((float) (seg_start - cutoff) / window_s * strip_w);
       int32_t w = strip_w - x0;
       if (w > 0) {
         lv_obj_t *band = lv_obj_create(this->history_strip_);
@@ -3413,9 +3432,9 @@ void HAPanel::redraw_history_() {
   std::vector<float> vals;
   uint32_t oldest_t = now;
   for (const auto &s : this->history_samples_) {
-    if (s.t_ms >= cutoff) {
+    if (s.t_s >= cutoff) {
       if (vals.empty())
-        oldest_t = s.t_ms;
+        oldest_t = s.t_s;
       vals.push_back(s.value);
     }
   }
@@ -3488,8 +3507,8 @@ void HAPanel::on_history_chip_(lv_event_t *e) {
     return;
   lv_obj_t *chip = lv_event_get_target_obj(e);
   size_t idx = (size_t) (uintptr_t) lv_obj_get_user_data(chip);
-  if (idx > 2)
-    return;
+  if (idx > 2 || idx == self->history_window_idx_)
+    return;  // re-tapping the active window would needlessly re-fetch
   self->history_window_idx_ = (uint8_t) idx;
   // REST mode re-fetches the new span; ring-buffer mode just re-windows the
   // copy it already holds (load_history_samples_ re-copies — cheap).
@@ -3584,27 +3603,34 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
     return false;
   }
 
-  // Read the body fully, bounded — a runaway response falls back to the ring
-  // buffer rather than exhausting heap.
-  static const size_t BODY_CAP = 48u * 1024u;
-  std::string body;
-  if (container->content_length > 0 && container->content_length < BODY_CAP)
-    body.reserve(container->content_length);
-  uint8_t buf[512];
+  // Read the body fully into a PSRAM buffer. Internal heap fragments fast under
+  // repeated fetches, so a big std::string there would (and did) abort with
+  // bad_alloc; PSRAM has megabytes to spare. Bounded so a runaway response
+  // falls back to the ring buffer instead of eating RAM.
+  static const size_t BODY_CAP = 128u * 1024u;
+  RAMAllocator<uint8_t> alloc(RAMAllocator<uint8_t>::ALLOC_EXTERNAL);
+  uint8_t *body = alloc.allocate(BODY_CAP);
+  if (body == nullptr) {
+    ESP_LOGW(TAG, "history: could not allocate %u B body buffer",
+             (unsigned) BODY_CAP);
+    container->end();
+    return false;
+  }
+  size_t blen = 0;
   uint32_t last = millis();
   bool read_ok = true;
   while (true) {
-    int r = container->read(buf, sizeof(buf));
+    int r = container->read(body + blen, BODY_CAP - blen);
     App.feed_wdt();
     yield();
     if (r > 0) {
-      if (body.size() + (size_t) r > BODY_CAP) {
+      blen += (size_t) r;
+      last = millis();
+      if (blen >= BODY_CAP) {
         ESP_LOGW(TAG, "history: response exceeds %u B cap", (unsigned) BODY_CAP);
         read_ok = false;
         break;
       }
-      body.append((const char *) buf, (size_t) r);
-      last = millis();
       continue;
     }
     if (r < 0) {
@@ -3622,13 +3648,17 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
     delay(1);
   }
   container->end();
-  if (!read_ok)
+  container.reset();  // free the HTTP/socket buffers before the JSON parse
+  if (!read_ok) {
+    alloc.deallocate(body, BODY_CAP);
     return false;
+  }
 
   // Response: [ [ {state,last_changed}, ... ] ] — one inner array per entity.
-  JsonDocument doc = json::parse_json(body);
+  JsonDocument doc = json::parse_json(body, blen);
+  alloc.deallocate(body, BODY_CAP);  // doc copied what it needs (PSRAM-backed)
   if (doc.isNull()) {
-    ESP_LOGW(TAG, "history: JSON parse failed (%u B)", (unsigned) body.size());
+    ESP_LOGW(TAG, "history: JSON parse failed (%u B)", (unsigned) blen);
     return false;
   }
   JsonArray outer = doc.as<JsonArray>();
@@ -3641,7 +3671,6 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
     return false;
 
   const bool is_binary = e.domain == "binary_sensor";
-  const uint32_t now_ms = millis();
   this->history_samples_.clear();
   for (JsonObject pt : series) {
     const char *state = pt["state"] | "";
@@ -3667,16 +3696,13 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
     int64_t ep;
     if (!HAPanel::iso_to_epoch_(ts, &ep))
       continue;
-    // Map the absolute timestamp onto this device's millis() timeline so the
-    // chart, cutoff filter and time labels stay uniform with the live tail.
-    int64_t t_ms = (int64_t) now_ms - (now_epoch - ep) * 1000;
-    if (t_ms < 0)
-      t_ms = 0;
-    this->history_samples_.push_back({(uint32_t) t_ms, v});
+    // Store UTC epoch-seconds directly; redraw_history_ uses the live HA clock
+    // as "now" in REST mode, so ages/spans are correct regardless of uptime.
+    this->history_samples_.push_back({(uint32_t) ep, v});
   }
   ESP_LOGI(TAG, "history: %u points for %s (%u B)",
            (unsigned) this->history_samples_.size(), e.entity_id.c_str(),
-           (unsigned) body.size());
+           (unsigned) blen);
   return !this->history_samples_.empty();
 }
 
