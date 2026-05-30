@@ -18,7 +18,8 @@
       "Bash(timeout 280 esphome config ha-amoled-panel.yaml)",
       "Bash(echo \"exit=$?\")",
       "Bash(ls *.yaml)",
-      "Bash(python -m esphome version)"
+      "Bash(python -m esphome version)",
+      "Bash(git log *)"
     ]
   }
 }
