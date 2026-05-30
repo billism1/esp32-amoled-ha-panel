@@ -1,9 +1,9 @@
 # Build Plan — UI enhancements (post-MVP)
 
-> ⚠️ **PLACEHOLDER.** This document is a stub. Structure is in place so it can
-> be filled in later; the sections below are intentionally empty. Nothing here
-> is committed scope yet — capture ideas, then promote them into phases with
-> exit criteria when the work is actually picked up.
+Three scoped UI improvements on top of the shipped MVP panel: a persistent
+bottom navigation bar (with settings moved into an overlay sheet), richer
+Wi-Fi / Home Assistant connection-status indicators, and a fix for the area
+title overrunning its dropdown chevron.
 
 Sibling plans: [plan-mvp.md](plan-mvp.md) (shipped baseline) ·
 [plan-multi-board-support.md](plan-multi-board-support.md) ·
@@ -15,56 +15,307 @@ Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha
 
 ## Goal
 
-_TBD — one-paragraph statement of what "enhanced UI" means and why it's worth
-doing on top of the MVP panel._
+Make navigation explicit and discoverable instead of swipe-only, and make the
+header status icons tell the truth during the connection transitions that
+happen on every sleep/wake cycle. All three changes are UI-layer only — no new
+HA subscriptions, no board/hardware changes, no power-state changes.
 
 ---
 
 ## Motivation / context
 
-_TBD — what's rough about the MVP UI today; user pain points observed
-on-device; which interactions feel unfinished._
+- **Nav is swipe-only.** Areas are `lv_tileview` columns; the only deliberate
+  way to change area is a horizontal swipe or the top dropdown picker. There's
+  no visible affordance that says "you can move between areas," and no
+  one-tap step control. Settings lives at the far end of the carousel
+  ([build_settings_tile_](components/ha_panel/ha_panel.cpp#L646)) plus a row in
+  the picker, which mixes a config screen into the area carousel.
+- **Status icons lie during reconnect.** P8 sleep drops Wi-Fi
+  (`wifi.disable`) on sleep-enter and brings it back on wake. During that
+  window the Wi-Fi icon holds its last RSSI tint and the HA status dot is just
+  red — neither communicates "re-establishing." The user sees a red dot on
+  every wake with no signal that the panel is actively reconnecting.
+  Status dot is binary red/green ([update_status_dot_](components/ha_panel/ha_panel.cpp#L1081));
+  Wi-Fi icon is RSSI-tinted with no connecting state ([update_wifi_icon_](components/ha_panel/ha_panel.cpp#L1228)).
+- **Long area names overrun the chevron.** The dropdown chevron is positioned
+  once at build via `lv_obj_align_to(... OUT_RIGHT_MID)` ([ha_panel.cpp:860](components/ha_panel/ha_panel.cpp#L860))
+  and the area label has no width cap or ellipsis. When the active area changes
+  to a long name the label grows but the chevron doesn't reposition, so the
+  text runs over the arrow.
+- **Cover detail modal hides the state you already saw.** The area-row cover
+  badge shows `Entity::state` (open/closed/opening/closing) from the state
+  subscription. The cover detail modal ([build_detail_cover_](components/ha_panel/ha_panel.cpp#L2028))
+  shows only Open/Stop/Close + a position slider gated on the `current_position`
+  *attribute*. A cover that reports open/closed but no position percentage
+  (e.g. a ratgdo garage door) falls into the `cur_pos < 0` branch and renders a
+  bare "Position not reported" ([ha_panel.cpp:2065](components/ha_panel/ha_panel.cpp#L2065))
+  — technically true (no percentage) but confusing, because the open/closed
+  state is already in the model and never shown in the modal.
 
 ---
 
 ## Candidate enhancements (parking lot)
 
-_Unprioritised list. Promote items into phases below as they firm up._
+All three below are promoted to phases. Future ideas land here first.
 
-- [ ] _TBD_
-- [ ] _TBD_
-- [ ] _TBD_
+- [x] Bottom nav bar + settings overlay sheet → **E1**
+- [x] Wi-Fi / HA connecting-state indicators → **E2**
+- [x] Area-label chevron overlap fix → **E3**
+- [x] Cover detail modal: show current state → **E4**
 
 ---
 
 ## Phases
 
-_Each enhancement becomes a phase with the same shape as the MVP plan:
-Status / Goal / Tasks / Exit criteria / Risks. Add them here as they're scoped._
+### Phase E1 — Bottom navigation bar + settings sheet
 
-### Phase E1 — _TBD_
+**Status:** ⬜ not started · target tag: `e1-bottom-nav`
 
-**Status:** ⬜ not started · target tag: `_TBD_`
+**Goal:** A persistent bottom bar with left/right area-step arrows and a center
+settings gear. Settings moves out of the area carousel into an overlay sheet.
+The top area dropdown stays; the carousel swipe stays. Settings is removed from
+both the carousel and the area picker.
 
-**Goal:** _TBD_
+#### Layout
+
+- New bottom bar, full width, ~48 px tall, at **y = 432–480**. The tileview
+  shrinks from 440 → **392 px** (y = 40–432). The bar sits over the bottom
+  rounded-corner zone, so the entity list's bottom padding can drop from 28 px
+  → ~8 px (the list now ends at 432, well above the corner curve).
+- Three controls on the bar:
+  - `◀` left arrow — `LV_ALIGN_LEFT_MID, +44, 0` (44 px corner inset, same
+    rule as the header).
+  - `⚙` gear — `LV_ALIGN_CENTER`.
+  - `▶` right arrow — `LV_ALIGN_RIGHT_MID, -44, 0`.
+- Arrow + gear are `lv_button`s (~56 px wide touch targets) with the same
+  `LV_STATE_PRESSED` feedback used elsewhere.
+
+#### Arrow behaviour
+
+- Arrows step the active area by ±1 via programmatic
+  `lv_obj_set_tile(tileview, tile, LV_ANIM_ON)` (programmatic tile-set is not
+  bound by the per-tile `LV_DIR_*` swipe constraints, so this works for any
+  jump). **Wrap-around:** left arrow on the first area jumps to the last; right
+  arrow on the last jumps to the first. No dead taps, no greyed states.
+- Horizontal swipe between areas is retained — arrows are additive, not a
+  replacement.
+
+#### Settings → overlay sheet
+
+- Settings stops being a tileview tile. Rebuild it as a **full-screen overlay
+  sheet** matching the existing `detail_modal_` / `confirm_sheet_` pattern:
+  built once at setup, hidden by default, `lv_obj_move_foreground` on open.
+- The gear button opens the sheet. The current settings content — brightness
+  slider, idle-timeout summary, Power-saving section (P8 toggle + mode
+  dropdown), About block, and the Apply/Cancel row — lifts over essentially
+  unchanged from [build_settings_tile_](components/ha_panel/ha_panel.cpp#L646).
+- **Apply** → commit (brightness + sleep settings) **then close** the sheet.
+  **Cancel** and **background tap** → revert **then close**. (Today Apply/Cancel
+  only commit/revert and leave you on the tile; E1 adds the close.)
+- The staged/dirty + revert-on-navigate-away machinery
+  (`apply_brightness_`/`revert_brightness_`/`apply_sleep_`/`revert_sleep_`)
+  is preserved; the trigger to revert changes from "tileview navigated away
+  from settings tile" to "sheet closed without Apply."
+
+#### Removals
+
+- Drop the settings tile from the tileview build loop →
+  `total_cols` = `areas_.size()` (no `+1`). The "settings is last tile" wiring
+  in [build_ui_](components/ha_panel/ha_panel.cpp#L955), `settings_tile_`, and
+  `is_settings_active_()` retarget to the sheet's open/close state.
+- Remove the `LV_SYMBOL_SETTINGS "  Settings"` row from the area picker
+  ([ha_panel.cpp:1014](components/ha_panel/ha_panel.cpp#L1014)). The picker
+  becomes areas-only.
 
 Tasks:
-- [ ] _TBD_
+- [ ] Add bottom-bar container + three buttons in `build_ui_`; resize tileview
+      to 392 px; reduce entity-list bottom padding.
+- [ ] `step_area_(int delta)` helper with wrap-around; wire to the two arrows.
+- [ ] Convert `build_settings_tile_` → `build_settings_sheet_` overlay; add
+      `open_settings_`/`close_settings_`; gear button opens it.
+- [ ] Apply/Cancel/bg-tap close the sheet; rewire the revert trigger off the
+      tileview-change path onto sheet close.
+- [ ] Remove the settings tile from the carousel and the Settings row from the
+      picker; fix `total_cols`, `is_settings_active_`, `on_tileview_changed_`.
 
-**Exit criteria:** _TBD_
+**Exit criteria:**
+- Bottom bar visible on every area; `◀`/`▶` step areas with wrap-around;
+  swipe still works.
+- Gear opens the settings sheet; Apply commits and closes; Cancel and bg-tap
+  revert and close.
+- Area carousel contains only areas (no settings tile); area picker lists only
+  areas (no Settings row); top dropdown still opens the picker.
 
 **Risks / unknowns:**
-- _TBD_
+- Bottom-bar arrow buttons sit near the bottom rounded corners; 44 px inset
+  should clear them but verify on-device (corner radius bites less at the
+  bottom per P7a notes).
+- Moving settings out of the tileview touches the revert-on-navigate logic in
+  `on_tileview_changed_`; confirm no orphaned dirty state after the refactor.
+
+---
+
+### Phase E2 — Connection status indicators (Wi-Fi + HA)
+
+**Status:** ⬜ not started · target tag: `e2-status`
+
+**Goal:** The Wi-Fi icon and HA status dot show a distinct "connecting /
+re-establishing" state instead of going stale or showing a bare red dot during
+the reconnect that happens on every sleep/wake cycle.
+
+#### Three states derived from `(wifi_connected, api_connected)`
+
+- Feed Wi-Fi link state into the panel: add `wifi:` `on_connect` /
+  `on_disconnect` triggers in [base.yaml](packages/base.yaml) calling a new
+  `HAPanel::set_wifi_connected(bool)`. ESPHome auto-reconnects after a drop, so
+  "disconnected" is treated as "connecting."
+- **Wi-Fi icon:**
+  - connected → RSSI-bucket tint (today's behaviour, [update_wifi_icon_](components/ha_panel/ha_panel.cpp#L1228)).
+  - connecting → **amber, blinking**.
+  - down → red.
+- **HA status dot:**
+  - api connected → green (today).
+  - wifi up but API not yet connected → **amber, blinking** ("link not yet
+    re-established"). Note the device is the API *server* and HA is the client,
+    so this is "waiting for the link to come back," which amber communicates
+    honestly.
+  - wifi down → red (can't even attempt the HA link yet).
+
+#### Blink
+
+- One shared LVGL `lv_timer` at ~500 ms toggles a `blink_on_` bool and
+  refreshes any indicator currently in a pending (amber) state. Stable states
+  (green / red / RSSI tint) don't animate.
+- Fallback: if blink misbehaves on-device, drop to solid amber — same colour,
+  no timer. Low risk either way.
+
+#### Wake scenario this fixes
+
+On light-sleep wake (P8): `wifi.disable` fires `on_disconnect` → both
+indicators go amber-blink; `wifi.enable` + reassociate fires `on_connect` →
+Wi-Fi icon returns to RSSI tint; HA client reconnects → dot goes green. The
+user now sees an active "reconnecting" animation instead of a stale icon + red
+dot.
+
+Tasks:
+- [ ] `set_wifi_connected(bool)` + `wifi_connected_` member; wire
+      `on_connect`/`on_disconnect` in `base.yaml`.
+- [ ] Rework `update_wifi_icon_` and `update_status_dot_` to the 3-state model.
+- [ ] Shared 500 ms blink `lv_timer` refreshing pending indicators.
+
+**Exit criteria:**
+- After sleep/wake, the Wi-Fi icon blinks amber while reassociating, then
+  returns to an RSSI tint once connected.
+- The HA dot blinks amber while the API link is re-establishing, goes green on
+  connect, and shows red only when Wi-Fi itself is down.
+- No blink (solid states) when connection is stable.
+
+**Risks / unknowns:**
+- An `lv_timer` running continuously is cheap, but confirm it doesn't keep the
+  device out of any idle/sleep path (it shouldn't — sleep tears down LVGL
+  rendering anyway).
+- Verify `on_disconnect`/`on_connect` fire cleanly around `wifi.disable`/
+  `wifi.enable` and not just on real RF drops.
+
+---
+
+### Phase E3 — Area-label chevron overlap fix
+
+**Status:** ⬜ not started · target tag: `e3-header-chevron`
+
+**Goal:** Long area names never run over the dropdown chevron.
+
+**Approach:** Wrap the area-name label and the chevron in a centered horizontal
+flex container. Cap the label width to the span between the clock (left) and
+the right-hand icon cluster, and enable `LV_LABEL_LONG_DOTS` ellipsis. The
+chevron is laid out by the flex container immediately to the right of the
+(possibly truncated) label, so it repositions automatically on every area
+change and is never overlapped. A long name renders as `Living Roo…  ▼`.
+
+This replaces the one-shot `lv_obj_align_to` ([ha_panel.cpp:860](components/ha_panel/ha_panel.cpp#L860)),
+which only positioned the chevron at build time and never re-ran when the label
+text changed.
+
+Tasks:
+- [ ] Centered flex row containing label + chevron in the header.
+- [ ] Label width cap + `LV_LABEL_LONG_DOTS`.
+- [ ] Remove the build-time `align_to` chevron positioning.
+
+**Exit criteria:**
+- With the longest configured area name selected, the chevron is fully visible
+  and the name ellipsizes rather than overrunning it.
+- Short names still center cleanly with the chevron tight to their right.
+
+**Risks / unknowns:**
+- The available center span depends on clock width (left) and the
+  Wi-Fi/battery/dot cluster (right); pick the cap so the worst-case clock
+  ("12:00 pm") and the icon cluster don't collide with the label box.
+
+---
+
+### Phase E4 — Cover detail modal: show current state
+
+**Status:** ⬜ not started · target tag: `e4-cover-state`
+
+**Goal:** The cover detail modal shows the cover's current open/closed state, so
+a cover that doesn't report a position percentage no longer reads as a bare
+"Position not reported."
+
+**Root cause:** state ≠ position. `Entity::state` (open/closed/opening/closing)
+arrives on the state subscription and is shown in the area row. The
+`current_position` *attribute* (0–100 %) is separate and many covers — e.g. a
+ratgdo garage door — never report it. The modal gates its position slider on
+that attribute and, when absent, shows only "Position not reported," never the
+state the user already saw.
+
+**Approach (zero new subscriptions — `Entity::state` is already populated):**
+- Add a current-state line at the top of [build_detail_cover_](components/ha_panel/ha_panel.cpp#L2028):
+  `Currently: Open` / `Closed` / `Opening…` / `Closing…`, sourced from
+  `Entity::state`, with the same colour cue as the area-row cover badge
+  (green = open, grey = closed, italic/neutral for the transient states).
+- Keep the position slider gated on `current_position`. Replace the standalone
+  "Position not reported" label ([ha_panel.cpp:2065](components/ha_panel/ha_panel.cpp#L2065))
+  with the state line — for an open/closed-only cover the transport buttons +
+  state line are the whole interface, so the confusing note is gone. Render the
+  "Position" section + slider only when `current_position` is present.
+- Mirror the same state line under the title in the cover **confirm sheet**
+  ([open_confirm_action_ cover branch](components/ha_panel/ha_panel.cpp#L2576))
+  for consistency. (Optional within this phase; same data, no extra cost.)
+
+Tasks:
+- [ ] State-line helper that maps cover `Entity::state` → label text + colour.
+- [ ] Add it to the top of `build_detail_cover_`; drop the bare "Position not
+      reported" branch; keep the slider gated on `current_position`.
+- [ ] Mirror the state line under the cover confirm-sheet title.
+
+**Exit criteria:**
+- Opening the detail modal for a position-less cover shows its open/closed
+  state at the top and no "Position not reported" text.
+- A cover that *does* report `current_position` still shows the position slider,
+  now under the state line.
+- The cover confirm sheet shows the current state under the title.
+
+**Risks / unknowns:**
+- Transient states (`opening`/`closing`) update only on the next state
+  callback; the line refreshes whenever the modal is (re)opened, which is
+  enough — no need to live-update an open modal for v1.
 
 ---
 
 ## Open decisions
 
-_TBD — questions to resolve before/while building these enhancements._
+- None outstanding. (Resolved: arrows wrap around; connecting state blinks
+  amber with a solid-amber fallback.)
 
 ---
 
 ## Out-of-scope
 
-_TBD — explicitly list what these UI enhancements will NOT cover, to keep
-scope honest._
+- No new HA entity subscriptions or attribute fetches (keeps the connect-time
+  TX budget clean — see the P7e/P7d TX-saturation lesson in plan-mvp.md).
+- No power-state / sleep-timer changes — E2 only re-reads connection state, it
+  doesn't alter when the device sleeps or wakes.
+- No board / pin / driver changes; all three phases are LVGL + YAML wiring.
+- No redesign of the settings *content* (brightness/timeouts/power/about) — E1
+  only relocates it from a tile to a sheet.
+- Battery-icon behaviour is unchanged.
