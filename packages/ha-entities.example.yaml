@@ -48,6 +48,16 @@ ha_panel:
   mdi_font: mdi_icons             # P7e: font id from packages/mdi-font.yaml (icon column)
   mdi_font_medium: mdi_icons_36   # E8: crisp icons for size: medium rows
   mdi_font_large: mdi_icons_48    # E8: crisp icons for size: large rows
+  # E9: OPTIONAL — REST history backfill for the sensor history chart sheet.
+  # Omit this whole block and the chart shows only in-device since-boot samples.
+  # With it, tapping a numeric sensor / binary_sensor backfills the full window
+  # from HA. Requires a long-lived access token (HA → Profile → Security) in
+  # secrets.yaml as `ha_history_token`, plus `ha_url` (your HA base URL).
+  # history:
+  #   http_request_id: ha_http    # http_request component id from packages/base.yaml
+  #   time_id: ha_time            # time component id from packages/base.yaml
+  #   base_url: !secret ha_url
+  #   token: !secret ha_history_token
   pages:
     - name: "Living Room"
       entities:

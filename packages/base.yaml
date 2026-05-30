@@ -57,6 +57,17 @@ ota:
   - platform: esphome
     password: !secret ota_password
 
+# E9: REST client for the entity history chart's backfill. ha_panel issues a
+# blocking GET /api/history/period/... against the HA base URL when a history
+# token is configured; absent the token the chart degrades to the in-device
+# ring buffer and this client is simply never called. verify_ssl off so an
+# https HA URL works without baking a CA bundle (LAN use).
+http_request:
+  id: ha_http
+  useragent: esphome/ha-amoled-panel
+  timeout: 8s
+  verify_ssl: false
+
 # HA time source so later phases (RTC sync in P7, idle timers) have UTC.
 time:
   - platform: homeassistant
