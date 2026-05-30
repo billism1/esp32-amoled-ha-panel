@@ -11,7 +11,10 @@
       "Bash(python -m esphome compile ha-amoled-panel.yaml)",
       "Bash(tee .esphome/p7e-build.log)",
       "Bash(echo \"ESPHOME_EXIT=$?\")",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(ls *.yaml packages/)",
+      "Bash(which esphome *)",
+      "Bash(python -c \"import esphome; print\\('esphome', esphome.__version__\\)\")"
     ]
   }
 }

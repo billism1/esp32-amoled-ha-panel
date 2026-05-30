@@ -69,7 +69,7 @@ All three below are promoted to phases. Future ideas land here first.
 
 ### Phase E1 — Bottom navigation bar + settings sheet
 
-**Status:** ⬜ not started · target tag: `e1-bottom-nav`
+**Status:** ✅ done · target tag: `e1-bottom-nav`
 
 **Goal:** A persistent bottom bar with left/right area-step arrows and a center
 settings gear. Settings moves out of the area carousel into an overlay sheet.
@@ -128,14 +128,14 @@ both the carousel and the area picker.
   becomes areas-only.
 
 Tasks:
-- [ ] Add bottom-bar container + three buttons in `build_ui_`; resize tileview
+- [x] Add bottom-bar container + three buttons in `build_ui_`; resize tileview
       to 392 px; reduce entity-list bottom padding.
-- [ ] `step_area_(int delta)` helper with wrap-around; wire to the two arrows.
-- [ ] Convert `build_settings_tile_` → `build_settings_sheet_` overlay; add
+- [x] `step_area_(int delta)` helper with wrap-around; wire to the two arrows.
+- [x] Convert `build_settings_tile_` → `build_settings_sheet_` overlay; add
       `open_settings_`/`close_settings_`; gear button opens it.
-- [ ] Apply/Cancel/bg-tap close the sheet; rewire the revert trigger off the
+- [x] Apply/Cancel/bg-tap close the sheet; rewire the revert trigger off the
       tileview-change path onto sheet close.
-- [ ] Remove the settings tile from the carousel and the Settings row from the
+- [x] Remove the settings tile from the carousel and the Settings row from the
       picker; fix `total_cols`, `is_settings_active_`, `on_tileview_changed_`.
 
 **Exit criteria:**

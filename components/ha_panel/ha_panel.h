@@ -143,7 +143,13 @@ class HAPanel : public Component, public api::CustomAPIDevice {
 
   // LVGL build + helpers.
   void build_ui_();
-  void build_settings_tile_(lv_obj_t *parent);
+  // E1: settings is a full-screen overlay sheet (built once, hidden), not a
+  // tileview tile. Same pattern as detail_modal_ / confirm_sheet_.
+  void build_settings_sheet_(lv_obj_t *scr);
+  void open_settings_();
+  void close_settings_();
+  // E1: step the active area by ±1 with wrap-around (bottom-bar arrows).
+  void step_area_(int delta);
   // P7c: dispatches on Entity::render_class to update the right child widget.
   void rebuild_entity_row_(size_t entity_idx);
   void open_picker_();
@@ -203,6 +209,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_brightness_slider_(lv_event_t *e);
   static void on_apply_clicked_(lv_event_t *e);
   static void on_cancel_clicked_(lv_event_t *e);
+  // E1: settings bg-tap (revert + close) and bottom-bar controls.
+  static void on_settings_bg_clicked_(lv_event_t *e);
+  static void on_nav_left_(lv_event_t *e);
+  static void on_nav_right_(lv_event_t *e);
+  static void on_gear_clicked_(lv_event_t *e);
   // P8 sleep controls.
   static void on_sleep_switch_(lv_event_t *e);
   static void on_sleep_mode_dropdown_(lv_event_t *e);
@@ -248,7 +259,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *tileview_{nullptr};
   lv_obj_t *picker_{nullptr};
   lv_obj_t *splash_{nullptr};
-  lv_obj_t *settings_tile_{nullptr};
+  // E1: settings overlay sheet (was a tileview tile). settings_open_ tracks
+  // visibility; the revert-on-close trigger replaces the old
+  // revert-on-navigate-away-from-tile path.
+  lv_obj_t *settings_sheet_{nullptr};
+  bool settings_open_{false};
   lv_obj_t *brightness_slider_{nullptr};
   lv_obj_t *brightness_value_label_{nullptr};
   // P8 settings-tile sleep controls.

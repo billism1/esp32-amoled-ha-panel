@@ -643,14 +643,31 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
   return btn;
 }
 
-void HAPanel::build_settings_tile_(lv_obj_t *parent) {
-  // Scrollable content area occupies the top portion of the tile. Apply/
-  // Cancel sit in a fixed 60 px row at the bottom (drawn after this block).
-  // Content height = 440 (tile) - 60 (button row) - 8 (gap above buttons).
+void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
+  // E1: full-screen overlay sheet (built once, hidden) replacing the old
+  // settings tileview tile. Same lifecycle as detail_modal_ / confirm_sheet_:
+  // opened by the bottom-bar gear, closed on Apply / Cancel / bg-tap.
+  this->settings_sheet_ = lv_obj_create(scr);
+  lv_obj_remove_style_all(this->settings_sheet_);
+  lv_obj_set_size(this->settings_sheet_, 480, 480);
+  lv_obj_set_pos(this->settings_sheet_, 0, 0);
+  lv_obj_set_style_bg_color(this->settings_sheet_, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(this->settings_sheet_, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(this->settings_sheet_, 0, 0);
+  lv_obj_set_style_border_width(this->settings_sheet_, 0, 0);
+  lv_obj_add_flag(this->settings_sheet_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(this->settings_sheet_, LV_OBJ_FLAG_CLICKABLE);
+  // Bg tap (on the sheet itself, not a child) = revert + close.
+  lv_obj_add_event_cb(this->settings_sheet_, &HAPanel::on_settings_bg_clicked_,
+                      LV_EVENT_CLICKED, this);
+  lv_obj_t *parent = this->settings_sheet_;
+
+  // Scrollable content area below the rounded top corner; Apply/Cancel sit in a
+  // fixed 60 px row at the bottom (drawn after this block).
   lv_obj_t *content = lv_obj_create(parent);
   lv_obj_remove_style_all(content);
-  lv_obj_set_size(content, 480, 372);
-  lv_obj_set_pos(content, 0, 0);
+  lv_obj_set_size(content, 480, 356);
+  lv_obj_set_pos(content, 0, 40);
   lv_obj_set_style_bg_color(content, lv_color_hex(0x000000), 0);
   lv_obj_set_style_bg_opa(content, LV_OPA_COVER, 0);
   // 16 px side padding because the settings labels run nearly edge-to-edge;
@@ -760,14 +777,13 @@ void HAPanel::build_settings_tile_(lv_obj_t *parent) {
   lv_obj_set_style_text_font(about, &lv_font_montserrat_18, 0);
 
   // ---- Apply / Cancel button row (P7b) ----
-  // Sits below the scrolling content, above the bottom rounded corner.
-  // Tile is 480x440; button row 60 px tall at y=380 → 0 px bottom inset still
-  // safe because buttons are inset 32 px horizontally on each side and the
-  // panel's bottom-corner radius bites less than the side radius.
+  // Sits below the scrolling content, above the bottom rounded corner. Same
+  // y=396 geometry as the detail / confirm sheets. Buttons are inset 32 px
+  // horizontally so the panel's bottom-corner radius doesn't clip them.
   lv_obj_t *btn_row = lv_obj_create(parent);
   lv_obj_remove_style_all(btn_row);
   lv_obj_set_size(btn_row, 480, 60);
-  lv_obj_set_pos(btn_row, 0, 380);
+  lv_obj_set_pos(btn_row, 0, 396);
   lv_obj_set_style_bg_color(btn_row, lv_color_hex(0x000000), 0);
   lv_obj_set_style_bg_opa(btn_row, LV_OPA_COVER, 0);
   lv_obj_set_style_pad_left(btn_row, 32, 0);
@@ -887,10 +903,11 @@ void HAPanel::build_ui_() {
   lv_obj_align_to(this->wifi_icon_, this->battery_icon_, LV_ALIGN_OUT_LEFT_MID,
                   -12, 0);
 
-  // ---- Tileview (rest of screen) ----
+  // ---- Tileview (between header and bottom nav bar) ----
+  // E1: shrunk 440 → 392 px (y = 40–432) to make room for the 48 px bottom bar.
   this->tileview_ = lv_tileview_create(scr);
   lv_obj_remove_style_all(this->tileview_);
-  lv_obj_set_size(this->tileview_, 480, 440);
+  lv_obj_set_size(this->tileview_, 480, 392);
   lv_obj_set_pos(this->tileview_, 0, 40);
   lv_obj_set_style_bg_color(this->tileview_, lv_color_hex(0x000000), 0);
   lv_obj_set_style_bg_opa(this->tileview_, LV_OPA_COVER, 0);
@@ -899,27 +916,30 @@ void HAPanel::build_ui_() {
                       LV_EVENT_VALUE_CHANGED, this);
 
   this->tile_objs_.reserve(this->areas_.size());
-  // Total cols = areas_.size() + 1 (settings tile appended at end).
-  const uint8_t total_cols = (uint8_t)(this->areas_.size() + 1);
+  // E1: settings is no longer a tile — tiles = areas only.
   for (size_t ai = 0; ai < this->areas_.size(); ai++) {
+    // E1: with settings gone, the last area is the right boundary (no swipe
+    // past it). First area is the left boundary; middle areas swipe both ways.
     lv_dir_t dir = LV_DIR_HOR;
     if (ai == 0)
-      dir = LV_DIR_RIGHT;
+      dir = (this->areas_.size() == 1) ? (lv_dir_t) LV_DIR_NONE : LV_DIR_RIGHT;
+    else if (ai == this->areas_.size() - 1)
+      dir = LV_DIR_LEFT;
     lv_obj_t *tile = lv_tileview_add_tile(this->tileview_, (uint8_t) ai, 0, dir);
     lv_obj_set_style_pad_all(tile, 0, 0);
     this->tile_objs_.push_back(tile);
 
     lv_obj_t *list = lv_obj_create(tile);
     lv_obj_remove_style_all(list);
-    lv_obj_set_size(list, 480, 440);
+    lv_obj_set_size(list, 480, 392);
     lv_obj_set_style_bg_color(list, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
     // 8 px side padding is enough — entity rows already inset their text by
     // 12 px more, so the side rounded corners don't bite into the row text.
     lv_obj_set_style_pad_all(list, 8, 0);
-    // Bottom needs more (28 px) so the last entity row clears the bottom
-    // rounded corners (~16 px panel inset + a little visual breathing room).
-    lv_obj_set_style_pad_bottom(list, 28, 0);
+    // E1: the bottom bar now covers the corner zone, so the list ends at 432
+    // (well above the curve) — bottom padding drops 28 → 8 px.
+    lv_obj_set_style_pad_bottom(list, 8, 0);
     lv_obj_set_style_pad_row(list, 4, 0);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
@@ -952,11 +972,47 @@ void HAPanel::build_ui_() {
       this->rebuild_entity_row_(ei);
     }
   }
-  // Settings tile (last col). LV_DIR_LEFT only — can't scroll right past it.
-  this->settings_tile_ = lv_tileview_add_tile(this->tileview_, (uint8_t)(total_cols - 1),
-                                              0, LV_DIR_LEFT);
-  lv_obj_set_style_pad_all(this->settings_tile_, 0, 0);
-  this->build_settings_tile_(this->settings_tile_);
+  // ---- E1: bottom navigation bar (y = 432–480, 48 px) ----
+  // Persistent across all areas: ◀ area-step / ⚙ settings / ▶ area-step.
+  lv_obj_t *navbar = lv_obj_create(scr);
+  lv_obj_remove_style_all(navbar);
+  lv_obj_set_size(navbar, 480, 48);
+  lv_obj_set_pos(navbar, 0, 432);
+  lv_obj_set_style_bg_color(navbar, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(navbar, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(navbar, 0, 0);
+  lv_obj_set_style_border_width(navbar, 0, 0);
+  lv_obj_clear_flag(navbar, LV_OBJ_FLAG_SCROLLABLE);
+
+  // Shared button styling: 56 px touch target, pressed-state feedback like the
+  // rest of the panel, transparent fill so only the glyph shows.
+  struct {
+    const char *glyph;
+    lv_align_t align;
+    int32_t x_ofs;
+    lv_event_cb_t cb;
+  } nav_btns[] = {
+      {LV_SYMBOL_LEFT, LV_ALIGN_LEFT_MID, 44, &HAPanel::on_nav_left_},
+      {LV_SYMBOL_SETTINGS, LV_ALIGN_CENTER, 0, &HAPanel::on_gear_clicked_},
+      {LV_SYMBOL_RIGHT, LV_ALIGN_RIGHT_MID, -44, &HAPanel::on_nav_right_},
+  };
+  for (auto &nb : nav_btns) {
+    lv_obj_t *btn = lv_button_create(navbar);
+    lv_obj_set_size(btn, 56, 44);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2E3640), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_align(btn, nb.align, nb.x_ofs, 0);
+    lv_obj_add_event_cb(btn, nb.cb, LV_EVENT_CLICKED, this);
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, nb.glyph);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+    lv_obj_center(lbl);
+  }
 
   // ---- Area picker (full-screen modal, hidden until header tapped) ----
   this->picker_ = lv_obj_create(scr);
@@ -1010,32 +1066,16 @@ void HAPanel::build_ui_() {
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
     lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
   }
-  // Settings entry in picker so user can jump straight to it.
-  {
-    lv_obj_t *row = lv_button_create(plist);
-    lv_obj_set_width(row, LV_PCT(100));
-    lv_obj_set_height(row, 56);
-    lv_obj_set_style_bg_color(row, lv_color_hex(0x222A33), 0);
-    lv_obj_set_style_bg_color(row, lv_color_hex(0x3A4A6A), LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(row, 8, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_style_pad_all(row, 0, 0);
-    lv_obj_set_user_data(row, (void *) (uintptr_t)(total_cols - 1));
-    lv_obj_add_event_cb(row, &HAPanel::on_picker_row_clicked_, LV_EVENT_CLICKED, this);
-
-    lv_obj_t *lbl = lv_label_create(row);
-    lv_label_set_text(lbl, LV_SYMBOL_SETTINGS "  Settings");
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
-    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
-  }
+  // E1: the picker lists areas only — Settings moved to the bottom-bar gear.
 
   // ---- P7d detail modal (built once, hidden) ----
   this->build_detail_modal_(scr);
 
   // ---- P7f action confirm sheet (built once, hidden) ----
   this->build_confirm_sheet_(scr);
+
+  // ---- E1 settings overlay sheet (built once, hidden) ----
+  this->build_settings_sheet_(scr);
 
   // ---- Boot splash (hides everything until API connects) ----
   this->splash_ = lv_obj_create(scr);
@@ -1078,6 +1118,46 @@ void HAPanel::close_picker_() {
   ESP_LOGD(TAG, "picker close");
 }
 
+void HAPanel::open_settings_() {
+  if (this->settings_sheet_ == nullptr)
+    return;
+  lv_obj_clear_flag(this->settings_sheet_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(this->settings_sheet_);
+  this->settings_open_ = true;
+  ESP_LOGD(TAG, "settings open");
+}
+
+void HAPanel::close_settings_() {
+  if (this->settings_sheet_ == nullptr)
+    return;
+  lv_obj_add_flag(this->settings_sheet_, LV_OBJ_FLAG_HIDDEN);
+  this->settings_open_ = false;
+  ESP_LOGD(TAG, "settings close");
+}
+
+void HAPanel::step_area_(int delta) {
+  if (this->tileview_ == nullptr || this->areas_.empty())
+    return;
+  // Find the current area index from the active tile, step by delta with
+  // wrap-around, then set the tile programmatically (not bound by the per-tile
+  // LV_DIR_* swipe constraints).
+  lv_obj_t *active = lv_tileview_get_tile_active(this->tileview_);
+  size_t cur = 0;
+  for (size_t ai = 0; ai < this->tile_objs_.size(); ai++) {
+    if (this->tile_objs_[ai] == active) {
+      cur = ai;
+      break;
+    }
+  }
+  const size_t n = this->areas_.size();
+  size_t next = (size_t)(((int) cur + delta % (int) n + (int) n) % (int) n);
+  if (next == cur)
+    return;
+  lv_tileview_set_tile_by_index(this->tileview_, (uint32_t) next, 0, LV_ANIM_ON);
+  if (this->header_label_ != nullptr)
+    lv_label_set_text(this->header_label_, this->areas_[next].name.c_str());
+}
+
 void HAPanel::update_status_dot_() {
   if (this->status_dot_ == nullptr)
     return;
@@ -1086,9 +1166,8 @@ void HAPanel::update_status_dot_() {
 }
 
 bool HAPanel::is_settings_active_() const {
-  if (this->tileview_ == nullptr || this->settings_tile_ == nullptr)
-    return false;
-  return lv_tileview_get_tile_active(this->tileview_) == this->settings_tile_;
+  // E1: settings is an overlay sheet now, not a tile.
+  return this->settings_open_;
 }
 
 void HAPanel::set_clock_text(const std::string &text) {
@@ -1287,16 +1366,9 @@ void HAPanel::on_tileview_changed_(lv_event_t *e) {
   if (self == nullptr || self->tileview_ == nullptr)
     return;
   lv_obj_t *tile = lv_tileview_get_tile_active(self->tileview_);
-  if (tile == self->settings_tile_) {
-    if (self->header_label_ != nullptr)
-      lv_label_set_text(self->header_label_, "Settings");
-    return;
-  }
-  // P7b/P8: leaving the settings tile with un-applied changes silently reverts.
-  if (self->brightness_dirty_)
-    self->revert_brightness_();
-  if (self->sleep_dirty_)
-    self->revert_sleep_();
+  // E1: settings is no longer a tile, and its dirty state can only exist while
+  // the (full-screen) sheet is open over the tileview — so swiping areas no
+  // longer needs the navigate-away revert. Just retitle the header.
   for (size_t ai = 0; ai < self->tile_objs_.size(); ai++) {
     if (self->tile_objs_[ai] != tile)
       continue;
@@ -1310,11 +1382,6 @@ void HAPanel::on_header_clicked_(lv_event_t *e) {
   auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
   if (self == nullptr)
     return;
-  // P7b/P8: header tap from the settings tile counts as navigating away — revert.
-  if (self->brightness_dirty_)
-    self->revert_brightness_();
-  if (self->sleep_dirty_)
-    self->revert_sleep_();
   self->open_picker_();
 }
 
@@ -1345,16 +1412,11 @@ void HAPanel::on_picker_row_clicked_(lv_event_t *e) {
   self->close_picker_();
   if (self->tileview_ == nullptr)
     return;
-  const size_t total = self->areas_.size() + 1;
-  if (col >= total)
+  if (col >= self->areas_.size())  // E1: picker lists areas only
     return;
   lv_tileview_set_tile_by_index(self->tileview_, (uint32_t) col, 0, LV_ANIM_ON);
-  if (self->header_label_ != nullptr) {
-    if (col < self->areas_.size())
-      lv_label_set_text(self->header_label_, self->areas_[col].name.c_str());
-    else
-      lv_label_set_text(self->header_label_, "Settings");
-  }
+  if (self->header_label_ != nullptr)
+    lv_label_set_text(self->header_label_, self->areas_[col].name.c_str());
 }
 
 void HAPanel::on_picker_bg_clicked_(lv_event_t *e) {
@@ -1392,6 +1454,7 @@ void HAPanel::on_apply_clicked_(lv_event_t *e) {
     return;
   self->apply_brightness_();
   self->apply_sleep_();
+  self->close_settings_();  // E1: Apply commits then closes the sheet.
 }
 
 void HAPanel::on_cancel_clicked_(lv_event_t *e) {
@@ -1400,6 +1463,38 @@ void HAPanel::on_cancel_clicked_(lv_event_t *e) {
     return;
   self->revert_brightness_();
   self->revert_sleep_();
+  self->close_settings_();  // E1: Cancel reverts then closes the sheet.
+}
+
+void HAPanel::on_settings_bg_clicked_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  // Bg tap (on the sheet itself, not a child widget) = revert + close.
+  if (lv_event_get_target_obj(e) != self->settings_sheet_)
+    return;
+  self->revert_brightness_();
+  self->revert_sleep_();
+  self->close_settings_();
+}
+
+void HAPanel::on_gear_clicked_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  self->open_settings_();
+}
+
+void HAPanel::on_nav_left_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->step_area_(-1);
+}
+
+void HAPanel::on_nav_right_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->step_area_(+1);
 }
 
 void HAPanel::on_sleep_switch_(lv_event_t *e) {
