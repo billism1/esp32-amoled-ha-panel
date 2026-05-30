@@ -3093,6 +3093,10 @@ static const size_t HISTORY_CAP = 240;
 static const uint32_t HISTORY_WINDOW_S[3] = {3600u, 6u * 3600u, 24u * 3600u};
 // Cap the points fed to lv_chart so a long window decimates to ~screen width.
 static const size_t MAX_CHART_POINTS = 100;
+// Cap the points kept from a REST response. Bounds the internal-heap vector (a
+// 24 h per-minute series is ~1440 pts); 3× MAX_CHART_POINTS leaves headroom for
+// the chart's own decimation. The chart never shows more than MAX_CHART_POINTS.
+static const size_t SAMPLE_CAP = 300;
 
 // Format an elapsed duration (in seconds) as a compact "-12s" / "-45m" /
 // "-2.5h" axis label.
@@ -3671,8 +3675,22 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
     return false;
 
   const bool is_binary = e.domain == "binary_sensor";
+  // Decimate at ingestion. A 24 h window of a per-minute sensor is ~1440 points;
+  // history_samples_ lives on internal heap, and a vector that big forced a
+  // contiguous realloc that abort()ed under fragmentation. The chart only draws
+  // ~100 points anyway, so cap here. Keep every stride-th point (stride≈1 for
+  // the small binary transition series, so no transitions are dropped).
+  const size_t n = series.size();
+  // ceil division so the kept count never exceeds SAMPLE_CAP.
+  const size_t stride = n > SAMPLE_CAP ? (n + SAMPLE_CAP - 1) / SAMPLE_CAP : 1;
   this->history_samples_.clear();
+  this->history_samples_.reserve((n > SAMPLE_CAP ? SAMPLE_CAP : n) + 4);
+  size_t i = 0;
   for (JsonObject pt : series) {
+    bool keep = (i % stride) == 0;
+    i++;
+    if (!keep)
+      continue;
     const char *state = pt["state"] | "";
     if (state[0] == '\0')
       continue;
