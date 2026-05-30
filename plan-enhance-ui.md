@@ -63,7 +63,9 @@ All three below are promoted to phases. Future ideas land here first.
 - [x] Area-label chevron overlap fix → **E3**
 - [x] Cover detail modal: show current state → **E4**
 - [x] Boot splash: show current connection stage → **E5**
-- [ ] Per-entity component size (small / medium / large) → **E7**
+- [ ] Rename areas → pages + bottom-bar Home button → **E6**
+- [ ] Light detail modal: real brightness, no fake 100% → **E7**
+- [ ] Per-entity component size (small / medium / large) → **E8**
 
 ---
 
@@ -376,9 +378,96 @@ missing-glyph box.
 
 ---
 
-### Phase E6 — Light detail modal: real brightness, no fake 100%
+### Phase E6 — Rename areas → pages + bottom-bar Home button
 
-**Status:** ⬜ not started · target tag: `e6-light-brightness`
+**Status:** ⬜ not started · target tag: `e6-pages-home`
+
+**Goal:** Rebrand the panel's top-level entity grouping from "areas" to "pages"
+throughout the config schema, code, and example YAML, and add a Home button to
+the bottom bar that jumps to the first page. Two independent parts — a
+mechanical rename (no behaviour change) and one new bottom-bar control.
+
+#### Motivation / context
+
+- **"Areas" collides with Home Assistant's own concept.** The panel's
+  left-to-right groupings are authored locally in `ha-entities.yaml`; they are
+  not HA areas. Calling them "pages" makes the UI grouping clearly ours and
+  removes the ambiguity.
+- **No one-tap "go home."** The bottom bar steps ±1 with `◀`/`▶`
+  ([ha_panel.cpp:1018-1020](components/ha_panel/ha_panel.cpp#L1018-L1020)) and
+  the top picker jumps arbitrarily, but there's no single control to return to
+  the first page. A Home button is the obvious affordance.
+
+#### Part A — Rename areas → pages
+
+Pure rename, zero behaviour change. Targets every "area" identifier and the
+YAML key, leaving HA-side names (`entity_id`, `friendly_name`) untouched.
+
+- **[\_\_init\_\_.py](components/ha_panel/__init__.py):** `CONF_AREAS = "areas"`
+  → `CONF_PAGES = "pages"` (the YAML key), `AREA_SCHEMA` → `PAGE_SCHEMA`,
+  `add_area(...)` call → `add_page(...)`, loop var `area` → `page`, header
+  comment "area + entity" → "page + entity".
+- **[ha_panel.h](components/ha_panel/ha_panel.h):** `struct Area` → `struct
+  Page`; `areas_` → `pages_`; `add_area` → `add_page`; `num_areas` →
+  `num_pages`; `step_area_` → `step_page_`; `tap(size_t area_idx, …)` →
+  `tap(size_t page_idx, …)`; member/comment docs.
+- **[ha_panel.cpp](components/ha_panel/ha_panel.cpp):** all ~48 "area" hits —
+  renamed method impls, the tileview build loop, `tile_objs_`/header wiring,
+  log strings (`"… across %u areas"` → `"… pages"`, dump_config lines), picker
+  title `"Pick area"` → `"Pick page"`, and comment refs.
+- **[ha-entities.example.yaml](packages/ha-entities.example.yaml):** `areas:`
+  → `pages:`; header comments ("Areas render left-to-right…" → "Pages render…").
+- **Not touched:** [packages/ha-entities.yaml](packages/ha-entities.yaml) — the
+  user updates the real config manually.
+
+#### Part B — Home button on bottom bar
+
+Current bar: `◀ left-step (LEFT_MID +44) · ⚙ gear (CENTER) · ▶ right-step
+(RIGHT_MID −44)` ([ha_panel.cpp:1012-1038](components/ha_panel/ha_panel.cpp#L1012-L1038)).
+
+- Edge step-arrows stay put (`◀` LEFT_MID +44, `▶` RIGHT_MID −44).
+- **Home** `LV_SYMBOL_HOME` at `LV_ALIGN_CENTER, x_ofs = −44`.
+- **Gear** moves from dead-center to `LV_ALIGN_CENTER, x_ofs = +44`.
+- 56 px buttons → Home spans ~x168–224, gear ~x256–312 → a **~32 px gap**
+  between them to reduce accidental cross-taps; both clear the edge arrows.
+- New `on_home_clicked_` trampoline navigates to the first page:
+  `lv_tileview_set_tile_by_index(tileview_, 0, 0, LV_ANIM_ON)` + set
+  `header_label_` to `pages_[0].name`. Factor the tile-set + header-update tail
+  of `step_page_` into a small `go_to_page_(size_t)` helper shared by both.
+- `LV_SYMBOL_HOME` ships in the built-in montserrat symbol set — no new
+  font/glyph cost.
+
+Tasks:
+- [ ] Rename areas → pages in `__init__.py` (`CONF_PAGES`, `PAGE_SCHEMA`,
+      `add_page`, comments).
+- [ ] Rename in `ha_panel.h` (`Page`, `pages_`, `add_page`, `num_pages`,
+      `step_page_`, `tap(page_idx)`, docs) and declare `on_home_clicked_` +
+      `go_to_page_`.
+- [ ] Rename all ~48 "area" hits in `ha_panel.cpp`; verify clean compile.
+- [ ] `areas:` → `pages:` + comments in `ha-entities.example.yaml`; leave
+      `ha-entities.yaml` alone.
+- [ ] Add Home to the `nav_btns[]` table; move gear to CENTER +44, Home CENTER
+      −44; implement `on_home_clicked_` → `go_to_page_(0)`.
+
+**Exit criteria:**
+- Config uses `pages:`; the build compiles and the panel renders identically to
+  today (rename is behaviour-neutral).
+- Bottom bar shows `◀ … [🏠 ⚙] … ▶` with Home + gear centered as a pair and a
+  visible gap between them.
+- Tapping Home jumps to the first page from anywhere; gear still opens settings;
+  `◀`/`▶` still step ±1 with wrap-around.
+
+**Risks / unknowns:**
+- The rename is wide (~48 cpp hits); it must be complete or it won't compile —
+  a single sweep plus a build catches any miss.
+- Centered-pair offsets are hardcoded `±44`; verify the 32 px gap feels right
+  on-device and tune if cross-taps still happen.
+
+---
+
+### Phase E7 — Light detail modal: real brightness, no fake 100%
+
+**Status:** ⬜ not started · target tag: `e7-light-brightness`
 
 **Goal:** The light detail modal shows the light's *actual* brightness instead
 of seeding the slider at a misleading 100%. An on, dimmable light shows its true
@@ -449,7 +538,7 @@ practice, so this is invisible.
 any UI work, prototype *only* the A subscription (connect-time `brightness` sub
 for lights), flash to the real device against the real entity list, and **stop**.
 The user runs the test scenario and must **explicitly accept** the result before
-any further E6 work begins. No D/UI tasks, no commit past the prototype, until
+any further E7 work begins. No D/UI tasks, no commit past the prototype, until
 that sign-off.
 
 Test scenario the user runs:
@@ -505,9 +594,9 @@ Tasks:
 
 ---
 
-### Phase E7 — Per-entity component size (small / medium / large)
+### Phase E8 — Per-entity component size (small / medium / large)
 
-**Status:** ⬜ not started · target tag: `e7-entity-size`
+**Status:** ⬜ not started · target tag: `e8-entity-size`
 
 **Goal:** Let a user make individual entity rows bigger for easier reading. A
 new optional `size:` node on each entity selects `small` (default, today's
@@ -629,14 +718,14 @@ Tasks:
 - Vertical centering of name vs. icon vs. widget must hold at every size; the
   `LV_ALIGN_*_MID` anchors should make this automatic but verify on-device.
 - Detail modal / confirm sheet are full-screen overlays and are **out of scope**
-  for E7 — `size:` only affects the area-row rendering, not the modals.
+  for E8 — `size:` only affects the area-row rendering, not the modals.
 
 ---
 
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks
-  amber with a solid-amber fallback. E7: full scale — height + name font + icon
+  amber with a solid-amber fallback. E8: full scale — height + name font + icon
   + widget; sizes 60/84/108 px with montserrat 18/24/32; strict-enum `size:`.)
 
 ---
@@ -645,7 +734,7 @@ Tasks:
 
 - No new HA entity subscriptions or attribute fetches (keeps the connect-time
   TX budget clean — see the P7e/P7d TX-saturation lesson in plan-mvp.md).
-  **Exception (E6):** one connect-time `brightness` subscription per light is
+  **Exception (E7):** one connect-time `brightness` subscription per light is
   permitted — it rides the existing state-sub walk (~88 → ~118), well under the
   ~278-sub burst that saturated iter 1, with no cursor re-arm.
 - No power-state / sleep-timer changes — E2 only re-reads connection state, it
