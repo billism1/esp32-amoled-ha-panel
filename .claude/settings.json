@@ -16,7 +16,9 @@
       "Bash(which esphome *)",
       "Bash(python -c \"import esphome; print\\('esphome', esphome.__version__\\)\")",
       "Bash(timeout 280 esphome config ha-amoled-panel.yaml)",
-      "Bash(echo \"exit=$?\")"
+      "Bash(echo \"exit=$?\")",
+      "Bash(ls *.yaml)",
+      "Bash(python -m esphome version)"
     ]
   }
 }
