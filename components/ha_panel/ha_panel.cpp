@@ -3603,9 +3603,13 @@ void HAPanel::close_history_() {
 void HAPanel::spin_history_() {
   if (this->history_spinner_ == nullptr)
     return;
-  // millis()-based angle so the spin rate is wall-clock steady regardless of how
-  // often the fetch read loop calls us. lv_refr_now repaints just the dirty arc.
-  lv_arc_set_rotation(this->history_spinner_, (int32_t) ((millis() / 3) % 360));
+  // Stepped, not continuous. The blocking fetch only lets us tick when a chunk
+  // arrives (lumpy, network-paced), so a smooth millis()-based angle judders.
+  // Advancing a fixed 30° per call reads as a deliberate stepping loader at any
+  // update rate, and doubles as iterative-progress feedback — one step per data
+  // burst. lv_refr_now repaints just the dirty arc.
+  this->history_spin_step_ = (uint8_t) ((this->history_spin_step_ + 1) % 12);
+  lv_arc_set_rotation(this->history_spinner_, this->history_spin_step_ * 30);
   lv_refr_now(NULL);
 }
 
@@ -3828,6 +3832,7 @@ void HAPanel::load_history_samples_(size_t entity_idx, uint8_t window_idx) {
       lv_label_set_text(this->history_time_left_, "");
       lv_label_set_text(this->history_time_right_, "");
       lv_label_set_text(this->history_range_label_, "");
+      this->history_spin_step_ = 0;
       lv_obj_clear_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_foreground(this->history_spinner_);
     }

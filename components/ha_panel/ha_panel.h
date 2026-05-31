@@ -576,6 +576,7 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // lv_timer_handler can't be re-entered to drive a real anim — spin_history_()
   // bumps the angle and lv_refr_now()s it from the fetch read loop instead.
   lv_obj_t *history_spinner_{nullptr};
+  uint8_t history_spin_step_{0};  // UE2: 0..11 stepped position of the loader arc
   // Bottom row under the chart: left/right are the time span of the *displayed
   // data* (oldest visible sample's age → "now"), so a window with no older data
   // reads honestly instead of looking identical at every chip. Center shows the
