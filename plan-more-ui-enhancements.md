@@ -80,12 +80,15 @@ while the blocking REST backfill runs, hidden once data lands or the fetch
 times out / fails.
 
 Tasks:
-- [x] ~~History sheet spinner~~ — **not viable.** Confirmed `LvglComponent::loop()`
-      calls `lv_timer_handler()` on the single main loop, and the REST backfill
-      (`history_http_->get()`) blocks that same loop. A spinner there cannot
-      animate (would render one frozen frame), so the static "Loading..." text
-      ([:3761](components/ha_panel/ha_panel.cpp#L3761)) is kept as-is per this
-      item's own fallback note.
+- [x] **History sheet spinner (delivered):** the REST backfill blocks the single
+      main loop, so an `lv_spinner` (anim driven by `lv_timer_handler`, which
+      also can't be re-entered from inside the open event) won't turn. Instead a
+      hand-rotated `lv_arc` (`history_spinner_`) is raised over the chart and
+      ticked from the fetch read loop via `spin_history_()` → `lv_refr_now()`,
+      ~30 fps. LVGL's clock is `millis()`-based (`lv_tick_set_cb`), so the spin
+      rate stays wall-clock steady. Hidden on first redraw / "No data yet" /
+      error. "Loading..." text kept alongside. The body transfer animates; only
+      the TCP connect + JSON parse are brief frozen gaps.
 - [x] ~~Detail-modal placeholder~~ — **N/A.** The async attr-fetch path
       (`request_detail_attrs_`, with the "Loading…" placeholder + 1500 ms
       timeout) is parked dead code; `open_detail_` builds synchronously and
@@ -96,13 +99,15 @@ Tasks:
       animates. State machine: **active** → animated spinner; **queued** → dim
       amber dot (kept); **done** → green check (kept). See `update_splash_stage_`.
 
-**Exit criteria (revised):** Boot splash shows an animated spinner on the stage
-currently being worked on (Wi-Fi, then HA), the next stage sits as a dim dot, and
-each flips to a green check on completion. Compiles + links clean.
+**Exit criteria:** (1) Opening a 1h/6h/24h window shows a turning arc over the
+chart that disappears the instant the chart paints. (2) Boot splash shows an
+animated spinner on the stage being worked on (Wi-Fi, then HA), the next stage a
+dim dot, each flipping to a green check on completion. Compiles + links clean.
 
 **Risks / unknowns (resolved):**
-- The REST backfill is blocking by design and starves LVGL → history spinner
-  dropped (text kept). The splash path is async, so the spinner animates there.
+- The REST backfill blocks LVGL, but `lv_refr_now()` (not `lv_timer_handler`) is
+  re-entrancy-safe inside the open event, and the body is read in a chunked loop
+  — so a hand-spun arc animates there after all. Detail-modal load is dead code.
 
 ---
 

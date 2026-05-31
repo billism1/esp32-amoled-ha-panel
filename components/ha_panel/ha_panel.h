@@ -309,6 +309,8 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void open_history_(size_t entity_idx);
   void close_history_();
   void redraw_history_();
+  // UE2: advance + repaint the history loading arc during the blocking fetch.
+  void spin_history_();
   // E9: append the current state to an entity's history ring buffer. No-op for
   // non-chartable entities. Called from on_state_ on every state change.
   void record_history_(size_t entity_idx);
@@ -569,6 +571,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *history_chart_{nullptr};
   lv_chart_series_t *history_series_{nullptr};
   lv_obj_t *history_strip_{nullptr};
+  // UE2: loading indicator over the chart during the blocking REST backfill. A
+  // hand-rotated arc (not lv_spinner): the fetch runs inside an LVGL event, so
+  // lv_timer_handler can't be re-entered to drive a real anim — spin_history_()
+  // bumps the angle and lv_refr_now()s it from the fetch read loop instead.
+  lv_obj_t *history_spinner_{nullptr};
   // Bottom row under the chart: left/right are the time span of the *displayed
   // data* (oldest visible sample's age → "now"), so a window with no older data
   // reads honestly instead of looking identical at every chip. Center shows the

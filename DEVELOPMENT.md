@@ -2453,18 +2453,33 @@ regardless.
 
 ### Phase UE2 — Spinner for loading states
 
-**Outcome:** Shipped a per-stage `lv_spinner` on the **boot splash**, not on the
-history sheet the plan first targeted. The pivot was forced by a hard runtime
-fact, then steered by a UX call.
+**Outcome:** Shipped loading indicators in two places: a hand-rotated arc over
+the **history chart** during the REST backfill, and a per-stage `lv_spinner` on
+the **boot splash**.
 
-**Why not the history sheet (the plan's primary target):** `LvglComponent::loop()`
-(ESPHome's lvgl component) calls `lv_timer_handler()` on the **single main
-loop**. The E9 history backfill (`history_http_->get()` in
-[fetch_history_](components/ha_panel/ha_panel.cpp)) blocks that same loop by
-design, so LVGL never ticks during the fetch — a spinner there renders exactly
-one frozen frame, no better than the existing "Loading..." text. Per UE2's own
-fallback clause, the static text at
-[ha_panel.cpp:3761](components/ha_panel/ha_panel.cpp#L3761) is kept as-is.
+**History sheet — the blocking-loop puzzle, and the way through it.** First pass
+concluded a history spinner was impossible: `LvglComponent::loop()` calls
+`lv_timer_handler()` on the **single main loop**, and the E9 backfill
+(`history_http_->get()` in [fetch_history_](components/ha_panel/ha_panel.cpp))
+blocks that loop, so LVGL never ticks during the fetch — and `lv_spinner`'s
+animation is driven by `lv_timer_handler`, which additionally can't be
+re-entered (the fetch runs inside the open-history LVGL event). That conclusion
+was too quick. Two facts make an animated indicator viable:
+- ESPHome sets `lv_tick_set_cb([]{ return millis(); })`, so LVGL's clock keeps
+  advancing during the block — it isn't tied to `loop()`.
+- The body is read in a **chunked loop** (`container->read` + `yield()` per
+  iteration), which is a place to do work mid-fetch.
+
+So `history_spinner_` is a plain `lv_arc` (60° bright segment on a faint
+track), **not** an `lv_spinner`. `spin_history_()` bumps its rotation from
+`millis()` and calls `lv_refr_now(NULL)` — the same re-entrancy-safe repaint the
+code already used to paint "Loading..." at
+[ha_panel.cpp:3761](components/ha_panel/ha_panel.cpp#L3761). It's pumped from the
+read loop on a ~30 fps gate. Raised in `load_history_samples_`, hidden at the top
+of `redraw_history_` (covers success / fallback / "No data yet" / error). The
+body transfer animates; only the TCP connect and the one-shot JSON parse are
+brief frozen gaps. (The earlier "history spinner not viable" note was wrong and
+is superseded by this.)
 
 **Why not the detail modal (the plan's secondary target):** the async
 attribute-fetch path (`request_detail_attrs_`, with a "Loading…" placeholder and
@@ -2488,10 +2503,11 @@ self-driven by LVGL's anim timer, so it no longer depends on the `blink_on_`
 phase the old pulsing dot used. The shared blink timer still runs for the header
 status dot; re-applying splash state on each tick is idempotent.
 
-**Verification:** clean `esphome compile` links (RAM 16.5%, Flash 19.4%, +236 B).
-On-device animation-during-boot to be eyeballed on the panel, but the path is
-async by construction so it will tick. `LV_USE_SPINNER` (+ `LV_USE_ARC`) came in
-with UE1.
+**Verification:** clean `esphome compile` links (RAM 16.5%, Flash 19.4%). Two
+on-device checks to eyeball on the panel: (1) the splash spinner during boot —
+async by construction, so it ticks; (2) the history arc turning on a 1h/6h/24h
+load — animates during the body read, freezes only over the TCP connect + JSON
+parse. `LV_USE_SPINNER` and `LV_USE_ARC` came in with UE1.
 
 ---
 

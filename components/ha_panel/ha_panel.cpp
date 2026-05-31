@@ -3502,6 +3502,26 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   lv_obj_clear_flag(this->history_strip_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
 
+  // UE2: loading arc, centered over the chart footprint. A 60° bright segment on
+  // a faint full-circle track; spin_history_() rotates it during the fetch. Not
+  // an lv_spinner because its anim would need lv_timer_handler, which can't be
+  // re-entered from inside the open-history event (same reason the fetch uses
+  // lv_refr_now). No knob, not clickable.
+  this->history_spinner_ = lv_arc_create(this->history_sheet_);
+  lv_obj_set_size(this->history_spinner_, 60, 60);
+  lv_obj_align(this->history_spinner_, LV_ALIGN_TOP_MID, 0, 181);
+  lv_obj_remove_flag(this->history_spinner_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_remove_style(this->history_spinner_, NULL, LV_PART_KNOB);
+  lv_arc_set_bg_angles(this->history_spinner_, 0, 360);
+  lv_arc_set_angles(this->history_spinner_, 0, 60);
+  lv_obj_set_style_arc_width(this->history_spinner_, 6, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(this->history_spinner_, lv_color_hex(0x222222),
+                             LV_PART_MAIN);
+  lv_obj_set_style_arc_width(this->history_spinner_, 6, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(this->history_spinner_, lv_color_hex(0x44CCDD),
+                             LV_PART_INDICATOR);
+  lv_obj_add_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
+
   // Bottom row under the chart: time span (left = oldest visible sample age,
   // right = "now") + centered value range. Time markers make the x-axis legible
   // and stop a data-starved window from looking like a populated one.
@@ -3579,10 +3599,22 @@ void HAPanel::close_history_() {
   ESP_LOGD(TAG, "history close");
 }
 
+void HAPanel::spin_history_() {
+  if (this->history_spinner_ == nullptr)
+    return;
+  // millis()-based angle so the spin rate is wall-clock steady regardless of how
+  // often the fetch read loop calls us. lv_refr_now repaints just the dirty arc.
+  lv_arc_set_rotation(this->history_spinner_, (int32_t) ((millis() / 3) % 360));
+  lv_refr_now(NULL);
+}
+
 void HAPanel::redraw_history_() {
   if (this->history_sheet_ == nullptr ||
       this->history_entity_idx_ >= this->entities_.size())
     return;
+  // The fetch is done by the time we redraw — drop the loading arc.
+  if (this->history_spinner_ != nullptr)
+    lv_obj_add_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
   const Entity &e = this->entities_[this->history_entity_idx_];
 
   // Highlight the active window chip.
@@ -3783,7 +3815,13 @@ void HAPanel::load_history_samples_(size_t entity_idx, uint8_t window_idx) {
   if (this->history_rest_enabled_()) {
     // Blocking fetch — paint a "Loading..." state first so the UI isn't frozen
     // mid-stall with stale content. (montserrat_18 has no ellipsis glyph.)
+    // UE2: also raise the loading arc; the fetch read loop spins it via
+    // spin_history_() so the wait reads as active, not hung.
     lv_label_set_text(this->history_value_, "Loading...");
+    if (this->history_spinner_ != nullptr) {
+      lv_obj_clear_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_move_foreground(this->history_spinner_);
+    }
     lv_refr_now(NULL);
     if (this->fetch_history_(entity_idx, window_idx)) {
       this->history_rest_mode_ = true;
@@ -3872,11 +3910,19 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
   }
   size_t blen = 0;
   uint32_t last = millis();
+  uint32_t last_spin = 0;
   bool read_ok = true;
   while (true) {
     int r = container->read(body + blen, BODY_CAP - blen);
     App.feed_wdt();
     yield();
+    // UE2: keep the loading arc turning. ~30 fps cap so the redraws don't
+    // meaningfully slow the read; lv_refr_now is safe here (same as the pre-fetch
+    // paint) where lv_timer_handler would not be (re-entrancy).
+    if (millis() - last_spin >= 33) {
+      this->spin_history_();
+      last_spin = millis();
+    }
     if (r > 0) {
       blen += (size_t) r;
       last = millis();
