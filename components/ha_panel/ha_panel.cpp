@@ -304,6 +304,31 @@ void HAPanel::setup() {
   this->icons_by_entity_.assign(this->entities_.size(), nullptr);
   ESP_LOGCONFIG(TAG, "P7e icon column %s",
                 this->mdi_font_ != nullptr ? "enabled (mdi_font set)" : "disabled (no mdi_font)");
+#ifdef USE_SPEAKER
+  // Precompute the touch click: a 2 kHz tone with a fast exponential decay
+  // (~16 ms), deliberately quiet ("low noise"). 16-bit signed mono, little-
+  // endian, 16 kHz — matches the i2s_audio speaker + ES8311 config. A tap just
+  // re-queues this buffer, so no per-press allocation.
+  {
+    const float sample_rate = 16000.0f;
+    const float freq = 2000.0f;
+    const float dur_s = 0.016f;
+    const float tau = 0.004f;             // decay time constant
+    const float peak = 0.16f * 32767.0f;  // ~ -16 dBFS — gentle
+    const float pi = 3.14159265358979f;
+    const size_t n = (size_t) (sample_rate * dur_s);
+    this->click_pcm_.resize(n * 2);
+    for (size_t i = 0; i < n; i++) {
+      float t = (float) i / sample_rate;
+      float env = expf(-t / tau);
+      int16_t s = (int16_t) lroundf(peak * env * sinf(2.0f * pi * freq * t));
+      this->click_pcm_[2 * i] = (uint8_t) (s & 0xFF);
+      this->click_pcm_[2 * i + 1] = (uint8_t) ((s >> 8) & 0xFF);
+    }
+    ESP_LOGCONFIG(TAG, "touch click PCM ready (%u bytes)",
+                  (unsigned) this->click_pcm_.size());
+  }
+#endif
   this->build_ui_();
 }
 
@@ -835,6 +860,32 @@ void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
   lv_obj_add_event_cb(this->sleep_mode_dropdown_, &HAPanel::on_sleep_mode_dropdown_,
                       LV_EVENT_VALUE_CHANGED, this);
   this->update_sleep_mode_enabled_();
+
+  // ---- Sound ----
+  lv_obj_t *sound_title = lv_label_create(content);
+  lv_label_set_text(sound_title, "Sound");
+  lv_obj_set_style_text_color(sound_title, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(sound_title, &lv_font_montserrat_18, 0);
+
+  lv_obj_t *sound_row = lv_obj_create(content);
+  lv_obj_remove_style_all(sound_row);
+  lv_obj_set_width(sound_row, LV_PCT(100));
+  lv_obj_set_height(sound_row, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(sound_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(sound_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(sound_row, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *sound_lbl = lv_label_create(sound_row);
+  lv_label_set_text(sound_lbl, "Click on press");
+  lv_obj_set_style_text_color(sound_lbl, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(sound_lbl, &lv_font_montserrat_18, 0);
+
+  this->sound_switch_ = lv_switch_create(sound_row);
+  if (this->sound_on_press_)
+    lv_obj_add_state(this->sound_switch_, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(this->sound_switch_, &HAPanel::on_sound_switch_,
+                      LV_EVENT_VALUE_CHANGED, this);
 
   // About block.
   lv_obj_t *about_title = lv_label_create(content);
@@ -1539,6 +1590,90 @@ void HAPanel::revert_sleep_() {
            (int) this->sleep_enabled_, (unsigned) this->sleep_mode_);
 }
 
+void HAPanel::set_sound_on_press(bool on) {
+  this->sound_on_press_ = on;
+  this->staged_sound_on_press_ = on;
+  this->sound_dirty_ = false;
+  if (this->sound_switch_ != nullptr) {
+    if (on)
+      lv_obj_add_state(this->sound_switch_, LV_STATE_CHECKED);
+    else
+      lv_obj_remove_state(this->sound_switch_, LV_STATE_CHECKED);
+  }
+}
+
+void HAPanel::apply_sound_() {
+  if (!this->sound_dirty_)
+    return;
+  this->sound_on_press_ = this->staged_sound_on_press_;
+  if (this->sound_committer_)
+    this->sound_committer_(this->sound_on_press_);
+  this->sound_dirty_ = false;
+  ESP_LOGI(TAG, "sound-on-press applied: %d", (int) this->sound_on_press_);
+}
+
+void HAPanel::revert_sound_() {
+  if (!this->sound_dirty_)
+    return;
+  this->staged_sound_on_press_ = this->sound_on_press_;
+  if (this->sound_switch_ != nullptr) {
+    if (this->sound_on_press_)
+      lv_obj_add_state(this->sound_switch_, LV_STATE_CHECKED);
+    else
+      lv_obj_remove_state(this->sound_switch_, LV_STATE_CHECKED);
+  }
+  this->sound_dirty_ = false;
+  ESP_LOGI(TAG, "sound-on-press reverted to %d", (int) this->sound_on_press_);
+}
+
+void HAPanel::on_sound_switch_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  self->staged_sound_on_press_ =
+      lv_obj_has_state(self->sound_switch_, LV_STATE_CHECKED);
+  self->sound_dirty_ = (self->staged_sound_on_press_ != self->sound_on_press_);
+}
+
+void HAPanel::play_click_() {
+#ifdef USE_SPEAKER
+  // Committed setting only — staged edits don't take effect until Apply.
+  if (!this->sound_on_press_ || this->speaker_ == nullptr ||
+      this->click_pcm_.empty())
+    return;
+  // Queue the click, then finish() so the speaker drains it and stops (frees
+  // the I2S/codec — no idle hiss). play() auto-starts a stopped speaker.
+  this->speaker_->play(this->click_pcm_.data(), this->click_pcm_.size());
+  this->speaker_->finish();
+#endif
+}
+
+void HAPanel::touch_pressed(int16_t x, int16_t y) {
+  this->touch_active_ = true;
+  this->touch_moved_ = false;
+  this->touch_start_x_ = x;
+  this->touch_start_y_ = y;
+}
+
+void HAPanel::touch_moved(int16_t x, int16_t y) {
+  if (!this->touch_active_ || this->touch_moved_)
+    return;
+  // Past ~16 px from the press origin = a swipe/scroll, not a tap.
+  const int16_t kTapSlopPx = 16;
+  if (abs(x - this->touch_start_x_) > kTapSlopPx ||
+      abs(y - this->touch_start_y_) > kTapSlopPx)
+    this->touch_moved_ = true;
+}
+
+void HAPanel::touch_released() {
+  if (!this->touch_active_)
+    return;
+  this->touch_active_ = false;
+  // A tap (barely moved) plays the click; a swipe/scroll stays silent.
+  if (!this->touch_moved_)
+    this->play_click_();
+}
+
 void HAPanel::set_wifi_rssi(int rssi) {
   this->wifi_rssi_ = rssi;
   this->have_wifi_rssi_ = true;
@@ -1717,6 +1852,7 @@ void HAPanel::on_apply_clicked_(lv_event_t *e) {
     return;
   self->apply_brightness_();
   self->apply_sleep_();
+  self->apply_sound_();
   self->close_settings_();  // E1: Apply commits then closes the sheet.
 }
 
@@ -1726,6 +1862,7 @@ void HAPanel::on_cancel_clicked_(lv_event_t *e) {
     return;
   self->revert_brightness_();
   self->revert_sleep_();
+  self->revert_sound_();
   self->close_settings_();  // E1: Cancel reverts then closes the sheet.
 }
 

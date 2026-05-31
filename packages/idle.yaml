@@ -69,6 +69,13 @@ globals:
     type: uint8_t
     restore_value: yes
     initial_value: "0"
+  # Touch click sound: play a short low click on a registered tap (not a swipe).
+  # Edited via the settings sheet (ha_panel sound committer); read at boot to
+  # seed the toggle. Default off.
+  - id: sound_on_press_g
+    type: bool
+    restore_value: yes
+    initial_value: "false"
   # P8: gate flipped true once the device is usable + updatable (API connected
   # AND past sleep_arm_uptime_s). The idle machine refuses to sleep until then
   # so a freshly-booted device stays reachable for OTA.

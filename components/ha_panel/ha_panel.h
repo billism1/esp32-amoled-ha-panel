@@ -12,6 +12,9 @@
 #include "esphome/components/font/font.h"
 #include "esphome/components/http_request/http_request.h"
 #include "esphome/components/time/real_time_clock.h"
+#ifdef USE_SPEAKER
+#include "esphome/components/speaker/speaker.h"
+#endif
 
 #include "lvgl.h"
 
@@ -149,6 +152,25 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void set_wifi_rssi(int rssi);
   void set_battery_voltage(float volts);
 
+  // Touch click sound (settings-gated). speaker plays a short synthesized
+  // click; committer persists the toggle global; set_sound_on_press seeds the
+  // settings switch from the boot-restored value.
+#ifdef USE_SPEAKER
+  void set_speaker(speaker::Speaker *spk) { this->speaker_ = spk; }
+#endif
+  void set_sound_committer(std::function<void(bool)> committer) {
+    this->sound_committer_ = std::move(committer);
+  }
+  void set_sound_on_press(bool on);
+
+  // Touch gesture feed (from the board's touchscreen triggers). A press is a
+  // "tap" only if the finger barely moved before release; a swipe/scroll moves
+  // past the threshold and plays no click. touch_pressed marks the start,
+  // touch_moved flags movement, touch_released decides + plays.
+  void touch_pressed(int16_t x, int16_t y);
+  void touch_moved(int16_t x, int16_t y);
+  void touch_released();
+
  protected:
   // HA state callback.
   void on_state_(const std::string &entity_id, StringRef state);
@@ -236,6 +258,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void revert_sleep_();
   // Grey out the mode dropdown when the master toggle is off (mode irrelevant).
   void update_sleep_mode_enabled_();
+  // Touch click sound: stage / commit / revert the toggle (same dirty-flag
+  // recipe as sleep). play_click_ pushes the precomputed PCM to the speaker.
+  void apply_sound_();
+  void revert_sound_();
+  void play_click_();
 
   // P7d detail modal.
   void build_detail_modal_(lv_obj_t *scr);
@@ -316,6 +343,8 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // P8 sleep controls.
   static void on_sleep_switch_(lv_event_t *e);
   static void on_sleep_mode_dropdown_(lv_event_t *e);
+  // Touch click sound toggle.
+  static void on_sound_switch_(lv_event_t *e);
   static void on_detail_apply_clicked_(lv_event_t *e);
   static void on_detail_cancel_clicked_(lv_event_t *e);
   static void on_detail_bg_clicked_(lv_event_t *e);
@@ -414,6 +443,26 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   bool staged_sleep_enabled_{true};
   uint8_t staged_sleep_mode_{0};
   bool sleep_dirty_{false};
+  // Touch click sound. sound_on_press_ mirrors the persisted global;
+  // staged_* tracks the switch; sound_dirty_ flips on edit, cleared on
+  // Apply / revert. Default off.
+  lv_obj_t *sound_switch_{nullptr};
+  std::function<void(bool)> sound_committer_;
+  bool sound_on_press_{false};
+  bool staged_sound_on_press_{false};
+  bool sound_dirty_{false};
+#ifdef USE_SPEAKER
+  // Speaker + precomputed click PCM (16-bit mono @ 16 kHz), built once in
+  // setup() so a tap just re-queues the same buffer.
+  speaker::Speaker *speaker_{nullptr};
+  std::vector<uint8_t> click_pcm_;
+#endif
+  // Tap-vs-swipe tracking. touch_active_ guards a press in progress;
+  // touch_moved_ trips once the finger leaves a small radius of the start.
+  bool touch_active_{false};
+  bool touch_moved_{false};
+  int16_t touch_start_x_{0};
+  int16_t touch_start_y_{0};
   // active_brightness_ = persisted (last committed) value, mirrors the YAML
   // global. staged_brightness_ = current slider position (live preview).
   // brightness_dirty_ flips true on first slider drag, false on Apply/Cancel.

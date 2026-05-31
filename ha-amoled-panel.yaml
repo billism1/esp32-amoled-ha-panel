@@ -53,6 +53,13 @@ esphome:
             });
             id(ha_panel_id).set_sleep_settings(id(sleep_enabled_g),
                                                id(power_saver_mode_g));
+            // Touch click sound: hand ha_panel the speaker, the commit hook for
+            // the persisted global, and the boot-restored toggle value.
+            id(ha_panel_id).set_speaker(id(click_speaker));
+            id(ha_panel_id).set_sound_committer([](bool on) {
+              id(sound_on_press_g) = on;
+            });
+            id(ha_panel_id).set_sound_on_press(id(sound_on_press_g));
     # Existing display bring-up event for HA visibility.
     - priority: -200
       then:

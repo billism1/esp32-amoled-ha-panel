@@ -180,4 +180,52 @@ touchscreen:
       - lambda: |-
           ESP_LOGI("touch", "x=%d y=%d  raw x=%d y=%d",
             touch.x, touch.y, touch.x_raw, touch.y_raw);
+          // Click-sound gesture tracking: mark the press start. ha_panel decides
+          // tap-vs-swipe on release and plays the click only for a tap.
+          id(ha_panel_id).touch_pressed(touch.x, touch.y);
       - script.execute: notify_input
+    on_update:
+      - lambda: |-
+          if (!touches.empty())
+            id(ha_panel_id).touch_moved(touches[0].x, touches[0].y);
+    on_release:
+      - lambda: "id(ha_panel_id).touch_released();"
+
+# --- Audio: ES8311 codec → onboard speaker (touch click feedback) ---
+# Pins verified from waveshareteam pin_config.h (Mylibrary) + the 07_ES8311
+# example: I2S MCLK=42 BCLK=9 LRCLK=45 DOUT=8; ES8311 on bus_a @ 0x18; PA
+# (speaker amp) enable on GPIO46. ha_panel synthesizes a short low click and
+# plays it on a registered tap (not a swipe), gated by the sound-on-press
+# setting (sound_on_press_g, default off).
+i2s_audio:
+  - id: i2s_bus
+    i2s_mclk_pin: 42
+    i2s_bclk_pin: 9
+    i2s_lrclk_pin: 45
+
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    i2c_id: bus_a
+    address: 0x18
+    bits_per_sample: 16bit
+    sample_rate: 16000
+
+speaker:
+  - platform: i2s_audio
+    id: click_speaker
+    i2s_audio_id: i2s_bus
+    i2s_dout_pin: 8
+    dac_type: external
+    audio_dac: es8311_dac
+    bits_per_sample: 16bit
+    sample_rate: 16000
+    channel: mono
+
+# Speaker amplifier enable — held on so the codec output reaches the speaker.
+switch:
+  - platform: gpio
+    id: audio_pa
+    pin: 46
+    internal: true
+    restore_mode: ALWAYS_ON

@@ -910,6 +910,54 @@ Tasks:
 
 ---
 
+### Phase E10 — Touch click sound (settings-gated, tap-not-swipe)
+
+**Status:** ✅ done (verified on hardware) · no target tag yet
+
+**Goal:** Optional low-volume "click" on a registered tap, off by default,
+toggled in the settings sheet. Must NOT fire on a swipe/scroll.
+
+**Hardware:** The Waveshare 2.16 has no GPIO buzzer — only an **ES8311** codec
+driving the onboard speaker (mic side is ES7210, unused here). Pins verified
+from waveshareteam `pin_config.h` (Mylibrary) + the `07_ES8311` example:
+I2S **MCLK=42, BCLK=9, LRCLK=45, DOUT=8**; ES8311 on `bus_a` @ **0x18**;
+speaker amp **PA enable = GPIO46** (held on via an `ALWAYS_ON` gpio switch).
+ESPHome stack: `i2s_audio` bus + `audio_dac: es8311` + `speaker: i2s_audio`
+(`dac_type: external`, `audio_dac: es8311_dac`) — the same shape as the
+ESP32-S3-Box-3 reference config (same PA pin).
+
+**Approach:**
+- New persisted global `sound_on_press_g` (bool, `restore_value: yes`,
+  default **false**) in [idle.yaml](packages/idle.yaml).
+- ha_panel precomputes the click PCM once in `setup()` — a 2 kHz tone, ~16 ms,
+  fast exponential decay, ~-16 dBFS (deliberately quiet). 16-bit mono LE @
+  16 kHz to match the codec. Stored in `click_pcm_`; a tap just re-queues it.
+- `play_click_()` (guarded by `USE_SPEAKER`) calls `speaker->play(pcm)` then
+  `speaker->finish()` so the I2S/codec drains and stops — no idle hiss.
+- **Tap vs swipe:** the board touchscreen feeds `touch_pressed` / `touch_moved`
+  / `touch_released`. A press that stays within ~16 px until release is a tap →
+  click on release. Any movement past the slop = swipe/scroll → silent. Decided
+  on *release* (not press-down) because a swipe also begins with a press-down,
+  so press-time can't yet tell them apart.
+- Settings sheet gets a "Sound → Click on press" `lv_switch`, wired with the
+  same stage/commit/revert + committer recipe as the sleep toggle
+  (`apply_sound_`/`revert_sound_`, hooked into Apply/Cancel). `set_speaker` +
+  `set_sound_committer` + `set_sound_on_press` wired in
+  [ha-amoled-panel.yaml](ha-amoled-panel.yaml) `on_boot`.
+
+**Risks / unknowns:**
+- Speaker/codec path is **not yet verified on hardware** — first on-device test
+  should confirm the ES8311 actually drives the speaker at these pins and that
+  the click is audible but not harsh. Tune `freq` / `dur_s` / `tau` / `peak` in
+  `setup()` and the `audio_dac`/speaker `sample_rate` together if it sounds off.
+- PA held always-on draws a little quiescent current; acceptable on a
+  USB/LiPo panel. Could gate PA per-click later if idle hiss appears (would add
+  an amp-enable pop).
+- `USE_SPEAKER` guards keep the speaker code out of any future board that omits
+  the `speaker:` block; that board's YAML must then not call `set_speaker`.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks
