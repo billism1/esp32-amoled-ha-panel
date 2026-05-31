@@ -20,7 +20,8 @@
       "Bash(ls *.yaml)",
       "Bash(python -m esphome version)",
       "Bash(git log *)",
-      "PowerShell(\\(Get-Command esphome -ErrorAction SilentlyContinue\\).Source)"
+      "PowerShell(\\(Get-Command esphome -ErrorAction SilentlyContinue\\).Source)",
+      "Bash(gh api *)"
     ]
   }
 }
