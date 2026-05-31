@@ -309,6 +309,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void open_history_(size_t entity_idx);
   void close_history_();
   void redraw_history_();
+  // UE4: point the analog gauge's needle at `current`, scaling its range from the
+  // window's [vmin,vmax] (padded so the needle isn't pinned) and revealing it.
+  void update_history_gauge_(float vmin, float vmax, float current);
   // UE2: advance + repaint the history loading arc during the blocking fetch.
   void spin_history_();
   // E9: append the current state to an entity's history ring buffer. No-op for
@@ -583,6 +586,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *history_chart_{nullptr};
   lv_chart_series_t *history_series_{nullptr};
   lv_obj_t *history_strip_{nullptr};
+  // UE4: analog "now" gauge for numeric sensors — an lv_scale (round) + line
+  // needle, top-right above the chart. Same value the big label shows; range
+  // tracks the window's padded min/max. Hidden for binary_sensor and no-data.
+  lv_obj_t *history_gauge_{nullptr};
+  lv_obj_t *history_gauge_needle_{nullptr};
   // UE2: loading indicator over the chart during the blocking REST backfill. A
   // hand-rotated arc (not lv_spinner): the fetch runs inside an LVGL event, so
   // lv_timer_handler can't be re-entered to drive a real anim — spin_history_()

@@ -194,7 +194,9 @@ dial sets the value and Apply calls the same service (single `temperature`, or
 
 ## UE4 — Analog gauge on the sensor history sheet
 
-**Status:** ⬜ not started · target tag: `ue4-gauge`
+**Status:** ✅ done — validated on-device (numeric gauge tracks current reading
+alongside the trend chart; binary sensors unaffected). Compiles + links clean
+(RAM 16.5%, Flash 19.5%). · target tag: `ue4-gauge`
 
 **Pairs with (existing):** numeric `sensor` history sheet
 ([build_history_sheet_](components/ha_panel/ha_panel.cpp#L3398)). The current
@@ -207,18 +209,27 @@ existing chart (gauge = now, chart = history). Zero new data — same value the
 label already shows.
 
 Tasks:
-- [ ] Add an `lv_scale` in arc/round mode plus a needle line to the history
-      sheet, laid out so it coexists with title / value / chart (may share the
-      value-label corner or sit above the chart; keep the chart the focus).
-- [ ] Drive the needle from the same value feeding `history_value_`, on open and
-      on each live-tail update.
-- [ ] Derive the gauge range from the data window's min/max (the sheet already
-      computes a value range for the chart axis — reuse it) so the needle isn't
-      pinned. Fall back to a sane default when the range is degenerate.
-- [ ] Optional: colored zones (green → amber → red) on the scale; keep simple
-      and config-free for v1.
-- [ ] Hide the gauge for `binary_sensor` (the strip view already replaces the
-      chart there — [:3466](components/ha_panel/ha_panel.cpp#L3466)).
+- [x] Added an `lv_scale` (`LV_SCALE_MODE_ROUND_INNER`, 270° sweep / rotation
+      135) + `lv_line` needle (`history_gauge_` / `history_gauge_needle_`),
+      top-right just under the ✕. **Placement:** the chart was shortened
+      230→176 px (top y96→150, bottom stays 326) to free the band; the gauge
+      (96×96) sits in it without crowding, chart stays the dominant element.
+      Spinner + binary strip re-centered to the new chart footprint.
+- [x] Driven from `redraw_history_`, which runs on open *and* on every live-tail
+      append — so the needle tracks the same value as `history_value_` (prefers
+      the live state via `state_to_value_`, falls back to the freshest in-window
+      sample).
+- [x] Range = the window's `[vmin,vmax]` (the same min/max the chart axis
+      computes) padded ±15 % so the needle floats off the ends; degenerate/flat
+      series get a synthetic span. Scaled ×10 internally for one-decimal needle
+      resolution.
+- [ ] ~~Colored zones~~ — **skipped for v1.** Green→amber→red has no universal
+      meaning across sensor kinds (high temp = bad, high battery = good), and
+      v1 is "config-free." Needle + ticks on the teal accent only. Revisit if a
+      per-entity hint lands.
+- [x] Gauge hidden for `binary_sensor` (strip branch) and for the no-data path;
+      `lv_scale_set_label_show(false)` keeps the 96 px dial uncluttered (numbers
+      already live in `history_value_` + `history_range_label_`).
 
 **Exit criteria:** Tapping a numeric sensor shows a live analog gauge of the
 current reading alongside the trend chart; binary sensors are unaffected.

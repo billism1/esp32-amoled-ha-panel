@@ -3790,9 +3790,11 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   lv_obj_align(this->history_value_, LV_ALIGN_TOP_LEFT, 24, 52);
 
   // Numeric chart (line). Hidden when the open entity is a binary_sensor.
+  // UE4: shortened 230→176 and dropped to y=150 (bottom stays at 326) to free a
+  // band above it for the top-right analog gauge.
   this->history_chart_ = lv_chart_create(this->history_sheet_);
-  lv_obj_set_size(this->history_chart_, 432, 230);
-  lv_obj_align(this->history_chart_, LV_ALIGN_TOP_MID, 0, 96);
+  lv_obj_set_size(this->history_chart_, 432, 176);
+  lv_obj_align(this->history_chart_, LV_ALIGN_TOP_MID, 0, 150);
   lv_obj_set_style_bg_color(this->history_chart_, lv_color_hex(0x111111), 0);
   lv_obj_set_style_bg_opa(this->history_chart_, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(this->history_chart_, 0, 0);
@@ -3813,8 +3815,8 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   // one of the two is visible per open. Children (bands) are rebuilt on redraw.
   this->history_strip_ = lv_obj_create(this->history_sheet_);
   lv_obj_remove_style_all(this->history_strip_);
-  lv_obj_set_size(this->history_strip_, 432, 230);
-  lv_obj_align(this->history_strip_, LV_ALIGN_TOP_MID, 0, 96);
+  lv_obj_set_size(this->history_strip_, 432, 176);
+  lv_obj_align(this->history_strip_, LV_ALIGN_TOP_MID, 0, 150);
   lv_obj_set_style_bg_color(this->history_strip_, lv_color_hex(0x111111), 0);
   lv_obj_set_style_bg_opa(this->history_strip_, LV_OPA_COVER, 0);
   lv_obj_set_style_radius(this->history_strip_, 8, 0);
@@ -3830,7 +3832,7 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   // lv_refr_now). No knob, not clickable.
   this->history_spinner_ = lv_arc_create(this->history_sheet_);
   lv_obj_set_size(this->history_spinner_, 60, 60);
-  lv_obj_align(this->history_spinner_, LV_ALIGN_TOP_MID, 0, 181);
+  lv_obj_align(this->history_spinner_, LV_ALIGN_TOP_MID, 0, 208);
   lv_obj_remove_flag(this->history_spinner_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_remove_style(this->history_spinner_, NULL, LV_PART_KNOB);
   lv_arc_set_bg_angles(this->history_spinner_, 0, 360);
@@ -3842,6 +3844,46 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   lv_obj_set_style_arc_color(this->history_spinner_, lv_color_hex(0x44CCDD),
                              LV_PART_INDICATOR);
   lv_obj_add_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
+
+  // UE4: analog "now" gauge — a round lv_scale + line needle, top-right in the
+  // band freed by the shortened chart, just under the ✕ button. It renders the
+  // *current* value (same as history_value_) as a needle angle; the chart stays
+  // the focus (gauge = now, chart = history). Tick labels are off: the numbers
+  // live in history_value_ / history_range_label_, and rotated labels on a 96 px
+  // dial would only clutter it. Hidden for binary_sensor and no-data (see
+  // redraw_history_); shown only once numeric data is drawn.
+  this->history_gauge_ = lv_scale_create(this->history_sheet_);
+  lv_obj_set_size(this->history_gauge_, 96, 96);
+  lv_obj_align(this->history_gauge_, LV_ALIGN_TOP_RIGHT, -24, 48);
+  lv_obj_remove_flag(this->history_gauge_, LV_OBJ_FLAG_CLICKABLE);
+  lv_scale_set_mode(this->history_gauge_, LV_SCALE_MODE_ROUND_INNER);
+  lv_scale_set_label_show(this->history_gauge_, false);
+  lv_scale_set_total_tick_count(this->history_gauge_, 21);
+  lv_scale_set_major_tick_every(this->history_gauge_, 5);
+  // 270° sweep starting at 7-8 o'clock (rotation 135) — the classic gauge layout.
+  lv_scale_set_angle_range(this->history_gauge_, 270);
+  lv_scale_set_rotation(this->history_gauge_, 135);
+  // Main = the arc track; ITEMS = minor ticks; INDICATOR = major ticks.
+  lv_obj_set_style_arc_width(this->history_gauge_, 3, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(this->history_gauge_, lv_color_hex(0x444444),
+                             LV_PART_MAIN);
+  lv_obj_set_style_line_color(this->history_gauge_, lv_color_hex(0x666666),
+                              LV_PART_ITEMS);
+  lv_obj_set_style_length(this->history_gauge_, 4, LV_PART_ITEMS);
+  lv_obj_set_style_line_width(this->history_gauge_, 1, LV_PART_ITEMS);
+  lv_obj_set_style_line_color(this->history_gauge_, lv_color_hex(0xAAAAAA),
+                              LV_PART_INDICATOR);
+  lv_obj_set_style_length(this->history_gauge_, 8, LV_PART_INDICATOR);
+  lv_obj_set_style_line_width(this->history_gauge_, 2, LV_PART_INDICATOR);
+
+  // Needle: a line child of the scale; lv_scale_set_line_needle_value owns its
+  // point array and re-aims it each redraw. Teal to match the chart series.
+  this->history_gauge_needle_ = lv_line_create(this->history_gauge_);
+  lv_obj_set_style_line_width(this->history_gauge_needle_, 3, 0);
+  lv_obj_set_style_line_color(this->history_gauge_needle_,
+                              lv_color_hex(0x44CCDD), 0);
+  lv_obj_set_style_line_rounded(this->history_gauge_needle_, true, 0);
+  lv_obj_add_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
 
   // Bottom row under the chart: time span (left = oldest visible sample age,
   // right = "now") + centered value range. Time markers make the x-axis legible
@@ -3933,6 +3975,30 @@ void HAPanel::spin_history_() {
   lv_refr_now(NULL);
 }
 
+void HAPanel::update_history_gauge_(float vmin, float vmax, float current) {
+  if (this->history_gauge_ == nullptr || this->history_gauge_needle_ == nullptr)
+    return;
+  // Pad the data window's range so the needle floats inside the dial instead of
+  // pinning to an end (the current value is itself part of [vmin,vmax]). A flat
+  // series gets a synthetic span so the scale isn't degenerate.
+  float span = vmax - vmin;
+  float pad = span > 0.0f ? span * 0.15f
+                          : (std::fabs(vmax) > 1.0f ? std::fabs(vmax) * 0.1f : 1.0f);
+  float gmin = vmin - pad, gmax = vmax + pad;
+  // Scale ×10 for one decimal of needle resolution. Labels are off, so the
+  // scaled ints are never shown — they only set the needle's angular position.
+  int32_t lo = (int32_t) std::lround(gmin * 10.0f);
+  int32_t hi = (int32_t) std::lround(gmax * 10.0f);
+  if (hi <= lo) hi = lo + 1;
+  lv_scale_set_range(this->history_gauge_, lo, hi);
+  int32_t nv = (int32_t) std::lround(current * 10.0f);
+  if (nv < lo) nv = lo;
+  if (nv > hi) nv = hi;
+  lv_scale_set_line_needle_value(this->history_gauge_, this->history_gauge_needle_,
+                                 34, nv);
+  lv_obj_clear_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
+}
+
 void HAPanel::redraw_history_() {
   if (this->history_sheet_ == nullptr ||
       this->history_entity_idx_ >= this->entities_.size())
@@ -3971,6 +4037,8 @@ void HAPanel::redraw_history_() {
   if (is_binary) {
     // ---- on/off band strip ----
     lv_obj_add_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
+    if (this->history_gauge_ != nullptr)  // UE4: gauge is numeric-only
+      lv_obj_add_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clean(this->history_strip_);
     // The strip's x-axis is genuinely time-proportional, so it spans the full
@@ -3983,7 +4051,7 @@ void HAPanel::redraw_history_() {
     float cur_val = 0.0f;
     uint32_t seg_start = cutoff;
     const int32_t strip_w = 432;
-    const int32_t strip_h = 230;
+    const int32_t strip_h = 176;  // UE4: matches the shortened chart footprint
     for (const auto &s : this->history_samples_) {
       if (s.t_s <= cutoff) {
         cur_val = s.value;
@@ -4065,6 +4133,8 @@ void HAPanel::redraw_history_() {
     lv_label_set_text(this->history_time_left_, "");
     lv_label_set_text(this->history_time_right_, "");
     lv_label_set_text(this->history_range_label_, "");
+    if (this->history_gauge_ != nullptr)  // UE4: no needle without data
+      lv_obj_add_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
     return;
   }
 
@@ -4104,6 +4174,14 @@ void HAPanel::redraw_history_() {
   char range[40];
   snprintf(range, sizeof(range), "%.1f - %.1f", vmin, vmax);
   lv_label_set_text(this->history_range_label_, range);
+
+  // UE4: aim the analog gauge at the current value (prefer the live state so it
+  // matches history_value_; fall back to the freshest in-window sample), with
+  // the dial scaled to this window's value range.
+  float gnow;
+  if (!HAPanel::state_to_value_(e, &gnow))
+    gnow = vals.back();
+  this->update_history_gauge_(vmin, vmax, gnow);
 }
 
 void HAPanel::on_history_close_(lv_event_t *e) {

@@ -2647,6 +2647,72 @@ unchanged; (6) arc-drag ergonomics on the round panel; (7) connect log shows no
 
 ---
 
+### Phase UE4 — Analog gauge on the sensor history sheet
+
+**Outcome:** The numeric-sensor history sheet now carries a small round **analog
+gauge** (`lv_scale` + `lv_line` needle) top-right, rendering the *current* value
+as a needle angle to complement the trend chart (gauge = now, chart = history).
+Zero new data — the needle reads the same value as `history_value_`. Compiles +
+links clean (RAM 16.5%, Flash 19.5%, +0.1 % over UE1); **on-device validation
+pending** (per the plan's no-commit-before-flash gate).
+
+**Widget = `lv_scale`, not `lv_meter`.** LVGL 9.5 removed `lv_meter`; the v9
+replacement is `lv_scale` with a separately-created needle line aimed via
+`lv_scale_set_line_needle_value(scale, line, length, value)` (the line's point
+array is owned/re-aimed by the scale each call — cheap to re-run on every
+redraw). Round look: `LV_SCALE_MODE_ROUND_INNER`, `angle_range 270`,
+`rotation 135` (low end ≈ 7-8 o'clock, the classic gauge sweep). Parts:
+`LV_PART_MAIN` = arc track, `LV_PART_ITEMS` = minor ticks, `LV_PART_INDICATOR` =
+major ticks. `LV_USE_SCALE` (+ its `LV_USE_LINE`/`LV_USE_IMAGE` deps) came in
+with UE1.
+
+**Placement — the chart had to give up height.** The sheet was already full
+(title + value + 432×230 chart + time row + chips). The top band above the chart
+(< y96) is only ~50 px tall and the close ✕ owns the top-right corner — too
+small for a readable dial. So the **chart was shortened 230→176 px** (top
+y96→150, bottom unchanged at 326) and the 96×96 gauge dropped into the freed
+band at `TOP_RIGHT (-24, 48)` — just below the ✕ (4 px gap) and above the chart
+(6 px gap), with the big value label balancing it on the left. The chart stays
+the dominant element (432 wide). The UE2 loading arc and the binary on/off strip
+were re-centered/resized to the new 176 px chart footprint (`strip_h` 230→176,
+spinner align y 181→208).
+
+**Range tracks the window, needle floats.** The chart already computes
+`vmin`/`vmax` for its Y axis; the gauge reuses them, **padded ±15 %** so the
+current value (which is itself one of the samples, often the extreme) doesn't pin
+to a dial end. A flat/degenerate series gets a synthetic span. Values are scaled
+**×10 internally** for one-decimal needle resolution (a 0.2→0.4 kW band would
+collapse to integers otherwise); tick **labels are off**
+(`lv_scale_set_label_show(false)`), so the scaled ints never surface — the
+numbers already live in `history_value_` (current) and `history_range_label_`
+(min–max), and rotated labels on a 96 px dial would only clutter it.
+
+**Driven from the existing redraw path.** `update_history_gauge_(vmin, vmax,
+current)` is called at the tail of `redraw_history_`'s numeric branch, which runs
+on open *and* on every live-tail append — so the needle tracks live with no new
+timer. `current` prefers the live state (`state_to_value_`, matching the big
+label) and falls back to the freshest in-window sample. The gauge is
+**numeric-only**: explicitly hidden in the `binary_sensor` strip branch and the
+no-data branch, shown only once a numeric series is drawn (default-hidden at
+build, so it never flashes during the blocking fetch).
+
+**Colored zones — deferred.** The plan floated optional green→amber→red sections.
+Skipped for v1: the color semantics aren't universal (high temp = bad, high
+battery = good, high humidity = neutral), and v1 is config-free. Needle + ticks
+on the panel's teal accent (`0x44CCDD`) only. Revisit if a per-entity
+direction/threshold hint ever lands.
+
+**Verification:** clean `esphome compile` links `firmware.elf` + factory/OTA
+bins. On-device checks to eyeball on the 480×480 panel: (1) tap a numeric sensor
+→ a round gauge appears top-right with the needle at the current reading,
+alongside the (now shorter) trend chart; (2) the needle moves on live updates and
+on 1h/6h/24h window changes; (3) the needle isn't pinned to an end for a
+narrow-band sensor (padding works); (4) tap a `binary_sensor` → no gauge, just
+the on/off strip; (5) the gauge + chart + time row + chips all fit without
+overlap or corner-clip.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks
