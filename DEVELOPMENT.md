@@ -2392,6 +2392,65 @@ ESP32-S3-Box-3 reference config (same PA pin).
 
 ---
 
+### Phase UE1 — Build-config guard for the new widget types
+
+**Outcome:** All five new widget types (`arc`, `scale`, `led`, `spinner`,
+`roller`) now compile and link from the C++ runtime tree. Enabled via
+`build_flags` in [boards/waveshare-2.16.yaml](boards/waveshare-2.16.yaml), the
+same mechanism P7/E9 already use — **not** the YAML font-anchor trick the plan
+floated. The anchor trick is for *fonts*; for widget *types* this project's
+precedent is `-DLV_USE_*=1` build flags (ha_panel builds widgets at runtime via
+the LVGL C API, so ESPHome's YAML-driven `LV_USE_*` detection strips out
+anything not referenced in YAML).
+
+**Why build_flags, not anchors:** ESPHome's `generate_lv_conf_h()` hard-defines
+every unused `LV_USE_*` to `0` in the generated `lv_conf.h`, *except* macros it
+sees in `build_flags` (`-DLV_USE_X=1`) — those are omitted from the header and
+defined by the compiler `-D` flag instead. So a build flag is the reliable way
+to force a runtime-only widget type to link. Confirmed before the change:
+`LV_USE_ARC`, `LV_USE_SCALE`, `LV_USE_LED`, `LV_USE_SPINNER`, `LV_USE_ROLLER`
+were all `= 0`.
+
+**LVGL version note:** the bundled LVGL is **9.5.0**, where `lv_meter` was
+removed and replaced by `lv_scale`. UE4's gauge is therefore `lv_scale`
+(`LV_USE_SCALE`), not the old `lv_meter`. ESPHome has no `scale` widget type —
+only a `meter` widget that emulates the old API on top of `lv_scale`.
+
+**Dependency chain discovered the hard way (two failed links):** enabling
+`LV_USE_SCALE` alone fails to compile `lv_scale.c`:
+- `error: 'lv_line_class' undeclared` → the line-needle path needs
+  `LV_USE_LINE=1`.
+- `implicit declaration of 'lv_image_set_rotation'` → the image-needle rotation
+  path needs `LV_USE_IMAGE=1`.
+
+This matches ESPHome's own `MeterType.get_uses()` returning
+`(scale, line, image, label)`. Net: `LV_USE_SCALE` pulls in `LV_USE_LINE` +
+`LV_USE_IMAGE` (label was already on). Flags added:
+
+```
+-DLV_USE_ARC=1
+-DLV_USE_LINE=1     # required by LV_USE_SCALE
+-DLV_USE_IMAGE=1    # required by LV_USE_SCALE
+-DLV_USE_SCALE=1
+-DLV_USE_LED=1
+-DLV_USE_SPINNER=1
+-DLV_USE_ROLLER=1
+```
+
+**Verification:** clean `esphome compile` links `firmware.elf` (RAM 16.5%, Flash
+19.4% — ~1.58 MB) with `lv_arc.c.o` / `lv_led.c.o` / `lv_roller.c.o` /
+`lv_spinner.c.o` / `lv_scale.c.o` (+ `lv_line.c.o`, `lv_image.c.o`) all in the
+object tree. No per-instance YAML declaration needed.
+
+**Caveat (pre-existing, unrelated):** on this Windows host `esphome compile`
+exits non-zero *after* a successful firmware build with
+`ERROR Could not match idedata` / "Set the terminal codepage to utf-8". That is
+ESPHome's post-build IDE-metadata step choking on the Windows codepage, not a
+link failure — `firmware.factory.bin` and `firmware.ota.bin` are produced
+regardless.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks

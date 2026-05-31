@@ -34,7 +34,7 @@ Sequenced easy → hard so each lands as an independent, shippable commit:
 
 ## UE1 — Build-config guard for the new widget types
 
-**Status:** ⬜ not started · target tag: `ue1-lvgl-widgets`
+**Status:** ✅ done · target tag: `ue1-lvgl-widgets`
 
 **Why first:** This project builds its widget tree from C++ via the LVGL C API,
 not from YAML. ESPHome's `lvgl` component only compiles a widget type's code
@@ -45,13 +45,15 @@ not from YAML. ESPHome's `lvgl` component only compiles a widget type's code
 references them. Confirm before building UI on top of them.
 
 Tasks:
-- [ ] Trial-compile a throwaway `lv_arc_create` / `lv_scale_create` /
-      `lv_led_create` / `lv_spinner_create` / `lv_roller_create` and confirm the
-      `LV_USE_*` macros are on in the generated `lv_conf.h` (link succeeds).
-- [ ] If any type is missing, add a hidden 0-sized anchor widget for it in
-      [packages/lvgl-ui.yaml](packages/lvgl-ui.yaml) — same force-link trick the
-      file already uses for the MDI/Montserrat fonts (see its `*_anchor` labels).
-- [ ] Note the outcome (which anchors were needed) in `DEVELOPMENT.md`.
+- [x] Trial-compile confirmed all five `LV_USE_*` started at `0`. Enabled them
+      and verified `firmware.elf` links with `lv_arc/led/roller/spinner/scale`
+      object files present.
+- [x] Enablement done via `-DLV_USE_*=1` `build_flags` in
+      [boards/waveshare-2.16.yaml](boards/waveshare-2.16.yaml) — the project's
+      existing precedent for runtime-built widgets (P7/E9), not the YAML
+      font-anchor trick. `LV_USE_SCALE` additionally required `LV_USE_LINE` +
+      `LV_USE_IMAGE` (needle paths).
+- [x] Outcome logged in `DEVELOPMENT.md` (Phase UE1).
 
 **Exit criteria:** All five widget types compile and link from C++ with no YAML
 declaration required for each instance.
