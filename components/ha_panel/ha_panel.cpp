@@ -838,22 +838,19 @@ void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
   lv_obj_remove_style_all(spacer);
   lv_obj_set_size(spacer, 1, 8);
 
-  // Timeouts (read-only display — substitution-driven, no runtime edit yet).
-  lv_obj_t *to_title = lv_label_create(content);
-  lv_label_set_text(to_title, "Idle timeouts");
-  lv_obj_set_style_text_color(to_title, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_text_font(to_title, &lv_font_montserrat_18, 0);
+  // ---- Power saving & burn-in protection (P8) ----
+  // Combines idle dim/blank timeouts (AMOLED burn-in mitigation) with the
+  // sleep-when-idle power controls under one heading.
+  lv_obj_t *pwr_title = lv_label_create(content);
+  lv_label_set_text(pwr_title, "Power saving & burn-in protection");
+  lv_obj_set_style_text_color(pwr_title, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(pwr_title, &lv_font_montserrat_18, 0);
 
+  // Timeouts (read-only display — substitution-driven, no runtime edit yet).
   lv_obj_t *to_dim = lv_label_create(content);
   lv_label_set_text(to_dim, "Dim after 15 s\nBlank after 45 s total");
   lv_obj_set_style_text_color(to_dim, lv_color_hex(0xAAAAAA), 0);
   lv_obj_set_style_text_font(to_dim, &lv_font_montserrat_18, 0);
-
-  // ---- Power saving (P8) ----
-  lv_obj_t *pwr_title = lv_label_create(content);
-  lv_label_set_text(pwr_title, "Power saving");
-  lv_obj_set_style_text_color(pwr_title, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_text_font(pwr_title, &lv_font_montserrat_18, 0);
 
   // Master toggle row: label left, lv_switch right.
   lv_obj_t *sleep_row = lv_obj_create(content);
@@ -925,8 +922,10 @@ void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
   char build_buf[Application::BUILD_TIME_STR_SIZE];
   App.get_build_time_string(build_buf);
   char abuf[160];
-  snprintf(abuf, sizeof(abuf), "%s\nESPHome %s\nBuilt %s\nCreated by William Krahmer",
-           App.get_name().c_str(), ESPHOME_VERSION, build_buf);
+  snprintf(abuf, sizeof(abuf),
+           "%s\nESPHome %s\nLVGL %d.%d.%d\nBuilt %s\nCreated by William Krahmer",
+           App.get_name().c_str(), ESPHOME_VERSION, LVGL_VERSION_MAJOR,
+           LVGL_VERSION_MINOR, LVGL_VERSION_PATCH, build_buf);
   lv_label_set_text(about, abuf);
   lv_obj_set_style_text_color(about, lv_color_hex(0xAAAAAA), 0);
   lv_obj_set_style_text_font(about, &lv_font_montserrat_18, 0);
