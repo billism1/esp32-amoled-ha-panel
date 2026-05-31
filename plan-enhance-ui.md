@@ -912,7 +912,7 @@ Tasks:
 
 ### Phase E10 — Touch click sound (settings-gated, tap-not-swipe)
 
-**Status:** ✅ done (verified on hardware) · no target tag yet
+**Status:** ✅ done (verified on hardware) · target tag: `e10-touch-click-sound`
 
 **Goal:** Optional low-volume "click" on a registered tap, off by default,
 toggled in the settings sheet. Must NOT fire on a swipe/scroll.
