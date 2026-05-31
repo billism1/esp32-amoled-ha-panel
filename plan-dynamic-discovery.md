@@ -1,6 +1,7 @@
 # Build Plan — Dynamic area + entity discovery
 
-> Split out of [plan-mvp.md](plan-mvp.md) (was "Phase 10"). The MVP plan
+> Split out of the MVP build plan (was "Phase 10"); that plan and its full
+> decision log now live in [DEVELOPMENT.md](DEVELOPMENT.md). The MVP plan
 > ships a static, gitignored `packages/ha-entities.yaml` (see its Phase 5).
 > This document covers replacing that static file with HA-side dynamic
 > config so re-arranging a home no longer needs a firmware rebuild.
@@ -83,4 +84,4 @@ text_sensor:
 
 ### Related
 
-- **Live-attr modal preload** (parked in the MVP plan's "Post-P7 TODO") naturally folds into this work: a HA-side template sensor batching per-entity attributes into one payload solves the connect-time TX-saturation problem. See [plan-mvp.md](plan-mvp.md) §"Post-P7 TODO — live attrs in modal".
+- **Live-attr modal preload** (parked in the MVP plan's "Post-P7 TODO") naturally folds into this work: a HA-side template sensor batching per-entity attributes into one payload solves the connect-time TX-saturation problem. See [DEVELOPMENT.md](DEVELOPMENT.md) §"Post-P7 TODO — live attrs in modal".
