@@ -2605,6 +2605,21 @@ etc. `parse_ha_list_` only strips a token's *outer* quotes, so the interior
 single-quoted span (pass-through for already-bare tokens), applied to each mode
 after parse.
 
+**Setpoint "sticks ~half the time" is the cloud thermostat, not firmware
+(ruled out).** `climate.thermostat_downstairs` is Honeywell **Lyric**
+(`platform: lyric`), cloud-polled. HA shows the new setpoint optimistically, but
+the authoritative value arrives on the next poll from Honeywell's cloud; when the
+poll beats the write (or the write is throttled/dropped) the old value returns —
+intermittent by timing. Verified via direct HA access: test writes returned
+"state change could not be verified within timeout" and the log carried a
+DNS/SSL timeout to `api.honeywellhome.com`. The panel sends a single integer
+`set_temperature`, clamped to the reported 60–80 range, with no redundant
+`set_hvac_mode` — i.e. correct every time; the loss is downstream. (The earlier
+redundant-`set_hvac_mode` removal still stands as a correctness fix.) No
+firmware change warranted; for reliability the fix is HA-side (space writes,
+`homeassistant.update_entity` to force a poll, or a permanent hold in the
+Honeywell app).
+
 **Page row shows current temperature.** Climate is a `SUMMARY_TEXT` render class
 that previously displayed only the hvac-mode word (`"cool"`). The row now renders
 `"<mode>  <current_temperature>°"` (e.g. `cool  77°`), reading the same
