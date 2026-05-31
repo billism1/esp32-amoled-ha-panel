@@ -1397,14 +1397,29 @@ HAPanel::SplashStage HAPanel::build_splash_stage_(lv_obj_t *parent, const char *
   lv_obj_set_style_text_font(row, &lv_font_montserrat_18, 0);
   lv_obj_align(row, LV_ALIGN_CENTER, -14, y);
 
-  // Amber pending dot — sits just right of the phrase, after the "...".
+  // Amber dim dot — sits just right of the phrase, after the "...". Shown only
+  // while the stage is queued (a later gate not yet being worked on).
   st.dot = lv_obj_create(parent);
   lv_obj_remove_style_all(st.dot);
   lv_obj_set_size(st.dot, 12, 12);
   lv_obj_set_style_radius(st.dot, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_bg_color(st.dot, lv_color_hex(0xDDAA33), 0);
-  lv_obj_set_style_bg_opa(st.dot, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_opa(st.dot, LV_OPA_30, 0);
   lv_obj_align_to(st.dot, row, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+
+  // UE2: spinner shown while this stage is the active gate. Same spot as the
+  // dot/check. The boot wait runs across loop ticks (lv_timer_handler keeps
+  // firing), so unlike the blocking history fetch this one actually animates.
+  st.spinner = lv_spinner_create(parent);
+  lv_spinner_set_anim_params(st.spinner, 1000, 60);  // 1 s/rev, 60° arc
+  lv_obj_set_size(st.spinner, 18, 18);
+  lv_obj_set_style_arc_width(st.spinner, 3, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(st.spinner, lv_color_hex(0x333333), LV_PART_MAIN);
+  lv_obj_set_style_arc_width(st.spinner, 3, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(st.spinner, lv_color_hex(0xDDAA33),
+                             LV_PART_INDICATOR);
+  lv_obj_align_to(st.spinner, row, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
+  lv_obj_add_flag(st.spinner, LV_OBJ_FLAG_HIDDEN);
 
   // Green checkmark — same spot, hidden until the stage completes.
   st.check = lv_label_create(parent);
@@ -1420,17 +1435,27 @@ void HAPanel::update_splash_stage_(const SplashStage &st, bool done, bool active
   if (st.dot == nullptr || st.check == nullptr)
     return;
   if (done) {
-    // Stage complete: swap amber dot for the green check.
+    // Stage complete: green check only.
     lv_obj_add_flag(st.dot, LV_OBJ_FLAG_HIDDEN);
+    if (st.spinner != nullptr)
+      lv_obj_add_flag(st.spinner, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(st.check, LV_OBJ_FLAG_HIDDEN);
     return;
   }
-  lv_obj_clear_flag(st.dot, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(st.check, LV_OBJ_FLAG_HIDDEN);
-  // Active stage pulses with the shared blink phase; a not-yet-reached stage
-  // sits dim and steady.
-  lv_opa_t opa = active ? (this->blink_on_ ? LV_OPA_COVER : LV_OPA_30) : LV_OPA_30;
-  lv_obj_set_style_bg_opa(st.dot, opa, 0);
+  if (active) {
+    // UE2: the gate being worked on shows the animated spinner (self-driven by
+    // LVGL's anim timer — no dependence on the blink phase), dot hidden.
+    lv_obj_add_flag(st.dot, LV_OBJ_FLAG_HIDDEN);
+    if (st.spinner != nullptr)
+      lv_obj_clear_flag(st.spinner, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    // Queued (a later gate not yet reached): dim steady dot, no spinner.
+    if (st.spinner != nullptr)
+      lv_obj_add_flag(st.spinner, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(st.dot, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_bg_opa(st.dot, LV_OPA_30, 0);
+  }
 }
 
 void HAPanel::update_splash_status_() {

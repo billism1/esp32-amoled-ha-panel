@@ -240,7 +240,8 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // E5: a splash init-stage's indicator handles — an amber dot that blinks
   // while the stage is in progress, swapped for a green check when it is done.
   struct SplashStage {
-    lv_obj_t *dot{nullptr};    // amber pending indicator (blinks while active)
+    lv_obj_t *dot{nullptr};      // amber dim dot shown while the stage is queued
+    lv_obj_t *spinner{nullptr};  // UE2: animated spinner shown while stage active
     lv_obj_t *check{nullptr};  // green LV_SYMBOL_OK shown when stage done
   };
   // E5: build one splash init-stage row (phrase + amber dot + hidden green

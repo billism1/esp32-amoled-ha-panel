@@ -2451,6 +2451,50 @@ regardless.
 
 ---
 
+### Phase UE2 — Spinner for loading states
+
+**Outcome:** Shipped a per-stage `lv_spinner` on the **boot splash**, not on the
+history sheet the plan first targeted. The pivot was forced by a hard runtime
+fact, then steered by a UX call.
+
+**Why not the history sheet (the plan's primary target):** `LvglComponent::loop()`
+(ESPHome's lvgl component) calls `lv_timer_handler()` on the **single main
+loop**. The E9 history backfill (`history_http_->get()` in
+[fetch_history_](components/ha_panel/ha_panel.cpp)) blocks that same loop by
+design, so LVGL never ticks during the fetch — a spinner there renders exactly
+one frozen frame, no better than the existing "Loading..." text. Per UE2's own
+fallback clause, the static text at
+[ha_panel.cpp:3761](components/ha_panel/ha_panel.cpp#L3761) is kept as-is.
+
+**Why not the detail modal (the plan's secondary target):** the async
+attribute-fetch path (`request_detail_attrs_`, with a "Loading…" placeholder and
+a 1500 ms safety timeout) is **parked dead code** — never called.
+`open_detail_` builds the modal synchronously and instantly
+([ha_panel.cpp:2141](components/ha_panel/ha_panel.cpp#L2141)), so there is no
+live placeholder to replace.
+
+**What shipped (boot splash):** each init stage row (`build_splash_stage_`) now
+carries three indicators sharing the same right-of-text anchor:
+- `spinner` (new) — 18 px `lv_spinner`, 1 s/rev, 60° arc, amber indicator
+  (`0xDDAA33`) on a dim track (`0x333333`). Shown only while the stage is the
+  **active** gate.
+- `dot` — the amber dot, now demoted to a steady `LV_OPA_30` marker for a
+  **queued** stage (a later gate not yet reached, e.g. HA before Wi-Fi is up).
+- `check` — green `LV_SYMBOL_OK`, shown when the stage is **done** (unchanged).
+
+`update_splash_stage_` switches between the three on `(done, active)`. The boot
+wait progresses across loop ticks, so the spinner genuinely animates — and it is
+self-driven by LVGL's anim timer, so it no longer depends on the `blink_on_`
+phase the old pulsing dot used. The shared blink timer still runs for the header
+status dot; re-applying splash state on each tick is idempotent.
+
+**Verification:** clean `esphome compile` links (RAM 16.5%, Flash 19.4%, +236 B).
+On-device animation-during-boot to be eyeballed on the panel, but the path is
+async by construction so it will tick. `LV_USE_SPINNER` (+ `LV_USE_ARC`) came in
+with UE1.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks

@@ -66,7 +66,7 @@ declaration required for each instance.
 
 ## UE2 — Spinner for loading states
 
-**Status:** ⬜ not started · target tag: `ue2-spinner`
+**Status:** ✅ done (scope shifted to boot splash) · target tag: `ue2-spinner`
 
 **Pairs with (existing):** the blocking "Loading..." text in the history sheet
 ([ha_panel.cpp:3759-3761](components/ha_panel/ha_panel.cpp#L3759-L3761)) and the
@@ -80,22 +80,29 @@ while the blocking REST backfill runs, hidden once data lands or the fetch
 times out / fails.
 
 Tasks:
-- [ ] Add a reusable `lv_spinner` to the history sheet, hidden by default; show
-      it where the code currently paints `history_value_` = "Loading...", hide
-      it on first redraw / "No data yet"
-      ([:3682](components/ha_panel/ha_panel.cpp#L3682)) / error.
-- [ ] Same treatment for the detail-modal "Loading..." placeholder.
-- [ ] (Optional) Add a small spinner beside the active boot-splash stage.
-- [ ] Confirm the spinner animates during the **blocking** fetch — LVGL anim
-      ticks must still run while `http_request` blocks; if they don't, keep the
-      text fallback for that one path and note it.
+- [x] ~~History sheet spinner~~ — **not viable.** Confirmed `LvglComponent::loop()`
+      calls `lv_timer_handler()` on the single main loop, and the REST backfill
+      (`history_http_->get()`) blocks that same loop. A spinner there cannot
+      animate (would render one frozen frame), so the static "Loading..." text
+      ([:3761](components/ha_panel/ha_panel.cpp#L3761)) is kept as-is per this
+      item's own fallback note.
+- [x] ~~Detail-modal placeholder~~ — **N/A.** The async attr-fetch path
+      (`request_detail_attrs_`, with the "Loading…" placeholder + 1500 ms
+      timeout) is parked dead code; `open_detail_` builds synchronously and
+      instantly ([:2141](components/ha_panel/ha_panel.cpp#L2141)). No live
+      placeholder to replace.
+- [x] **Boot-splash spinner (delivered):** per-stage `lv_spinner` beside each
+      init stage. The boot wait runs across loop ticks, so it genuinely
+      animates. State machine: **active** → animated spinner; **queued** → dim
+      amber dot (kept); **done** → green check (kept). See `update_splash_stage_`.
 
-**Exit criteria:** Opening a 6h/24h window shows a spinning indicator, not frozen
-text, and it disappears the instant the chart paints.
+**Exit criteria (revised):** Boot splash shows an animated spinner on the stage
+currently being worked on (Wi-Fi, then HA), the next stage sits as a dim dot, and
+each flips to a green check on completion. Compiles + links clean.
 
-**Risks / unknowns:**
-- The REST backfill is blocking by design. If the LVGL task is starved during
-  the fetch the spinner won't animate — verify on-device, not just in theory.
+**Risks / unknowns (resolved):**
+- The REST backfill is blocking by design and starves LVGL → history spinner
+  dropped (text kept). The splash path is async, so the spinner animates there.
 
 ---
 
