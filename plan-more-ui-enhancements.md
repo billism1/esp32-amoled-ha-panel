@@ -113,8 +113,11 @@ dim dot, each flipping to a green check on completion. Compiles + links clean.
 
 ## UE3 — Arc dials (climate setpoint + media volume)
 
-**Status:** 🛑 compiles, **on-device validation PENDING — DO NOT git commit until
-the user confirms functionality on the panel** · target tag: `ue3-arc-dials`
+**Status:** ✅ done — validated on-device (climate single + dual dials, integer
+steps, row temp, tap-to-open). Setpoint "revert ~half the time" traced to the
+Honeywell **Lyric cloud poll**, not firmware (see DEVELOPMENT.md). Media volume
+dial + heat_cool dual-apply compile clean, on-device check optional (no
+media_player entity yet). · target tag: `ue3-arc-dials`
 
 **Pairs with (existing):**
 - Climate target-temp slider in
@@ -310,7 +313,7 @@ choosing a value and Apply calls the same service as the dropdown did.
 
 - **🛑 NO git commit until on-device validation passes.** Compiling clean is not
   enough — flash the panel and confirm the feature works before any commit.
-  UE3 is in this state now: built + flashed, awaiting the user's on-panel sign-off.
+  (UE3 passed this gate — validated on-panel, cleared to commit.)
 - **Validate acceptance criteria before commit**
 - **One commit per UE item**, each independently shippable and revertible.
 - **No HA-side changes** for any item here — same states, same service calls.
