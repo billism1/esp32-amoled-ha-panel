@@ -113,7 +113,8 @@ dim dot, each flipping to a green check on completion. Compiles + links clean.
 
 ## UE3 — Arc dials (climate setpoint + media volume)
 
-**Status:** ⬜ not started · target tag: `ue3-arc-dials`
+**Status:** 🛑 compiles, **on-device validation PENDING — DO NOT git commit until
+the user confirms functionality on the panel** · target tag: `ue3-arc-dials`
 
 **Pairs with (existing):**
 - Climate target-temp slider in
@@ -130,22 +131,55 @@ arc fires `LV_EVENT_VALUE_CHANGED` and exposes `lv_arc_get_value` /
 `lv_arc_set_value` just like the slider, so `apply_detail_` is untouched.
 
 Tasks:
-- [ ] Climate: replace `dw_temp_slider_` with `lv_arc`; keep range/step math at
-      [:2402-2422](components/ha_panel/ha_panel.cpp#L2402-L2422). Center the
-      `dw_temp_label_` inside the arc. Tint the arc indicator by HVAC mode
-      (heat = warm, cool = blue, off = grey) from the existing mode read.
-- [ ] Media: replace `dw_volume_slider_` with `lv_arc`, 0–100, keep the
-      `%` label centered.
-- [ ] Repoint the existing `VALUE_CHANGED` event callbacks at the arc;
-      replace `lv_slider_*` calls in those handlers with `lv_arc_*`.
-- [ ] Verify the apply path still sends correct values for both
-      ([apply_detail_](components/ha_panel/ha_panel.cpp#L2690)).
-- [ ] Size for touch: arc thick enough to drag with a fingertip on 480×480;
-      check it doesn't collide with the modal's Apply/Cancel row.
+- [x] Climate: replaced `dw_temp_slider_` with `lv_arc`; range/step math reused
+      verbatim. `dw_temp_label_` is a child of the arc, centered in the ring.
+      Indicator + knob tinted by HVAC mode (off = grey, heat = warm, cool = blue,
+      else teal) from the existing `e.state` read.
+- [x] Media: replaced `dw_volume_slider_` with `lv_arc`, 0–100, `%` label
+      centered inside (teal accent).
+- [x] Repointed the `VALUE_CHANGED` handlers at the arc; `lv_slider_get_value`
+      → `lv_arc_get_value` in both handlers.
+- [x] Apply path updated (`lv_slider_get_value` → `lv_arc_get_value` for temp +
+      volume); same services, same scaling. Compiles + links clean.
+- [x] Touch sizing: 180×180 dial, 14 px arc width, default draggable knob. Each
+      arc wrapped in a transparent non-scrollable holder so it centers without
+      shifting the section labels; content scrolls, Apply/Cancel pinned at y=396
+      → no collision. Fingertip ergonomics flagged for on-device tuning.
 
-**Exit criteria:** Climate modal shows a round setpoint dial colored by mode;
-media modal shows a round volume dial. Dragging either sets the value and Apply
-calls the same service as before.
+Scope grew during validation (all compile clean, on-device pending):
+- [x] **Climate attrs were never loaded** (pre-existing; slider had it too). Fixed
+      by subscribing the standard `ClimateEntity` attrs at connect time (E7
+      precedent, no re-arm) — incl. `target_temp_low`/`target_temp_high`. Killed
+      the bogus `21` midpoint + `--` current + °F/°C range mismatch.
+- [x] **Mode-aware setpoints.** heat/cool → one 180px `temperature` dial;
+      auto/heat_cool → two **side-by-side** 150px dials ("Heat to" =
+      `target_temp_low`, "Cool to" = `target_temp_high`) so both are visible
+      without scroll (stacking buried the cool dial + arc traps scroll). Two
+      boxes built, one hidden; HVAC-dropdown change swaps them live
+      (`on_detail_hvac_mode_changed_`) + re-tints. Dual handlers clamp low ≤
+      high. Apply branches: dual sends low+high, single sends temperature.
+- [x] **Page row shows current temp**: climate row renders `"<mode>  <temp>°"`,
+      refreshed via `on_attr_` → `rebuild_entity_row_` on `current_temperature`.
+- [x] **Tap opens modal** for `SUMMARY_TEXT`+detail domains (climate/media/number/
+      select), not only long-press.
+- [x] **hvac_modes enum-repr cleanup**: HA sent `<HVACMode.OFF: 'off'>`;
+      `clean_hvac_mode_` extracts the quoted value (fixed dropdown text +
+      preselect + dual-detect + apply payload).
+- [x] **Whole-degree steps**: default `target_temp_step` 0.5 → 1.0 when HA omits
+      it; labels drop the decimal for integer steps (`fmt_setpoint_`).
+- [x] **No bg-tap close**: removed the detail-modal background-click handler so a
+      stray side/bottom tap can't dismiss the modal mid-edit — only Apply/Cancel.
+- [x] **Setpoint stuck only ~half the time** → apply sent a redundant
+      `set_hvac_mode` (current mode) right before `set_temperature`, racing the
+      integration's target re-read. Now sends `set_hvac_mode` only when the mode
+      actually changed.
+
+**Exit criteria:** Climate modal shows a round setpoint dial colored by mode,
+reading the true target + current temp; auto/heat_cool shows two dials (heat +
+cool point); the page row shows the current temperature; a tap (not just a
+long-press) opens the modal; media modal shows a round volume dial. Dragging any
+dial sets the value and Apply calls the same service (single `temperature`, or
+`target_temp_low`/`target_temp_high` for dual; `media_player.volume_set`).
 
 **Risks / unknowns:**
 - Arc drag ergonomics vs. slider on a small round display — may need a wide
@@ -274,6 +308,9 @@ choosing a value and Apply calls the same service as the dropdown did.
 
 ## Cross-cutting notes
 
+- **🛑 NO git commit until on-device validation passes.** Compiling clean is not
+  enough — flash the panel and confirm the feature works before any commit.
+  UE3 is in this state now: built + flashed, awaiting the user's on-panel sign-off.
 - **Validate acceptance criteria before commit**
 - **One commit per UE item**, each independently shippable and revertible.
 - **No HA-side changes** for any item here — same states, same service calls.

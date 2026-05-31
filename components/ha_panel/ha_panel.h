@@ -372,6 +372,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_detail_brightness_slider_(lv_event_t *e);
   static void on_detail_ct_slider_(lv_event_t *e);
   static void on_detail_temp_slider_(lv_event_t *e);
+  static void on_detail_temp_low_slider_(lv_event_t *e);
+  static void on_detail_temp_high_slider_(lv_event_t *e);
+  static void on_detail_hvac_mode_changed_(lv_event_t *e);
   static void on_detail_number_slider_(lv_event_t *e);
   static void on_detail_volume_slider_(lv_event_t *e);
   static void on_detail_fan_slider_(lv_event_t *e);
@@ -535,12 +538,21 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   bool dw_brightness_known_{false};
   lv_obj_t *dw_ct_slider_{nullptr};
   lv_obj_t *dw_ct_label_{nullptr};
-  lv_obj_t *dw_temp_slider_{nullptr};   // climate target temp, ×10 units
+  lv_obj_t *dw_temp_slider_{nullptr};   // climate single setpoint arc (heat/cool)
   lv_obj_t *dw_temp_label_{nullptr};
+  // UE3: dual-setpoint dials for auto/heat_cool (low = heat point, high = cool
+  // point). single_box xor dual_box is shown per selected mode; the hidden one
+  // takes no flex layout space. All three arcs share dw_temp_step_ scaling.
+  lv_obj_t *dw_temp_single_box_{nullptr};
+  lv_obj_t *dw_temp_dual_box_{nullptr};
+  lv_obj_t *dw_temp_low_slider_{nullptr};
+  lv_obj_t *dw_temp_low_label_{nullptr};
+  lv_obj_t *dw_temp_high_slider_{nullptr};
+  lv_obj_t *dw_temp_high_label_{nullptr};
   float dw_temp_step_{0.1f};
   lv_obj_t *dw_hvac_dropdown_{nullptr};
   std::vector<std::string> dw_hvac_modes_;
-  lv_obj_t *dw_volume_slider_{nullptr};
+  lv_obj_t *dw_volume_slider_{nullptr};  // media volume arc (UE3), 0-100
   lv_obj_t *dw_volume_label_{nullptr};
   lv_obj_t *dw_number_slider_{nullptr};
   lv_obj_t *dw_number_label_{nullptr};

@@ -2524,6 +2524,114 @@ parse. `LV_USE_SPINNER` and `LV_USE_ARC` came in with UE1.
 
 ---
 
+### Phase UE3 — Arc dials (climate setpoint + media volume)
+
+**Outcome:** The climate **target-temp** slider and the media-player **volume**
+slider in the detail modal are now round `lv_arc` dials with the value label
+centered inside the ring. Pure widget swap — no HA-side change.
+
+**Why it's a drop-in.** `lv_arc` is value-compatible with `lv_slider`:
+`lv_arc_set_range` / `lv_arc_set_value` / `lv_arc_get_value` mirror the slider
+calls, and it fires the same `LV_EVENT_VALUE_CHANGED`. So the existing handlers
+(`on_detail_temp_slider_`, `on_detail_volume_slider_`) and the `apply_detail_`
+read path only needed `lv_slider_get_value` → `lv_arc_get_value`; the int-scaling
+math for the non-integer climate step (`temp = value * step`) is reused verbatim.
+Members keep their `dw_*_slider_` names (both are `lv_obj_t*`); only the comments
+were retagged.
+
+**Layout.** Each arc is a fixed 180×180 square. The detail content is a
+**flex-column** whose section labels are left-aligned full-width, so a centered
+arc can't just be dropped in — it would left-align too. Each dial is wrapped in a
+transparent, non-scrollable holder (`LV_PCT(100)` × 190) and `lv_obj_center`-ed
+inside it, isolating the centering from the labels. The value label is a **child
+of the arc**, centered, so it sits in the ring's hole. The content area scrolls
+(`LV_DIR_VER`) and the Apply/Cancel row is pinned separately at y=396, so the
+taller dial coexists with both without collision.
+
+**Touch + color.** Arc/indicator width is 14 px with the default draggable knob
+(tinted to match) for a fingertip-sized hit target on 480×480 — flagged for
+on-device tuning. The climate indicator is tinted from the existing `e.state`
+HVAC-mode read: `off` = grey `0x888888`, contains `heat` = warm `0xFF7043`,
+contains `cool` = blue `0x4FC3F7`, else (auto/heat_cool/dry/fan_only) = teal
+`0x44CCDD`. (`heat_cool` matches `heat` first → warm; acceptable for v1.) The
+volume dial uses the teal accent. `LV_USE_ARC` came in with UE1.
+
+**Data fix found in validation — climate attrs were never loaded.** First
+on-panel test showed the dial pinned at **21** and **"Current: --"** for a real
+°F thermostat in `cool`. Root cause predates UE3 (the old slider had the same
+bug): the panel subscribes to entity **state** only, so for climate it gets the
+hvac-mode string (`"cool"` → Mode dropdown correct) but **none of the climate
+attributes**. The modal built from an empty `Entity::attrs`, so `temperature`
+(target) and `current_temperature` fell back — `(min_temp 7 + max_temp 35) / 2 =
+21`, with the 7/35 defaults being **Celsius** while the device reports °F.
+
+These attrs (`current_temperature`, `temperature`, `min_temp`, `max_temp`,
+`target_temp_step`, `hvac_modes`) are **standard HA `ClimateEntity` schema**, not
+integration custom props — fetchable by name via the native API. Fix reuses the
+**E7 precedent**: subscribe them at **connect time** so they ride the initial
+`state_subs` cursor walk (no re-arm) and are cached before the first modal open —
+no dynamic query at open. Scoped to climate only (6 attrs × few entities),
+deliberately far under the ~278-sub burst that saturated the P7d iter-1 attempt;
+the P7d failure was a burst-**size** problem, not "attr subs are impossible." See
+the `UE3:` log line + the connect-time block in `setup()`.
+
+**Mode-aware setpoints — single vs dual dials.** HA splits climate setpoints by
+mode: `heat`/`cool` carry one `temperature`; `auto`/`heat_cool` carry **two** —
+`target_temp_low` (heat point) + `target_temp_high` (cool point), and sending the
+single `temperature` param to a dual-mode entity is invalid. `lv_arc` has one
+knob, so the builder constructs **two boxes** in the flex column: a single-dial
+box ("Target", 180px) and a dual-dial box with two **side-by-side** 150px dials
+("Heat to" warm = low, "Cool to" blue = high). Side-by-side, not stacked: stacking
+pushed the cool dial below the fold and the arc traps vertical scroll, so it was
+unreachable; two-across fits the 400px content width with the header visible.
+Both boxes are built once; `climate_mode_is_dual_(mode)` picks which is shown and the
+other gets `LV_OBJ_FLAG_HIDDEN` (a hidden flex child consumes no layout space).
+The HVAC-mode dropdown's `VALUE_CHANGED` (`on_detail_hvac_mode_changed_`) re-runs
+the toggle, so switching to `auto` reveals two dials live and re-tints the single
+dial otherwise. The dual handlers clamp low ≤ high (drag past the other knob
+pushes it). `apply_detail_` branches on the **selected** mode: dual sends
+`target_temp_low`+`target_temp_high`, single sends `temperature` — same
+`climate.set_temperature` service. `auto` is treated as dual per the "set a heat
+point and a cool point" intent; dual dials seed from `target_temp_low/high` when
+present, else a small spread around the current target. The shared 180px-dial
+construction is factored into the file-static `add_setpoint_dial`.
+
+**hvac_modes enum-repr quirk (found in validation).** Some integrations report
+`hvac_modes` as Python enum reprs — the dropdown showed `<HVACMode.OFF: 'off'>`
+etc. `parse_ha_list_` only strips a token's *outer* quotes, so the interior
+`'off'` survived. That broke more than display: preselect (`== e.state`),
+`climate_mode_is_dual_`, and the `set_hvac_mode` payload all compare against bare
+`off`/`heat_cool`. `clean_hvac_mode_` pulls the value out of the first
+single-quoted span (pass-through for already-bare tokens), applied to each mode
+after parse.
+
+**Page row shows current temperature.** Climate is a `SUMMARY_TEXT` render class
+that previously displayed only the hvac-mode word (`"cool"`). The row now renders
+`"<mode>  <current_temperature>°"` (e.g. `cool  77°`), reading the same
+connect-time `current_temperature` attr. `on_attr_` re-runs `rebuild_entity_row_`
+for climate when that attr arrives/changes, so the row is correct on connect and
+tracks the live reading. (`°` = U+00B0, present in LVGL's built-in Montserrat.)
+
+**Tap opens the modal, not only long-press.** `SUMMARY_TEXT` domains (climate,
+media_player, number, select) had no inline tap action — `tap_entity_` no-ops
+for them. `on_entity_row_clicked_` now opens the detail modal directly for any
+`SUMMARY_TEXT` entity with a detail builder, so a short tap brings up the control
+surface (long-press still works; LVGL doesn't fire `SHORT_CLICKED` after a
+`LONG_PRESSED`, so no double-open).
+
+**Verification:** clean `esphome compile` links (RAM 16.5%, Flash 19.5%).
+On-device checks: (1) climate modal shows a round setpoint dial colored by mode,
+**reading the true target + current temp in the device's unit**, drag + Apply
+calls `climate.set_temperature` unchanged; (2) switch Mode to `auto`/`heat_cool`
+→ two dials (Heat to / Cool to) appear, drag + Apply sends
+`target_temp_low`/`target_temp_high`; (3) climate page row reads `<mode> <temp>°`
+and updates live; (4) a single **tap** (not just long-press) on a climate row
+opens the modal; (5) media volume dial drag + Apply calls `media_player.volume_set`
+unchanged; (6) arc-drag ergonomics on the round panel; (7) connect log shows no
+`Buffer full` / unresponsive-disconnect (2 climates × 8 attrs added).
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks

@@ -277,7 +277,35 @@ void HAPanel::setup() {
     }
     ESP_LOGCONFIG(TAG, "E7: subscribed brightness for %u light entities", light_subs);
   }
-  // P7d follow-up: per-domain attribute subscriptions DISABLED.
+  // UE3 follow-up: connect-time climate attribute subscriptions. The detail
+  // modal's setpoint dial + "Current" label need the standard climate attrs
+  // (current_temperature, temperature, min_temp, max_temp, target_temp_step,
+  // hvac_modes) — all part of HA's ClimateEntity schema, not integration custom
+  // props. Like E7 brightness, these ride the initial state_subs cursor walk
+  // (no re-arm), so they're cached before the first modal open. Without them
+  // the modal fell back to a Celsius 7-35 range (dial pinned at the 21 midpoint)
+  // and "Current: --" for an actually-°F thermostat. Scoped to climate only —
+  // 6 attrs per climate entity, a handful of entities — staying far under the
+  // ~278-sub burst that saturated the P7d iter-1 attempt (88 state + ~30
+  // brightness + climate ≈ 130 for a typical config). Watch the connect log for
+  // `Buffer full` before extending this to other detail domains.
+  {
+    unsigned climate_subs = 0;
+    for (size_t i = 0; i < this->entities_.size(); i++) {
+      if (this->entities_[i].domain != "climate")
+        continue;
+      for (const char *a : attrs_for_domain_("climate")) {
+        this->subscribe_attr_(i, a);
+        climate_subs++;
+      }
+    }
+    ESP_LOGCONFIG(TAG, "UE3: subscribed %u climate attrs", climate_subs);
+  }
+  // P7d follow-up: per-domain attribute subscriptions REMAIN DISABLED for the
+  // high-count domains (lights × full attr set, media, number, select, fan,
+  // cover). Only the two narrow, connect-time exceptions above ride the cursor
+  // walk: E7 brightness (lights) and UE3 climate attrs. The original failure
+  // below was a burst-SIZE problem, not an attr-subs-are-impossible one.
   //
   // First on-device test (2026-05-29) showed `homeassistant.turn_on/off` calls
   // dispatched from firmware (log says `tap … → homeassistant.turn_off`) but
@@ -373,6 +401,11 @@ void HAPanel::on_attr_(size_t entity_idx, const std::string &attr_name,
     if (raw >= 0)
       this->entities_[entity_idx].last_bri_pct = (raw * 100 + 127) / 255;
   }
+  // Climate rows render the current temperature beside the mode; refresh the row
+  // whenever it changes (first arrival at connect, and live updates after).
+  if (attr_name == "current_temperature" &&
+      this->entities_[entity_idx].domain == "climate")
+    this->rebuild_entity_row_(entity_idx);
   // Drive the pending counter ONLY on first arrival per attr. Subsequent
   // pushes (HA state change while modal still open) just refresh the cache
   // — modal stays sticky during user edit, picks up new values on next open.
@@ -522,7 +555,20 @@ void HAPanel::rebuild_entity_row_(size_t entity_idx) {
     }
     case RenderClass::SUMMARY_TEXT:
     case RenderClass::READ_ONLY_TEXT: {
-      lv_label_set_text(w, e.has_state ? e.state.c_str() : "...");
+      // Climate rows show "<mode>  <current temp>°" so the page conveys the room
+      // reading at a glance, not just the hvac-mode word. current_temperature
+      // arrives via the UE3 connect-time attr subs; on_attr_ re-runs this row.
+      if (e.domain == "climate" && e.has_state) {
+        float ct = this->get_attr_float_(entity_idx, "current_temperature", NAN);
+        char cbuf[48];
+        if (std::isnan(ct))
+          snprintf(cbuf, sizeof(cbuf), "%s", e.state.c_str());
+        else
+          snprintf(cbuf, sizeof(cbuf), "%s  %.0f\xC2\xB0", e.state.c_str(), ct);
+        lv_label_set_text(w, cbuf);
+      } else {
+        lv_label_set_text(w, e.has_state ? e.state.c_str() : "...");
+      }
       uint32_t col = 0xFFFFFF;
       if (e.state == "on" || e.state == "open" || e.state == "home" ||
           e.state == "active" || e.state == "playing")
@@ -1890,6 +1936,14 @@ void HAPanel::on_entity_row_clicked_(lv_event_t *e) {
       self->open_history_(entity_idx);
       return;
     }
+    // Summary rows (climate / media_player / number / select) have no inline
+    // tap action — tap_entity_ would no-op. Open the detail modal directly so a
+    // short tap, not only a long-press, brings up the control surface.
+    if (en.render_class == RenderClass::SUMMARY_TEXT &&
+        HAPanel::has_detail_(en.domain)) {
+      self->open_detail_(entity_idx);
+      return;
+    }
   }
   self->tap_entity_(entity_idx);
 }
@@ -2019,6 +2073,81 @@ static lv_obj_t *add_section_label(lv_obj_t *parent, const char *text,
   return l;
 }
 
+// Some HA climate integrations report hvac_modes as Python enum reprs, e.g.
+// "<HVACMode.OFF: 'off'>" instead of the bare "off" — parse_ha_list_ keeps the
+// interior quotes since they aren't the token's outer quotes. Pull the value
+// out of the first single-quoted span; pass through anything already bare.
+static std::string clean_hvac_mode_(const std::string &s) {
+  size_t q1 = s.find('\'');
+  if (q1 != std::string::npos) {
+    size_t q2 = s.find('\'', q1 + 1);
+    if (q2 != std::string::npos && q2 > q1 + 1)
+      return s.substr(q1 + 1, q2 - q1 - 1);
+  }
+  return s;
+}
+
+// UE3: format a setpoint for the dial label — whole number when the step is an
+// integer (no "77.0"), one decimal for fractional steps (°C 0.5).
+static void fmt_setpoint_(char *buf, size_t n, float value, float step) {
+  if (step >= 0.999f)
+    snprintf(buf, n, "%.0f", value);
+  else
+    snprintf(buf, n, "%.1f", value);
+}
+
+// UE3: dual-setpoint HVAC modes use target_temp_low/high (two dials); single
+// modes (heat/cool) use one `temperature` setpoint. auto is treated as dual per
+// the "set a heat point and a cool point" expectation. off/dry/fan_only have no
+// active setpoint but still show the single dial (greyed) so the modal isn't empty.
+static bool climate_mode_is_dual_(const std::string &m) {
+  return m == "auto" || m == "heat_cool";
+}
+
+// Dial tint by HVAC mode: heat = warm, cool = blue, off = grey, else teal.
+static uint32_t climate_mode_color_(const std::string &m) {
+  if (m == "off")
+    return 0x888888;
+  if (m.find("heat") != std::string::npos)
+    return 0xFF7043;
+  if (m.find("cool") != std::string::npos)
+    return 0x4FC3F7;
+  return 0x44CCDD;
+}
+
+// UE3: build one round setpoint dial (lv_arc) inside a transparent, centered,
+// non-scrollable holder appended to `box`. Returns the arc; *out_label is its
+// centered value label. Shared by the single + both dual dials.
+static lv_obj_t *add_setpoint_dial(lv_obj_t *box, int rng_min, int rng_max,
+                                   int rng_cur, float per_unit, uint32_t color,
+                                   lv_event_cb_t cb, void *user_data,
+                                   lv_obj_t **out_label, int dial_px) {
+  lv_obj_t *holder = lv_obj_create(box);
+  lv_obj_remove_style_all(holder);
+  lv_obj_set_size(holder, LV_PCT(100), dial_px + 10);
+  lv_obj_set_style_bg_opa(holder, LV_OPA_TRANSP, 0);
+  lv_obj_clear_flag(holder, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t *arc = lv_arc_create(holder);
+  lv_obj_set_size(arc, dial_px, dial_px);
+  lv_obj_center(arc);
+  lv_arc_set_range(arc, rng_min, rng_max);
+  lv_arc_set_value(arc, rng_cur);
+  lv_obj_set_style_arc_width(arc, 14, LV_PART_MAIN);
+  lv_obj_set_style_arc_width(arc, 14, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(arc, lv_color_hex(color), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(arc, lv_color_hex(color), LV_PART_KNOB);
+  lv_obj_add_event_cb(arc, cb, LV_EVENT_VALUE_CHANGED, user_data);
+  lv_obj_t *lbl = lv_label_create(arc);
+  char buf[24];
+  fmt_setpoint_(buf, sizeof(buf), (float) rng_cur * per_unit, per_unit);
+  lv_label_set_text(lbl, buf);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+  lv_obj_center(lbl);
+  *out_label = lbl;
+  return arc;
+}
+
 void HAPanel::build_detail_modal_(lv_obj_t *scr) {
   this->detail_modal_ = lv_obj_create(scr);
   lv_obj_remove_style_all(this->detail_modal_);
@@ -2029,10 +2158,10 @@ void HAPanel::build_detail_modal_(lv_obj_t *scr) {
   lv_obj_set_style_pad_all(this->detail_modal_, 0, 0);
   lv_obj_set_style_border_width(this->detail_modal_, 0, 0);
   lv_obj_add_flag(this->detail_modal_, LV_OBJ_FLAG_HIDDEN);
+  // Clickable so background taps are swallowed (don't fall through to the page
+  // behind). No bg-tap-to-close: only Apply / Cancel dismiss the modal — a
+  // stray tap on the side/bottom while adjusting a dial must not lose edits.
   lv_obj_add_flag(this->detail_modal_, LV_OBJ_FLAG_CLICKABLE);
-  // Bg tap (on the modal itself, not a child) = cancel + close.
-  lv_obj_add_event_cb(this->detail_modal_, &HAPanel::on_detail_bg_clicked_,
-                      LV_EVENT_CLICKED, this);
 
   // Title centered at top.
   this->detail_title_ = lv_label_create(this->detail_modal_);
@@ -2116,6 +2245,12 @@ void HAPanel::clear_detail_widgets_() {
   this->dw_ct_label_ = nullptr;
   this->dw_temp_slider_ = nullptr;
   this->dw_temp_label_ = nullptr;
+  this->dw_temp_single_box_ = nullptr;
+  this->dw_temp_dual_box_ = nullptr;
+  this->dw_temp_low_slider_ = nullptr;
+  this->dw_temp_low_label_ = nullptr;
+  this->dw_temp_high_slider_ = nullptr;
+  this->dw_temp_high_label_ = nullptr;
   this->dw_temp_step_ = 0.1f;
   this->dw_hvac_dropdown_ = nullptr;
   this->dw_hvac_modes_.clear();
@@ -2188,7 +2323,8 @@ std::vector<const char *> HAPanel::attrs_for_domain_(const std::string &d) {
             "max_color_temp_kelvin", "supported_color_modes", "color_mode"};
   if (d == "climate")
     return {"current_temperature", "temperature", "hvac_modes", "min_temp",
-            "max_temp", "target_temp_step"};
+            "max_temp", "target_temp_step", "target_temp_low",
+            "target_temp_high"};
   if (d == "media_player")
     return {"media_title", "volume_level", "is_volume_muted"};
   if (d == "number")
@@ -2403,8 +2539,11 @@ void HAPanel::build_detail_climate_(lv_obj_t *parent, size_t entity_idx) {
   // HVAC mode dropdown. Fall back to a sensible default list if HA didn't
   // expose hvac_modes (e.g. attribute hadn't landed yet at modal-open time).
   std::string modes_raw;
-  if (this->get_attr_(entity_idx, "hvac_modes", &modes_raw))
+  if (this->get_attr_(entity_idx, "hvac_modes", &modes_raw)) {
     this->dw_hvac_modes_ = parse_ha_list_(modes_raw);
+    for (auto &m : this->dw_hvac_modes_)
+      m = clean_hvac_mode_(m);
+  }
   if (this->dw_hvac_modes_.empty())
     this->dw_hvac_modes_ = {"off", "heat", "cool", "auto"};
   add_section_label(parent, "Mode", 0xFFFFFF);
@@ -2423,13 +2562,17 @@ void HAPanel::build_detail_climate_(lv_obj_t *parent, size_t entity_idx) {
     }
   }
 
-  // Target temperature slider. Stored as int = temp / step so the slider can
-  // hit non-integer values without LVGL having float ranges.
+  // Setpoint dial(s). Stored as int = temp / step so the arc can hit
+  // non-integer setpoints without LVGL float ranges. heat/cool use one
+  // `temperature` dial; auto/heat_cool use two — target_temp_low (heat point)
+  // and target_temp_high (cool point). Both boxes are built; the mode-change
+  // handler shows one and hides the other so switching mode swaps the dials live
+  // (a hidden flex child takes no layout space).
   float min_t = this->get_attr_float_(entity_idx, "min_temp", 7.0f);
   float max_t = this->get_attr_float_(entity_idx, "max_temp", 35.0f);
-  float step = this->get_attr_float_(entity_idx, "target_temp_step", 0.5f);
-  float cur_target = this->get_attr_float_(entity_idx, "temperature",
-                                            (min_t + max_t) / 2.0f);
+  // Default to whole degrees when HA doesn't report a step (common on °F
+  // thermostats); honor target_temp_step when present (e.g. 0.5 on °C units).
+  float step = this->get_attr_float_(entity_idx, "target_temp_step", 1.0f);
   if (step < 0.1f) step = 0.1f;
   this->dw_temp_step_ = step;
   int scale = (int) std::round(1.0f / step);
@@ -2437,22 +2580,87 @@ void HAPanel::build_detail_climate_(lv_obj_t *parent, size_t entity_idx) {
   int rng_min = (int) std::round(min_t * scale);
   int rng_max = (int) std::round(max_t * scale);
   if (rng_max <= rng_min) rng_max = rng_min + 1;
-  int rng_cur = (int) std::round(cur_target * scale);
-  if (rng_cur < rng_min) rng_cur = rng_min;
-  if (rng_cur > rng_max) rng_cur = rng_max;
-  add_section_label(parent, "Target", 0xFFFFFF);
-  this->dw_temp_slider_ = lv_slider_create(parent);
-  lv_obj_set_width(this->dw_temp_slider_, LV_PCT(100));
-  lv_obj_set_height(this->dw_temp_slider_, 22);
-  lv_slider_set_range(this->dw_temp_slider_, rng_min, rng_max);
-  lv_slider_set_value(this->dw_temp_slider_, rng_cur, LV_ANIM_OFF);
-  lv_obj_add_event_cb(this->dw_temp_slider_, &HAPanel::on_detail_temp_slider_,
+  auto to_rng = [&](float t) {
+    int r = (int) std::round(t * scale);
+    if (r < rng_min) r = rng_min;
+    if (r > rng_max) r = rng_max;
+    return r;
+  };
+  float mid_t = (min_t + max_t) / 2.0f;
+  float cur_target = this->get_attr_float_(entity_idx, "temperature", mid_t);
+  float lo_t = this->get_attr_float_(entity_idx, "target_temp_low", NAN);
+  float hi_t = this->get_attr_float_(entity_idx, "target_temp_high", NAN);
+  // Seed the dual dials from the single setpoint when low/high aren't reported
+  // (e.g. the entity is currently in heat/cool): a small spread around the
+  // current target, clamped to range.
+  float spread = (max_t - min_t) * 0.1f;
+  if (spread < step) spread = step;
+  if (std::isnan(lo_t)) lo_t = cur_target - spread;
+  if (std::isnan(hi_t)) hi_t = cur_target + spread;
+  if (hi_t < lo_t) hi_t = lo_t;
+
+  // --- single-setpoint box (heat / cool / off) ---
+  this->dw_temp_single_box_ = lv_obj_create(parent);
+  lv_obj_remove_style_all(this->dw_temp_single_box_);
+  lv_obj_set_size(this->dw_temp_single_box_, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(this->dw_temp_single_box_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_pad_row(this->dw_temp_single_box_, 10, 0);
+  lv_obj_set_flex_flow(this->dw_temp_single_box_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_clear_flag(this->dw_temp_single_box_, LV_OBJ_FLAG_SCROLLABLE);
+  add_section_label(this->dw_temp_single_box_, "Target", 0xFFFFFF);
+  this->dw_temp_slider_ = add_setpoint_dial(
+      this->dw_temp_single_box_, rng_min, rng_max, to_rng(cur_target), step,
+      climate_mode_color_(e.state), &HAPanel::on_detail_temp_slider_, this,
+      &this->dw_temp_label_, 180);
+
+  // --- dual-setpoint box (auto / heat_cool): two dials SIDE BY SIDE so both
+  // the heat point and cool point are visible at once. Stacking pushed the
+  // lower dial below the fold and the arc traps vertical scroll, so the cool
+  // dial was unreachable. Smaller 150px dials fit two-across in the 400px
+  // content width with the header still visible. ---
+  this->dw_temp_dual_box_ = lv_obj_create(parent);
+  lv_obj_remove_style_all(this->dw_temp_dual_box_);
+  lv_obj_set_size(this->dw_temp_dual_box_, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(this->dw_temp_dual_box_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_pad_column(this->dw_temp_dual_box_, 6, 0);
+  lv_obj_set_flex_flow(this->dw_temp_dual_box_, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(this->dw_temp_dual_box_, LV_FLEX_ALIGN_SPACE_EVENLY,
+                        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_clear_flag(this->dw_temp_dual_box_, LV_OBJ_FLAG_SCROLLABLE);
+  auto add_dial_col = [&](const char *title, uint32_t color, int rng_cur,
+                          lv_event_cb_t cb, lv_obj_t **out_label) {
+    lv_obj_t *col = lv_obj_create(this->dw_temp_dual_box_);
+    lv_obj_remove_style_all(col);
+    lv_obj_set_size(col, 196, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(col, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_row(col, 4, 0);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+    add_section_label(col, title, color);
+    return add_setpoint_dial(col, rng_min, rng_max, rng_cur, step, color, cb,
+                             this, out_label, 150);
+  };
+  this->dw_temp_low_slider_ =
+      add_dial_col("Heat to", 0xFF7043, to_rng(lo_t),
+                   &HAPanel::on_detail_temp_low_slider_, &this->dw_temp_low_label_);
+  this->dw_temp_high_slider_ =
+      add_dial_col("Cool to", 0x4FC3F7, to_rng(hi_t),
+                   &HAPanel::on_detail_temp_high_slider_, &this->dw_temp_high_label_);
+
+  // Toggle which box is visible by mode; re-run on dropdown change. Base the
+  // initial choice on the dropdown's selected mode (not raw e.state) so the
+  // dials always agree with the dropdown even if hvac_modes lacks e.state.
+  lv_obj_add_event_cb(this->dw_hvac_dropdown_,
+                      &HAPanel::on_detail_hvac_mode_changed_,
                       LV_EVENT_VALUE_CHANGED, this);
-  this->dw_temp_label_ = lv_label_create(parent);
-  snprintf(buf, sizeof(buf), "%.1f", (float) rng_cur / scale);
-  lv_label_set_text(this->dw_temp_label_, buf);
-  lv_obj_set_style_text_color(this->dw_temp_label_, lv_color_hex(0xAAAAAA), 0);
-  lv_obj_set_style_text_font(this->dw_temp_label_, &lv_font_montserrat_18, 0);
+  uint16_t sel = lv_dropdown_get_selected(this->dw_hvac_dropdown_);
+  const std::string &cur_mode =
+      sel < this->dw_hvac_modes_.size() ? this->dw_hvac_modes_[sel] : e.state;
+  lv_obj_add_flag(climate_mode_is_dual_(cur_mode) ? this->dw_temp_single_box_
+                                                  : this->dw_temp_dual_box_,
+                  LV_OBJ_FLAG_HIDDEN);
 }
 
 void HAPanel::build_detail_media_player_(lv_obj_t *parent, size_t entity_idx) {
@@ -2500,20 +2708,34 @@ void HAPanel::build_detail_media_player_(lv_obj_t *parent, size_t entity_idx) {
   if (v100 < 0) v100 = 0;
   if (v100 > 100) v100 = 100;
   add_section_label(parent, "Volume", 0xFFFFFF);
-  this->dw_volume_slider_ = lv_slider_create(parent);
-  lv_obj_set_width(this->dw_volume_slider_, LV_PCT(100));
-  lv_obj_set_height(this->dw_volume_slider_, 22);
-  lv_slider_set_range(this->dw_volume_slider_, 0, 100);
-  lv_slider_set_value(this->dw_volume_slider_, v100, LV_ANIM_OFF);
+  // UE3: round volume dial (lv_arc), 0-100, same VALUE_CHANGED handler + apply
+  // path as the old slider. Holder centers the square arc in the flex column.
+  lv_obj_t *vol_holder = lv_obj_create(parent);
+  lv_obj_remove_style_all(vol_holder);
+  lv_obj_set_size(vol_holder, LV_PCT(100), 190);
+  lv_obj_set_style_bg_opa(vol_holder, LV_OPA_TRANSP, 0);
+  lv_obj_clear_flag(vol_holder, LV_OBJ_FLAG_SCROLLABLE);
+  this->dw_volume_slider_ = lv_arc_create(vol_holder);
+  lv_obj_set_size(this->dw_volume_slider_, 180, 180);
+  lv_obj_center(this->dw_volume_slider_);
+  lv_arc_set_range(this->dw_volume_slider_, 0, 100);
+  lv_arc_set_value(this->dw_volume_slider_, v100);
+  lv_obj_set_style_arc_width(this->dw_volume_slider_, 14, LV_PART_MAIN);
+  lv_obj_set_style_arc_width(this->dw_volume_slider_, 14, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(this->dw_volume_slider_, lv_color_hex(0x44CCDD),
+                             LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(this->dw_volume_slider_, lv_color_hex(0x44CCDD),
+                            LV_PART_KNOB);
   lv_obj_add_event_cb(this->dw_volume_slider_,
                       &HAPanel::on_detail_volume_slider_,
                       LV_EVENT_VALUE_CHANGED, this);
-  this->dw_volume_label_ = lv_label_create(parent);
+  this->dw_volume_label_ = lv_label_create(this->dw_volume_slider_);
   char buf[24];
   snprintf(buf, sizeof(buf), "%d %%", v100);
   lv_label_set_text(this->dw_volume_label_, buf);
-  lv_obj_set_style_text_color(this->dw_volume_label_, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_color(this->dw_volume_label_, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_style_text_font(this->dw_volume_label_, &lv_font_montserrat_18, 0);
+  lv_obj_center(this->dw_volume_label_);
 }
 
 void HAPanel::build_detail_number_(lv_obj_t *parent, size_t entity_idx) {
@@ -2749,21 +2971,44 @@ void HAPanel::apply_detail_() {
                data.count("color_temp_kelvin") ? data["color_temp_kelvin"].c_str() : "-");
     }
   } else if (d == "climate") {
-    // Always send both — HA tolerates redundant calls, and trying to track
-    // "did the user change this" adds complexity for little win.
+    // Send set_hvac_mode ONLY when the mode actually changed. A redundant mode
+    // call makes many integrations re-read/reset the target temperature, which
+    // races the set_temperature we send right after — the symptom was the new
+    // setpoint "sticking" only ~half the time. sel_mode is still resolved (even
+    // when unchanged) so the dual/single temperature branch below is correct.
+    std::string sel_mode = e.state;
     if (this->dw_hvac_dropdown_ != nullptr && !this->dw_hvac_modes_.empty()) {
       uint16_t idx = lv_dropdown_get_selected(this->dw_hvac_dropdown_);
-      if (idx < this->dw_hvac_modes_.size()) {
-        std::map<std::string, std::string> hdata;
-        hdata["entity_id"] = e.entity_id;
-        hdata["hvac_mode"] = this->dw_hvac_modes_[idx];
-        this->call_homeassistant_service("climate.set_hvac_mode", hdata);
-        ESP_LOGI(TAG, "apply %s → climate.set_hvac_mode=%s",
-                 e.entity_id.c_str(), this->dw_hvac_modes_[idx].c_str());
-      }
+      if (idx < this->dw_hvac_modes_.size())
+        sel_mode = this->dw_hvac_modes_[idx];
     }
-    if (this->dw_temp_slider_ != nullptr) {
-      int v = lv_slider_get_value(this->dw_temp_slider_);
+    if (sel_mode != e.state) {
+      std::map<std::string, std::string> hdata;
+      hdata["entity_id"] = e.entity_id;
+      hdata["hvac_mode"] = sel_mode;
+      this->call_homeassistant_service("climate.set_hvac_mode", hdata);
+      ESP_LOGI(TAG, "apply %s → climate.set_hvac_mode=%s", e.entity_id.c_str(),
+               sel_mode.c_str());
+    }
+    // Dual modes (auto/heat_cool) send target_temp_low + target_temp_high; the
+    // single `temperature` param is invalid for them. Single modes send
+    // `temperature`. Match what the visible dial(s) edited.
+    if (climate_mode_is_dual_(sel_mode) && this->dw_temp_low_slider_ != nullptr &&
+        this->dw_temp_high_slider_ != nullptr) {
+      int lo = lv_arc_get_value(this->dw_temp_low_slider_);
+      int hi = lv_arc_get_value(this->dw_temp_high_slider_);
+      char lob[24], hib[24];
+      snprintf(lob, sizeof(lob), "%.1f", (float) lo * this->dw_temp_step_);
+      snprintf(hib, sizeof(hib), "%.1f", (float) hi * this->dw_temp_step_);
+      std::map<std::string, std::string> tdata;
+      tdata["entity_id"] = e.entity_id;
+      tdata["target_temp_low"] = lob;
+      tdata["target_temp_high"] = hib;
+      this->call_homeassistant_service("climate.set_temperature", tdata);
+      ESP_LOGI(TAG, "apply %s → climate.set_temperature low=%s high=%s",
+               e.entity_id.c_str(), lob, hib);
+    } else if (this->dw_temp_slider_ != nullptr) {
+      int v = lv_arc_get_value(this->dw_temp_slider_);
       float temp = (float) v * this->dw_temp_step_;
       char buf[32];
       snprintf(buf, sizeof(buf), "%.1f", temp);
@@ -2776,7 +3021,7 @@ void HAPanel::apply_detail_() {
     }
   } else if (d == "media_player") {
     if (this->dw_volume_slider_ != nullptr) {
-      int v = lv_slider_get_value(this->dw_volume_slider_);
+      int v = lv_arc_get_value(this->dw_volume_slider_);
       char buf[16];
       snprintf(buf, sizeof(buf), "%.2f", (float) v / 100.0f);
       data["volume_level"] = buf;
@@ -2938,10 +3183,85 @@ void HAPanel::on_detail_temp_slider_(lv_event_t *e) {
   if (self == nullptr || self->dw_temp_slider_ == nullptr ||
       self->dw_temp_label_ == nullptr)
     return;
-  int v = lv_slider_get_value(self->dw_temp_slider_);
+  int v = lv_arc_get_value(self->dw_temp_slider_);
   char buf[24];
-  snprintf(buf, sizeof(buf), "%.1f", (float) v * self->dw_temp_step_);
+  fmt_setpoint_(buf, sizeof(buf), (float) v * self->dw_temp_step_,
+                self->dw_temp_step_);
   lv_label_set_text(self->dw_temp_label_, buf);
+}
+
+// UE3 dual setpoint: heat-point dial. Clamp low <= high (push high up if the
+// user drags past it) so the band stays valid.
+void HAPanel::on_detail_temp_low_slider_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->dw_temp_low_slider_ == nullptr ||
+      self->dw_temp_low_label_ == nullptr)
+    return;
+  int v = lv_arc_get_value(self->dw_temp_low_slider_);
+  char buf[24];
+  if (self->dw_temp_high_slider_ != nullptr &&
+      v > lv_arc_get_value(self->dw_temp_high_slider_)) {
+    lv_arc_set_value(self->dw_temp_high_slider_, v);
+    if (self->dw_temp_high_label_ != nullptr) {
+      fmt_setpoint_(buf, sizeof(buf), (float) v * self->dw_temp_step_,
+                    self->dw_temp_step_);
+      lv_label_set_text(self->dw_temp_high_label_, buf);
+    }
+  }
+  fmt_setpoint_(buf, sizeof(buf), (float) v * self->dw_temp_step_,
+                self->dw_temp_step_);
+  lv_label_set_text(self->dw_temp_low_label_, buf);
+}
+
+// UE3 dual setpoint: cool-point dial. Clamp high >= low (pull low down if the
+// user drags below it).
+void HAPanel::on_detail_temp_high_slider_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->dw_temp_high_slider_ == nullptr ||
+      self->dw_temp_high_label_ == nullptr)
+    return;
+  int v = lv_arc_get_value(self->dw_temp_high_slider_);
+  char buf[24];
+  if (self->dw_temp_low_slider_ != nullptr &&
+      v < lv_arc_get_value(self->dw_temp_low_slider_)) {
+    lv_arc_set_value(self->dw_temp_low_slider_, v);
+    if (self->dw_temp_low_label_ != nullptr) {
+      fmt_setpoint_(buf, sizeof(buf), (float) v * self->dw_temp_step_,
+                    self->dw_temp_step_);
+      lv_label_set_text(self->dw_temp_low_label_, buf);
+    }
+  }
+  fmt_setpoint_(buf, sizeof(buf), (float) v * self->dw_temp_step_,
+                self->dw_temp_step_);
+  lv_label_set_text(self->dw_temp_high_label_, buf);
+}
+
+// UE3: HVAC mode dropdown changed — swap single vs dual setpoint dials and
+// re-tint the single dial to the newly selected mode.
+void HAPanel::on_detail_hvac_mode_changed_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->dw_hvac_dropdown_ == nullptr ||
+      self->dw_temp_single_box_ == nullptr ||
+      self->dw_temp_dual_box_ == nullptr)
+    return;
+  uint16_t idx = lv_dropdown_get_selected(self->dw_hvac_dropdown_);
+  if (idx >= self->dw_hvac_modes_.size())
+    return;
+  const std::string &mode = self->dw_hvac_modes_[idx];
+  if (climate_mode_is_dual_(mode)) {
+    lv_obj_add_flag(self->dw_temp_single_box_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(self->dw_temp_dual_box_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(self->dw_temp_single_box_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(self->dw_temp_dual_box_, LV_OBJ_FLAG_HIDDEN);
+    if (self->dw_temp_slider_ != nullptr) {
+      uint32_t col = climate_mode_color_(mode);
+      lv_obj_set_style_arc_color(self->dw_temp_slider_, lv_color_hex(col),
+                                 LV_PART_INDICATOR);
+      lv_obj_set_style_bg_color(self->dw_temp_slider_, lv_color_hex(col),
+                                LV_PART_KNOB);
+    }
+  }
 }
 
 void HAPanel::on_detail_number_slider_(lv_event_t *e) {
@@ -2964,7 +3284,7 @@ void HAPanel::on_detail_volume_slider_(lv_event_t *e) {
   if (self == nullptr || self->dw_volume_slider_ == nullptr ||
       self->dw_volume_label_ == nullptr)
     return;
-  int v = lv_slider_get_value(self->dw_volume_slider_);
+  int v = lv_arc_get_value(self->dw_volume_slider_);
   char buf[24];
   snprintf(buf, sizeof(buf), "%d %%", v);
   lv_label_set_text(self->dw_volume_label_, buf);

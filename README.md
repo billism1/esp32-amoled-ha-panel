@@ -89,8 +89,8 @@ behaviour live in shared, board-agnostic packages.
   `scene`, `script`, `automation`, `button`: explicit on/off where the state
   is known, per-domain services otherwise.
 - Long-press → per-domain **detail modal**: light brightness/colour-temp,
-  climate set-point + mode, media transport + volume, number, select, fan
-  speed, cover position.
+  climate set-point (round dial, tinted by HVAC mode) + mode, media transport +
+  volume (round dial), number, select, fan speed, cover position.
 - Per-entity **tap-confirmation guard** (`confirm: true`) so a brush of the
   screen can't open the garage or unlock the door; a labelled confirm sheet
   fires the action only on a deliberate second tap.
