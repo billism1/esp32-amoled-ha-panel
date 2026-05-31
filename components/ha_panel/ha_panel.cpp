@@ -305,23 +305,48 @@ void HAPanel::setup() {
   ESP_LOGCONFIG(TAG, "P7e icon column %s",
                 this->mdi_font_ != nullptr ? "enabled (mdi_font set)" : "disabled (no mdi_font)");
 #ifdef USE_SPEAKER
-  // Precompute the touch click: a 2 kHz tone with a fast exponential decay
-  // (~16 ms), deliberately quiet ("low noise"). 16-bit signed mono, little-
-  // endian, 16 kHz — matches the i2s_audio speaker + ES8311 config. A tap just
-  // re-queues this buffer, so no per-press allocation.
+  // Precompute the touch click. 16-bit signed mono, little-endian, 16 kHz —
+  // matches the i2s_audio speaker + ES8311. A tap just re-queues this buffer.
   {
+    // An IMPULSIVE click, not a sustained tone. The pleasant sound the codec
+    // makes on stream-start (heard on boot from the warm-up) is a short
+    // broadband transient — a "tick/knock" — and a sustained sine at full gain
+    // just buzzed this small speaker. So: very fast decay (a few ms), a touch
+    // of decaying noise for broadband "knock" body, mid-low pitch, low level.
+    //   - dur ~12 ms, tau ~1.8 ms → percussive, dies almost immediately;
+    //   - tone (≈900 Hz) + a little filtered-ish noise mixed in → texture;
+    //   - 0.4 ms cosine attack so the onset isn't a hard step;
+    //   - cosine tail to exactly 0 for a clean return to the silence stream.
+    // Tunable by ear: tau (snap), freq (pitch), noise_mix (knock vs tick), peak.
     const float sample_rate = 16000.0f;
-    const float freq = 2000.0f;
-    const float dur_s = 0.016f;
-    const float tau = 0.004f;             // decay time constant
-    const float peak = 0.16f * 32767.0f;  // ~ -16 dBFS — gentle
+    const float freq = 900.0f;
+    const float dur_s = 0.012f;
+    const float tau = 0.0018f;            // very fast decay → impulsive
+    const float peak = 0.005f * 32767.0f;
+    const float noise_mix = 0.35f;        // 0 = pure tone, 1 = pure noise
     const float pi = 3.14159265358979f;
     const size_t n = (size_t) (sample_rate * dur_s);
+    const size_t attack = 6;              // ~0.4 ms cosine onset
+    const size_t tail = 16;               // ~1 ms cosine fade to 0
+    // Deterministic noise (xorshift) so the click is identical every build/boot.
+    uint32_t rng = 0x9E3779B9u;
+    auto noise = [&rng]() -> float {
+      rng ^= rng << 13;
+      rng ^= rng >> 17;
+      rng ^= rng << 5;
+      return (float) ((int32_t) rng) / 2147483648.0f;  // [-1, 1)
+    };
     this->click_pcm_.resize(n * 2);
     for (size_t i = 0; i < n; i++) {
       float t = (float) i / sample_rate;
       float env = expf(-t / tau);
-      int16_t s = (int16_t) lroundf(peak * env * sinf(2.0f * pi * freq * t));
+      if (i < attack)
+        env *= 0.5f * (1.0f - cosf(pi * (float) i / attack));
+      if (i >= n - tail)
+        env *= 0.5f * (1.0f - cosf(pi * (float) (n - 1 - i) / tail));
+      float sig = (1.0f - noise_mix) * sinf(2.0f * pi * freq * t) +
+                  noise_mix * noise();
+      int16_t s = (int16_t) lroundf(peak * env * sig);
       this->click_pcm_[2 * i] = (uint8_t) (s & 0xFF);
       this->click_pcm_[2 * i + 1] = (uint8_t) ((s >> 8) & 0xFF);
     }
@@ -1600,6 +1625,9 @@ void HAPanel::set_sound_on_press(bool on) {
     else
       lv_obj_remove_state(this->sound_switch_, LV_STATE_CHECKED);
   }
+  // Restored-on at boot → warm the codec now so the first click is steady-gain.
+  if (on)
+    this->warm_up_speaker_();
 }
 
 void HAPanel::apply_sound_() {
@@ -1608,6 +1636,16 @@ void HAPanel::apply_sound_() {
   this->sound_on_press_ = this->staged_sound_on_press_;
   if (this->sound_committer_)
     this->sound_committer_(this->sound_on_press_);
+#ifdef USE_SPEAKER
+  if (this->sound_on_press_) {
+    // Turned on → warm the codec now so the first click is steady-gain.
+    this->warm_up_speaker_();
+  } else if (this->speaker_ != nullptr && !this->speaker_->is_stopped()) {
+    // Turned off → release the continuously-running bus (timeout: never keeps
+    // it alive otherwise). Re-enabling warms it again.
+    this->speaker_->stop();
+  }
+#endif
   this->sound_dirty_ = false;
   ESP_LOGI(TAG, "sound-on-press applied: %d", (int) this->sound_on_press_);
 }
@@ -1636,15 +1674,45 @@ void HAPanel::on_sound_switch_(lv_event_t *e) {
 }
 
 void HAPanel::play_click_() {
-#ifdef USE_SPEAKER
   // Committed setting only — staged edits don't take effect until Apply.
-  if (!this->sound_on_press_ || this->speaker_ == nullptr ||
-      this->click_pcm_.empty())
+  if (!this->sound_on_press_)
     return;
-  // Queue the click, then finish() so the speaker drains it and stops (frees
-  // the I2S/codec — no idle hiss). play() auto-starts a stopped speaker.
+  // Portability hook: a board can supply its own click backend (buzzer, haptic,
+  // a different codec) via set_click_action. If set, it owns the sound; ha_panel
+  // stays backend-agnostic and only decides *when* to click (tap, not swipe).
+  if (this->click_action_) {
+    this->click_action_();
+    return;
+  }
+  // Default backend: the built-in i2s speaker (boards that called set_speaker).
+  this->play_speaker_click_();
+}
+
+void HAPanel::play_speaker_click_() {
+#ifdef USE_SPEAKER
+  if (this->speaker_ == nullptr || this->click_pcm_.empty())
+    return;
+  // Queue the click into the continuously-running stream (speaker `timeout:
+  // never`). The stream stays up and is fed silence between clicks, so there is
+  // no per-tap start/stop — that start/stop transient was the uneven "pop", and
+  // rapid taps just re-queue the same buffer back-to-back. The click's soft
+  // character lives in the sample itself (see the PCM design in setup()), not in
+  // any codec power-up ramp, so it sounds the same every press and ports to any
+  // DAC. No finish() — that truncated the buffer mid-click.
   this->speaker_->play(this->click_pcm_.data(), this->click_pcm_.size());
-  this->speaker_->finish();
+#endif
+}
+
+void HAPanel::warm_up_speaker_() {
+#ifdef USE_SPEAKER
+  if (this->speaker_ == nullptr)
+    return;
+  // Feed ~64 ms of silence to start the stream now and let the ES8311 un-mute
+  // ramp finish during this silence instead of during the user's first click.
+  // With timeout:never the stream then stays up at steady gain, so press #1 is
+  // identical to the rest.
+  static const std::vector<uint8_t> silence(2048, 0);  // 1024 samples @ 16 kHz mono
+  this->speaker_->play(silence.data(), silence.size());
 #endif
 }
 

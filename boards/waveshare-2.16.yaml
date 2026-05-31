@@ -221,6 +221,14 @@ speaker:
     bits_per_sample: 16bit
     sample_rate: 16000
     channel: mono
+    # Keep the bus running once started — underruns are filled with silence, so
+    # there is no per-click start/stop and thus no start/stop transient and no
+    # fast-tap unevenness. Each click is just the same buffer re-queued, played
+    # identically every press. The soft "knock" character lives in the click
+    # sample itself (ha_panel setup()), not in any codec power-up ramp, so it is
+    # consistent and portable. ha_panel stops the bus only when the click
+    # setting is turned off (apply_sound_).
+    timeout: never
 
 # Speaker amplifier enable — held on so the codec output reaches the speaker.
 switch:

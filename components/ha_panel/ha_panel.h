@@ -158,6 +158,13 @@ class HAPanel : public Component, public api::CustomAPIDevice {
 #ifdef USE_SPEAKER
   void set_speaker(speaker::Speaker *spk) { this->speaker_ = spk; }
 #endif
+  // Portability hook (Option C): override the click backend. If set, this is
+  // called instead of the built-in speaker — wire it per board to a buzzer
+  // (rtttl.play), a haptic pulse, or a different codec. ha_panel only decides
+  // *when* to click (a tap, not a swipe); the board decides *how* it sounds.
+  void set_click_action(std::function<void()> action) {
+    this->click_action_ = std::move(action);
+  }
   void set_sound_committer(std::function<void(bool)> committer) {
     this->sound_committer_ = std::move(committer);
   }
@@ -262,7 +269,14 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // recipe as sleep). play_click_ pushes the precomputed PCM to the speaker.
   void apply_sound_();
   void revert_sound_();
+  // play_click_ = the gate + backend dispatch (override hook, else built-in
+  // speaker). play_speaker_click_ = the built-in i2s-speaker backend.
   void play_click_();
+  void play_speaker_click_();
+  // Play a brief silence to spend the codec's un-mute ramp up front, so the
+  // first audible click is at steady gain like every later one (no uniquely
+  // soft first press). Called when the sound setting turns on.
+  void warm_up_speaker_();
 
   // P7d detail modal.
   void build_detail_modal_(lv_obj_t *scr);
@@ -451,6 +465,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   bool sound_on_press_{false};
   bool staged_sound_on_press_{false};
   bool sound_dirty_{false};
+  // Option C: optional board-supplied click backend. nullptr → use built-in
+  // speaker (if any). Set via set_click_action.
+  std::function<void()> click_action_;
 #ifdef USE_SPEAKER
   // Speaker + precomputed click PCM (16-bit mono @ 16 kHz), built once in
   // setup() so a tap just re-queues the same buffer.

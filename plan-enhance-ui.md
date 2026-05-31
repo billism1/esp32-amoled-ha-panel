@@ -929,11 +929,6 @@ ESP32-S3-Box-3 reference config (same PA pin).
 **Approach:**
 - New persisted global `sound_on_press_g` (bool, `restore_value: yes`,
   default **false**) in [idle.yaml](packages/idle.yaml).
-- ha_panel precomputes the click PCM once in `setup()` — a 2 kHz tone, ~16 ms,
-  fast exponential decay, ~-16 dBFS (deliberately quiet). 16-bit mono LE @
-  16 kHz to match the codec. Stored in `click_pcm_`; a tap just re-queues it.
-- `play_click_()` (guarded by `USE_SPEAKER`) calls `speaker->play(pcm)` then
-  `speaker->finish()` so the I2S/codec drains and stops — no idle hiss.
 - **Tap vs swipe:** the board touchscreen feeds `touch_pressed` / `touch_moved`
   / `touch_released`. A press that stays within ~16 px until release is a tap →
   click on release. Any movement past the slop = swipe/scroll → silent. Decided
@@ -944,17 +939,49 @@ ESP32-S3-Box-3 reference config (same PA pin).
   (`apply_sound_`/`revert_sound_`, hooked into Apply/Cancel). `set_speaker` +
   `set_sound_committer` + `set_sound_on_press` wired in
   [ha-amoled-panel.yaml](ha-amoled-panel.yaml) `on_boot`.
+- **Portability (Option C):** ha_panel is backend-agnostic. `play_click_` is the
+  gate + dispatch: if a board sets `set_click_action(std::function<void()>)`,
+  that owns the sound (buzzer/haptic/other codec); otherwise it falls to the
+  built-in i2s-speaker path (`play_speaker_click_`, guarded by `USE_SPEAKER`).
+  ha_panel only decides *when* (tap, not swipe). A future board with no speaker
+  just doesn't call `set_speaker` and wires its own `set_click_action`.
+
+**Sound design (the part that took iterating — see notes below):**
+- The click is **synthesized PCM** precomputed once in `setup()` into
+  `click_pcm_` (16-bit mono LE @ 16 kHz); a tap re-queues the same buffer.
+- It is an **impulsive click, not a sustained tone**: ~12 ms, very fast decay
+  (`tau` ≈ 1.8 ms), ≈900 Hz + ~35 % decaying noise for broadband "knock" body,
+  short cosine attack/tail to start and end at exactly 0. Knobs (`freq`, `tau`,
+  `noise_mix`, `peak`) are commented as ear-tunable. Final `peak` is very low
+  (~0.005 full-scale) — the small speaker is quietest/cleanest there.
+- The speaker runs **continuously** (`timeout: never`): underruns are filled
+  with silence, so there is **no per-click start/stop** → no start/stop "pop"
+  and no fast-tap unevenness; every press is the same buffer at steady gain.
+  `apply_sound_` `stop()`s the bus only when the setting is turned off.
+- `warm_up_speaker_()` plays ~64 ms of silence when the setting turns on (boot
+  restore-on, or Apply-enable) so the ES8311 un-mute ramp is spent up front
+  rather than on the user's first click (that ramp made the first press
+  uniquely soft).
 
 **Risks / unknowns:**
-- Speaker/codec path is **not yet verified on hardware** — first on-device test
-  should confirm the ES8311 actually drives the speaker at these pins and that
-  the click is audible but not harsh. Tune `freq` / `dur_s` / `tau` / `peak` in
-  `setup()` and the `audio_dac`/speaker `sample_rate` together if it sounds off.
-- PA held always-on draws a little quiescent current; acceptable on a
-  USB/LiPo panel. Could gate PA per-click later if idle hiss appears (would add
-  an amp-enable pop).
+- PA held always-on draws a little quiescent current; acceptable on a USB/LiPo
+  panel. Idle hiss is negligible (ES8311 fed digital silence).
 - `USE_SPEAKER` guards keep the speaker code out of any future board that omits
   the `speaker:` block; that board's YAML must then not call `set_speaker`.
+
+**Notes / lessons (why this isn't the obvious first design):**
+- First attempts used a sustained sine + `play()`+`finish()` per tap. That
+  produced an uneven "pop" (codec start/stop transient + buffer truncation) and
+  faint rapid taps (re-`play()` racing the `STOPPING` state).
+- `timeout: never` made it *consistent* but the bare full-gain tone buzzed the
+  small speaker ("harsh"). Chasing the nicer-sounding first press was a dead end:
+  that pleasant sound is the **codec start transient** (broadband/impulsive),
+  reproducible per-press only by restarting (which reintroduces the unevenness).
+- Resolution: stop chasing the codec ramp; make the *sample itself* an impulsive
+  low-level click that the speaker reproduces cleanly. Heard on a continuously
+  running stream, it is the same every press. Option B (embedded WAV via
+  `media_player: speaker`) remains the fallback if a curated sample is wanted —
+  same speaker, so its only edge is sample authoring, not fidelity.
 
 ---
 
