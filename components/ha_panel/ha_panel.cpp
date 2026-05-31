@@ -1411,7 +1411,8 @@ HAPanel::SplashStage HAPanel::build_splash_stage_(lv_obj_t *parent, const char *
   // dot/check. The boot wait runs across loop ticks (lv_timer_handler keeps
   // firing), so unlike the blocking history fetch this one actually animates.
   st.spinner = lv_spinner_create(parent);
-  lv_spinner_set_anim_params(st.spinner, 1000, 60);  // 1 s/rev, 60° arc
+  lv_spinner_set_anim_duration(st.spinner, 1500);  // 1.5 s/rev
+  lv_spinner_set_arc_sweep(st.spinner, 270);       // long 270° arc, calm look
   lv_obj_set_size(st.spinner, 18, 18);
   lv_obj_set_style_arc_width(st.spinner, 3, LV_PART_MAIN);
   lv_obj_set_style_arc_color(st.spinner, lv_color_hex(0x333333), LV_PART_MAIN);
