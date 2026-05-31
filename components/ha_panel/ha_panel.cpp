@@ -653,12 +653,12 @@ struct RowMetrics {
 static RowMetrics row_metrics_for(EntitySize size) {
   switch (size) {
     case EntitySize::MEDIUM:
-      return {84, &lv_font_montserrat_24, 16, 66, 16, 300, 340, 66, 34, -18, -16};
+      return {66, &lv_font_montserrat_24, 16, 66, 16, 300, 340, 66, 34, -18, -16};
     case EntitySize::LARGE:
-      return {108, &lv_font_montserrat_32, 20, 84, 20, 330, 360, 84, 44, -20, -20};
+      return {82, &lv_font_montserrat_32, 20, 84, 20, 330, 360, 84, 44, -20, -20};
     case EntitySize::SMALL:
     default:
-      return {60, &lv_font_montserrat_18, 12, 48, 12, 240, 280, 50, 26, -16, -12};
+      return {52, &lv_font_montserrat_18, 12, 48, 12, 240, 280, 50, 26, -16, -12};
   }
 }
 
