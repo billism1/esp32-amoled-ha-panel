@@ -269,6 +269,7 @@ choosing a value and Apply calls the same service as the dropdown did.
 
 ## Cross-cutting notes
 
+- **Validate acceptance criteria before commit**
 - **One commit per UE item**, each independently shippable and revertible.
 - **No HA-side changes** for any item here — same states, same service calls.
   If an item starts needing a new attribute or service, it has left this plan's
