@@ -2481,6 +2481,19 @@ body transfer animates; only the TCP connect and the one-shot JSON parse are
 brief frozen gaps. (The earlier "history spinner not viable" note was wrong and
 is superseded by this.)
 
+**Motion is stepped, not smooth — on purpose.** `spin_history_()` can only tick
+when `container->read()` returns a chunk, and chunks arrive network-paced and
+lumpy, so a continuous `millis()`-based angle judders (uneven jumps). It instead
+advances a fixed 30° per call (12 clock-tick positions): uniform steps read as a
+deliberate stepping loader at any update rate, and double as iterative-progress
+feedback (one step ≈ one data burst). Smooth constant-rate motion isn't possible
+while the fetch blocks the loop — the only path to that is moving the blocking
+HTTP read onto a second FreeRTOS task so the main loop animates a real
+`lv_spinner` at full framerate (LVGL is not thread-safe, so the worker would
+touch only the socket + PSRAM buffer; parse + draw stay on the main loop).
+Deferred as a complexity bump not worth it for a loading indicator; the stepped
+arc was the chosen trade.
+
 **Why not the detail modal (the plan's secondary target):** the async
 attribute-fetch path (`request_detail_attrs_`, with a "Loading…" placeholder and
 a 1500 ms safety timeout) is **parked dead code** — never called.
