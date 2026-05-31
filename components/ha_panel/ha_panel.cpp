@@ -925,7 +925,7 @@ void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
   char build_buf[Application::BUILD_TIME_STR_SIZE];
   App.get_build_time_string(build_buf);
   char abuf[160];
-  snprintf(abuf, sizeof(abuf), "%s\nESPHome %s\nBuilt %s",
+  snprintf(abuf, sizeof(abuf), "%s\nESPHome %s\nBuilt %s\nCreated by William Krahmer",
            App.get_name().c_str(), ESPHOME_VERSION, build_buf);
   lv_label_set_text(about, abuf);
   lv_obj_set_style_text_color(about, lv_color_hex(0xAAAAAA), 0);
