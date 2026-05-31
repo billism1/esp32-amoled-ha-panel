@@ -3820,6 +3820,14 @@ void HAPanel::load_history_samples_(size_t entity_idx, uint8_t window_idx) {
     // spin_history_() so the wait reads as active, not hung.
     lv_label_set_text(this->history_value_, "Loading...");
     if (this->history_spinner_ != nullptr) {
+      // Clear the window we were just looking at so the spinner sits on a clean
+      // sheet, not overlaid on the previous chart. redraw_history_ re-shows the
+      // right one (chart vs. strip) once the new data lands.
+      lv_obj_add_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
+      lv_label_set_text(this->history_time_left_, "");
+      lv_label_set_text(this->history_time_right_, "");
+      lv_label_set_text(this->history_range_label_, "");
       lv_obj_clear_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
       lv_obj_move_foreground(this->history_spinner_);
     }
