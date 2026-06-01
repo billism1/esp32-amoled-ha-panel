@@ -31,8 +31,7 @@ Sequenced easy → hard so each lands as an independent, shippable commit:
 6. **UE6** — history fetch on a core-pinned worker task (crash fix: the blocking
    GET tripped the task WDT on 6h/24h windows; also unfreezes the UI + enables a
    real `lv_spinner`, retiring UE2's hand-rotated arc). Infra, not a widget swap.
-7. **UE7** — roller drum for select / HVAC mode / fan speed.
-8. **UE8** — device_class-aware severity for the binary_sensor LED (follow-up to
+7. **UE7** — device_class-aware severity for the binary_sensor LED (follow-up to
    UE5; leaves the "no new HA data" scope — needs the `device_class` attr).
 
 ---
@@ -370,50 +369,9 @@ doesn't redraw stale data.
 
 ---
 
-## UE7 — Roller drum for option pickers
+## UE7 — device_class-aware severity for the binary_sensor LED
 
-**Status:** ⬜ not started · target tag: `ue7-roller`
-
-**Pairs with (existing):**
-- `select` detail modal dropdown in
-  [build_detail_select_](components/ha_panel/ha_panel.cpp#L2538).
-- HVAC mode dropdown in
-  [build_detail_climate_](components/ha_panel/ha_panel.cpp#L2384-L2398)
-  (`dw_hvac_dropdown_`).
-- Fan speed in [build_detail_fan_](components/ha_panel/ha_panel.cpp#L2564).
-
-**Change:** Replace the `lv_dropdown` (and/or the fan-speed slider) with an
-`lv_roller` drum. Same options list (already parsed via `parse_ha_list_`), same
-selected-index logic, same apply path — `lv_roller_get_selected` mirrors
-`lv_dropdown_get_selected`.
-
-Tasks:
-- [ ] `select`: swap dropdown → roller; reuse the newline-joined options string
-      the dropdown already builds; preselect the current option.
-- [ ] Climate HVAC mode: same swap for `dw_hvac_dropdown_`; preserve the
-      fallback `{off,heat,cool,auto}` list and the current-state preselect at
-      [:2393-2398](components/ha_panel/ha_panel.cpp#L2393-L2398).
-- [ ] Fan: decide roller-of-named-speeds vs. keep the slider (slider may stay
-      better for continuous %); only convert if the entity exposes discrete
-      `preset_modes`. Document the choice.
-- [ ] Update the apply handlers to read the selected index from the roller.
-- [ ] Confirm modal layout still fits with a taller roller vs. a one-line
-      dropdown (rollers need vertical room).
-
-**Exit criteria:** Select and HVAC-mode pickers present a scrolling drum;
-choosing a value and Apply calls the same service as the dropdown did.
-
-**Risks / unknowns:**
-- Rollers consume more vertical space than dropdowns — may force modal layout
-  rework, especially when stacked with other controls (climate has mode +
-  setpoint + current-temp label).
-- Keep the dropdown for very long option lists if the roller gets unwieldy.
-
----
-
-## UE8 — device_class-aware severity for the binary_sensor LED
-
-**Status:** ⬜ not started · target tag: `ue8-led-severity`
+**Status:** ⬜ not started · target tag: `ue7-led-severity`
 
 **Why:** UE5 shipped a status LED that paints **green = "on"** for every
 binary_sensor. That's semantically wrong for a whole class of sensors where "on"

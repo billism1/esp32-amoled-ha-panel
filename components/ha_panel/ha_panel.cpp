@@ -1154,6 +1154,25 @@ void HAPanel::build_ui_() {
   lv_obj_set_style_bg_opa(this->status_dot_, LV_OPA_COVER, 0);
   lv_obj_align(this->status_dot_, LV_ALIGN_RIGHT_MID, -44, 0);
 
+  // Spinner shown in the dot's spot while the HA link is being established
+  // (wifi up, api down) — replaces the old amber blink. Same style as the
+  // boot-splash spinner (1.5 s/rev, 270° sweep, amber). Hidden unless
+  // connecting; status_dot_ covers the red (wifi down) + green (connected)
+  // states. Self-animated by LVGL's anim timer, no dependence on blink phase.
+  this->status_spinner_ = lv_spinner_create(header);
+  lv_spinner_set_anim_duration(this->status_spinner_, 1500);  // 1.5 s/rev
+  lv_spinner_set_arc_sweep(this->status_spinner_, 270);       // long 270° arc
+  lv_obj_set_size(this->status_spinner_, 18, 18);
+  lv_obj_remove_flag(this->status_spinner_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_arc_width(this->status_spinner_, 3, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(this->status_spinner_, lv_color_hex(0x333333),
+                             LV_PART_MAIN);
+  lv_obj_set_style_arc_width(this->status_spinner_, 3, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(this->status_spinner_, lv_color_hex(0xDDAA33),
+                             LV_PART_INDICATOR);
+  lv_obj_align(this->status_spinner_, LV_ALIGN_RIGHT_MID, -44, 0);
+  lv_obj_add_flag(this->status_spinner_, LV_OBJ_FLAG_HIDDEN);
+
   // Battery icon, to the left of the status dot. Single LV_SYMBOL_BATTERY_*
   // glyph (5 variants) bucketed by voltage. Tint matches level.
   this->battery_icon_ = lv_label_create(header);
@@ -1469,16 +1488,21 @@ void HAPanel::update_status_dot_() {
   if (this->status_dot_ == nullptr)
     return;
   // E2: three states.
-  //   wifi down            → red (can't even attempt the HA link yet).
-  //   wifi up, api down     → amber blink ("link not yet re-established").
-  //   api connected        → green.
-  uint32_t col;
-  if (!this->wifi_connected_)
-    col = 0xCC4444;
-  else if (this->api_connected_)
-    col = 0x66BB66;
-  else
-    col = this->blink_on_ ? 0xDDAA33 : 0x5A4A1A;
+  //   wifi down            → red dot (can't even attempt the HA link yet).
+  //   wifi up, api down     → spinner ("link not yet re-established").
+  //   api connected        → green dot.
+  const bool connecting = this->wifi_connected_ && !this->api_connected_;
+  if (connecting) {
+    // HA link being established: show the animated spinner, hide the dot.
+    if (this->status_spinner_ != nullptr)
+      lv_obj_clear_flag(this->status_spinner_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(this->status_dot_, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  if (this->status_spinner_ != nullptr)
+    lv_obj_add_flag(this->status_spinner_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(this->status_dot_, LV_OBJ_FLAG_HIDDEN);
+  const uint32_t col = this->api_connected_ ? 0x66BB66 : 0xCC4444;
   lv_obj_set_style_bg_color(this->status_dot_, lv_color_hex(col), 0);
 }
 
@@ -3898,8 +3922,8 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   // firing and this self-animates (retiring the UE2 hand-rotated arc + its
   // spin_history_/lv_refr_now pumping). No knob, not clickable.
   this->history_spinner_ = lv_spinner_create(this->history_sheet_);
-  lv_spinner_set_anim_duration(this->history_spinner_, 1000);  // 1 s/rev
-  lv_spinner_set_arc_sweep(this->history_spinner_, 60);        // bright 60° segment
+  lv_spinner_set_anim_duration(this->history_spinner_, 1500);  // 1.5 s/rev — match splash
+  lv_spinner_set_arc_sweep(this->history_spinner_, 270);       // 270° arc — match splash
   lv_obj_set_size(this->history_spinner_, 60, 60);
   lv_obj_align(this->history_spinner_, LV_ALIGN_TOP_MID, 0, 208);
   lv_obj_remove_flag(this->history_spinner_, LV_OBJ_FLAG_CLICKABLE);

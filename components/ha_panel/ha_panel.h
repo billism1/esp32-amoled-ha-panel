@@ -448,6 +448,10 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *header_label_{nullptr};
   lv_obj_t *clock_label_{nullptr};
   lv_obj_t *status_dot_{nullptr};
+  // Shown in place of status_dot_ while the HA link is being established (wifi
+  // up, api down) — same style as the boot-splash spinner. Replaces the old
+  // amber blink.
+  lv_obj_t *status_spinner_{nullptr};
   lv_obj_t *wifi_icon_{nullptr};
   lv_obj_t *battery_icon_{nullptr};
   lv_obj_t *tileview_{nullptr};
