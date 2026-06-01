@@ -323,6 +323,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void open_history_(size_t entity_idx);
   void close_history_();
   void redraw_history_();
+  // UE7: roll-mode draw for the Live window — newest sample pinned to the right
+  // at a fixed X scale, blank slots padding the left until the trace fills.
+  void redraw_live_roll_(const Entity &e, uint32_t now);
   // UE4: point the analog gauge's needle at `current`, scaling its range from the
   // window's [vmin,vmax] (padded so the needle isn't pinned) and revealing it.
   void update_history_gauge_(float vmin, float vmax, float current);

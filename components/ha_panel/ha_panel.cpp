@@ -3737,6 +3737,11 @@ static const size_t MAX_CHART_POINTS = 200;
 // during the fetch (REST = non-realtime only). The chart never shows more than
 // MAX_CHART_POINTS.
 static const size_t SAMPLE_CAP = 300;
+// UE7: fixed slot count for the Live roll-mode trace. The newest sample sits in
+// the rightmost slot; the chart shows at most this many samples at a constant
+// X scale (≈432 px / 60 ≈ 7 px/sample). Time span shown ≈ LIVE_CHART_POINTS /
+// sample_rate seconds (60 ≈ 30 s at 2 Hz). Raise for a wider / smoother sweep.
+static const size_t LIVE_CHART_POINTS = 60;
 
 // Format an elapsed duration (in seconds) as a compact "-12s" / "-45m" /
 // "-2.5h" axis label.
@@ -4218,6 +4223,66 @@ void HAPanel::update_history_gauge_(float vmin, float vmax, float current) {
   lv_obj_clear_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
 }
 
+// UE7: roll-mode draw for the Live window. Pins the newest sample to the right
+// edge at a fixed X scale; older samples step left one slot each; blank slots on
+// the left until the trace fills. `now` is the per-mode clock from redraw_history_
+// (uptime-seconds for the realtime ring, epoch for a REST-backed Live view).
+void HAPanel::redraw_live_roll_(const Entity &e, uint32_t now) {
+  const size_t N = LIVE_CHART_POINTS;
+  const size_t total = this->history_samples_.size();
+  const size_t k = total < N ? total : N;  // samples actually drawn
+  if (k == 0) {
+    lv_chart_set_point_count(this->history_chart_, 0);
+    lv_chart_refresh(this->history_chart_);
+    lv_label_set_text(this->history_value_, "No data yet");
+    lv_label_set_text(this->history_time_left_, "");
+    lv_label_set_text(this->history_time_right_, "");
+    lv_label_set_text(this->history_range_label_, "");
+    if (this->history_gauge_ != nullptr)
+      lv_obj_add_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  // The k most-recent samples are the tail of the ring.
+  const size_t first = total - k;  // index of the oldest drawn sample
+  float vmin = this->history_samples_[first].value;
+  float vmax = vmin;
+  for (size_t i = first; i < total; i++) {
+    float v = this->history_samples_[i].value;
+    if (v < vmin) vmin = v;
+    if (v > vmax) vmax = v;
+  }
+  int32_t lo = (int32_t) std::floor(vmin * 10.0f);
+  int32_t hi = (int32_t) std::ceil(vmax * 10.0f);
+  if (lo == hi) { lo -= 10; hi += 10; }  // flat series → vertical room
+  lv_chart_set_axis_range(this->history_chart_, LV_CHART_AXIS_PRIMARY_Y, lo, hi);
+
+  // Fixed slot count. Left (N-k) slots blank, the k samples fill the right,
+  // newest in the last slot → trace originates from the right and grows left.
+  lv_chart_set_point_count(this->history_chart_, (uint32_t) N);
+  for (size_t slot = 0; slot < N - k; slot++)
+    lv_chart_set_series_value_by_id(this->history_chart_, this->history_series_,
+                                    (uint32_t) slot, LV_CHART_POINT_NONE);
+  for (size_t i = 0; i < k; i++)
+    lv_chart_set_series_value_by_id(
+        this->history_chart_, this->history_series_, (uint32_t) (N - k + i),
+        (int32_t) std::lround(this->history_samples_[first + i].value * 10.0f));
+  lv_chart_refresh(this->history_chart_);
+
+  lv_label_set_text(this->history_value_, e.has_state ? e.state.c_str() : "...");
+  char buf[24];
+  fmt_age_(now - this->history_samples_[first].t_s, buf, sizeof(buf));
+  lv_label_set_text(this->history_time_left_, buf);
+  lv_label_set_text(this->history_time_right_, "now");
+  char range[40];
+  snprintf(range, sizeof(range), "%.1f - %.1f", vmin, vmax);
+  lv_label_set_text(this->history_range_label_, range);
+
+  float gnow;
+  if (!HAPanel::state_to_value_(e, &gnow))
+    gnow = this->history_samples_.back().value;
+  this->update_history_gauge_(vmin, vmax, gnow);
+}
+
 void HAPanel::redraw_history_() {
   if (this->history_sheet_ == nullptr ||
       this->history_entity_idx_ >= this->entities_.size())
@@ -4331,6 +4396,17 @@ void HAPanel::redraw_history_() {
   // ---- numeric line chart ----
   lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
+
+  // UE7: Live = roll-mode scope. Fixed X scale: the newest sample is pinned to
+  // the right edge, older samples fill leftward one slot each, and the unfilled
+  // left slots stay blank until the trace grows into them. A fresh feed therefore
+  // starts as a short segment on the right and extends left (no index-spread
+  // "squish" that rescales as points accumulate). Sample-order based, so it is
+  // immune to the ring's 1 s timestamp resolution.
+  if (this->history_window_idx_ == 3) {
+    this->redraw_live_roll_(e, now);
+    return;
+  }
 
   // Collect in-window values in order, tracking the oldest visible timestamp so
   // the left axis label reflects the real data span. The line chart spaces
