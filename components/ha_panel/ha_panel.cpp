@@ -1419,6 +1419,14 @@ void HAPanel::build_ui_() {
   // indicators) animate even when stuck on the very first gate — no setter
   // fires when the initial state already matches.
   this->update_blink_timer_();
+
+  // One-shot 7 s watchdog: if the splash stages haven't passed by then (API
+  // still not connected), explain the slow stage and drop the splash so the
+  // app loads while reconnection keeps running. Cancelled in set_api_connected
+  // if the link comes up first.
+  this->splash_timeout_timer_ =
+      lv_timer_create(&HAPanel::splash_timeout_cb_, 7000, this);
+  lv_timer_set_repeat_count(this->splash_timeout_timer_, 1);
 }
 
 void HAPanel::open_picker_() {
@@ -1611,8 +1619,16 @@ void HAPanel::set_api_connected(bool connected) {
   // E5: flip the HA stage to its green check before hiding the splash — not
   // visible for long, but keeps every stage consistent for future extra ones.
   this->update_splash_status_();
-  if (connected && this->splash_ != nullptr) {
-    lv_obj_add_flag(this->splash_, LV_OBJ_FLAG_HIDDEN);
+  if (connected) {
+    // Link came up — cancel the pending splash watchdog and clear its popup if
+    // it already fired.
+    if (this->splash_timeout_timer_ != nullptr) {
+      lv_timer_delete(this->splash_timeout_timer_);
+      this->splash_timeout_timer_ = nullptr;
+    }
+    this->dismiss_splash_timeout_popup_();
+    if (this->splash_ != nullptr)
+      lv_obj_add_flag(this->splash_, LV_OBJ_FLAG_HIDDEN);
   }
   ESP_LOGI(TAG, "api %s", connected ? "connected" : "disconnected");
 }
@@ -1652,6 +1668,105 @@ void HAPanel::blink_timer_cb_(lv_timer_t *t) {
   self->update_wifi_icon_();
   self->update_status_dot_();
   self->update_splash_status_();  // E5: pulse the splash dot in step.
+}
+
+void HAPanel::splash_timeout_cb_(lv_timer_t *t) {
+  auto *self = static_cast<HAPanel *>(lv_timer_get_user_data(t));
+  // One-shot: LVGL deletes the timer after this returns (repeat_count 1), so
+  // drop our handle either way.
+  if (self != nullptr)
+    self->splash_timeout_timer_ = nullptr;
+  if (self == nullptr || self->api_connected_)
+    return;  // already connected (timer not yet cancelled) — nothing to warn.
+  // Explain the stage we're stuck on, then load the app behind the popup.
+  self->show_splash_timeout_popup_();
+  if (self->splash_ != nullptr)
+    lv_obj_add_flag(self->splash_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void HAPanel::show_splash_timeout_popup_() {
+  // Which gate stalled: Wi-Fi is the first, the HA API the second.
+  const char *stage =
+      this->wifi_connected_ ? "Home Assistant" : "Wi-Fi";
+  // The header status spinner keeps signalling the live reconnection attempts.
+  std::string msg = std::string("Connecting to ") + stage +
+                    " is taking longer than expected.\n\n"
+                    "Loading the app without a Home Assistant connection. "
+                    "It will keep trying to connect in the background.";
+  if (this->splash_timeout_popup_ != nullptr) {
+    // Built already (shouldn't recur — one-shot) — refresh text + reshow.
+    if (this->splash_timeout_label_ != nullptr)
+      lv_label_set_text(this->splash_timeout_label_, msg.c_str());
+    lv_obj_clear_flag(this->splash_timeout_popup_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(this->splash_timeout_popup_);
+    return;
+  }
+  // Dim full-screen backdrop on the top layer so it floats above every page /
+  // sheet. CLICKABLE eats taps to the app beneath while the popup is up.
+  lv_obj_t *top = lv_layer_top();
+  this->splash_timeout_popup_ = lv_obj_create(top);
+  lv_obj_remove_style_all(this->splash_timeout_popup_);
+  lv_obj_set_size(this->splash_timeout_popup_, 480, 480);
+  lv_obj_set_pos(this->splash_timeout_popup_, 0, 0);
+  lv_obj_set_style_bg_color(this->splash_timeout_popup_, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(this->splash_timeout_popup_, LV_OPA_70, 0);
+  lv_obj_add_flag(this->splash_timeout_popup_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(this->splash_timeout_popup_, LV_OBJ_FLAG_SCROLLABLE);
+
+  // Centered card.
+  lv_obj_t *card = lv_obj_create(this->splash_timeout_popup_);
+  lv_obj_remove_style_all(card);
+  lv_obj_set_size(card, 380, 280);
+  lv_obj_center(card);
+  lv_obj_set_style_bg_color(card, lv_color_hex(0x1A1A1A), 0);
+  lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(card, 12, 0);
+  lv_obj_set_style_border_width(card, 1, 0);
+  lv_obj_set_style_border_color(card, lv_color_hex(0x333333), 0);
+  lv_obj_set_style_pad_all(card, 20, 0);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *title = lv_label_create(card);
+  lv_label_set_text(title, "Still connecting");
+  lv_obj_set_style_text_color(title, lv_color_hex(0xDDAA33), 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+  lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+  this->splash_timeout_label_ = lv_label_create(card);
+  lv_label_set_text(this->splash_timeout_label_, msg.c_str());
+  lv_obj_set_style_text_color(this->splash_timeout_label_, lv_color_hex(0xCCCCCC), 0);
+  lv_obj_set_style_text_font(this->splash_timeout_label_, &lv_font_montserrat_18, 0);
+  lv_label_set_long_mode(this->splash_timeout_label_, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(this->splash_timeout_label_, 340);
+  lv_obj_align(this->splash_timeout_label_, LV_ALIGN_TOP_LEFT, 0, 34);
+
+  // Dismiss button, bottom-right of the card.
+  lv_obj_t *ok = lv_button_create(card);
+  lv_obj_set_size(ok, 110, 40);
+  lv_obj_set_style_bg_color(ok, lv_color_hex(0x2E3640), 0);
+  lv_obj_set_style_bg_color(ok, lv_color_hex(0x3A4651), LV_STATE_PRESSED);
+  lv_obj_set_style_radius(ok, 8, 0);
+  lv_obj_set_style_border_width(ok, 0, 0);
+  lv_obj_set_style_shadow_width(ok, 0, 0);
+  lv_obj_align(ok, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+  lv_obj_add_event_cb(ok, &HAPanel::on_splash_timeout_dismiss_, LV_EVENT_CLICKED,
+                      this);
+  lv_obj_t *oklbl = lv_label_create(ok);
+  lv_label_set_text(oklbl, "Continue");
+  lv_obj_set_style_text_color(oklbl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(oklbl, &lv_font_montserrat_18, 0);
+  lv_obj_center(oklbl);
+}
+
+void HAPanel::dismiss_splash_timeout_popup_() {
+  if (this->splash_timeout_popup_ != nullptr)
+    lv_obj_add_flag(this->splash_timeout_popup_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void HAPanel::on_splash_timeout_dismiss_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->dismiss_splash_timeout_popup_();
 }
 
 void HAPanel::set_active_brightness(uint8_t v) {

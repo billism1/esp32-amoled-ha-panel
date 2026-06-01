@@ -270,6 +270,13 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // a pending (amber) state. Called whenever wifi/api connection state changes.
   void update_blink_timer_();
   static void blink_timer_cb_(lv_timer_t *t);
+  // Fires once ~7 s after boot. If the splash stages still haven't passed (api
+  // not connected), show the "taking longer than expected" popup and drop the
+  // splash so the app loads while reconnection keeps running in the background.
+  static void splash_timeout_cb_(lv_timer_t *t);
+  void show_splash_timeout_popup_();
+  void dismiss_splash_timeout_popup_();
+  static void on_splash_timeout_dismiss_(lv_event_t *e);
   bool is_settings_active_() const;
   // P7b: stage / commit / revert brightness slider edits.
   void apply_brightness_();
@@ -465,6 +472,13 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // adding SplashStage members + build/update calls.
   SplashStage splash_wifi_stage_{};
   SplashStage splash_ha_stage_{};
+  // Popup raised by splash_timeout_cb_ when the splash stages stall past ~7 s,
+  // explaining the slow stage while the app loads anyway. splash_timeout_label_
+  // holds the stage-specific message; the timer is one-shot, nulled after it
+  // fires or once the API connects first.
+  lv_obj_t *splash_timeout_popup_{nullptr};
+  lv_obj_t *splash_timeout_label_{nullptr};
+  lv_timer_t *splash_timeout_timer_{nullptr};
   // E1: settings overlay sheet (was a tileview tile). settings_open_ tracks
   // visibility; the revert-on-close trigger replaces the old
   // revert-on-navigate-away-from-tile path.
