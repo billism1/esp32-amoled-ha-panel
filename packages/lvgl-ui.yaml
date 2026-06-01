@@ -8,7 +8,13 @@
 lvgl:
   displays:
     - amoled_display
-  buffer_size: 25%
+  # 480x480x16bit full buffer = 460 KB; this fraction is allocated in *internal*
+  # DMA RAM (PSRAM isn't used for the LVGL draw buffer). 25% (~115 KB) starved the
+  # internal heap — only ~13 KB free at runtime, which failed the UE6 history
+  # worker's 8 KB task stack and esp_http_client's buffers (HTTP -1). 10% (~46 KB)
+  # frees ~69 KB. Tunable: raise if full-screen redraws feel chunky, lower for
+  # more headroom.
+  buffer_size: 10%
   bg_color: 0x000000
   # Setting default_font to montserrat_18 forces the symbol to link so we can
   # reference lv_font_montserrat_18 from C++ when constructing widgets.

@@ -9,6 +9,8 @@
 #include <map>
 #include <set>
 
+#include "esp_heap_caps.h"  // UE6 diagnostics: internal-heap free / largest block
+
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
@@ -33,7 +35,7 @@ void HAPanel::add_page(const std::string &name) {
 
 void HAPanel::add_entity(const std::string &entity_id, const std::string &friendly_name,
                          const std::string &icon_override, bool confirm,
-                         EntitySize size) {
+                         EntitySize size, bool realtime) {
   if (this->pages_.empty()) {
     ESP_LOGE(TAG, "add_entity called before any page — codegen bug");
     return;
@@ -46,6 +48,7 @@ void HAPanel::add_entity(const std::string &entity_id, const std::string &friend
   e.icon_override = icon_override;
   e.confirm = confirm;
   e.size = size;
+  e.realtime = realtime;
   size_t idx = this->entities_.size();
   this->entities_.push_back(std::move(e));
   this->pages_.back().entity_indices.push_back(idx);
@@ -277,7 +280,35 @@ void HAPanel::setup() {
     }
     ESP_LOGCONFIG(TAG, "E7: subscribed brightness for %u light entities", light_subs);
   }
-  // P7d follow-up: per-domain attribute subscriptions DISABLED.
+  // UE3 follow-up: connect-time climate attribute subscriptions. The detail
+  // modal's setpoint dial + "Current" label need the standard climate attrs
+  // (current_temperature, temperature, min_temp, max_temp, target_temp_step,
+  // hvac_modes) — all part of HA's ClimateEntity schema, not integration custom
+  // props. Like E7 brightness, these ride the initial state_subs cursor walk
+  // (no re-arm), so they're cached before the first modal open. Without them
+  // the modal fell back to a Celsius 7-35 range (dial pinned at the 21 midpoint)
+  // and "Current: --" for an actually-°F thermostat. Scoped to climate only —
+  // 6 attrs per climate entity, a handful of entities — staying far under the
+  // ~278-sub burst that saturated the P7d iter-1 attempt (88 state + ~30
+  // brightness + climate ≈ 130 for a typical config). Watch the connect log for
+  // `Buffer full` before extending this to other detail domains.
+  {
+    unsigned climate_subs = 0;
+    for (size_t i = 0; i < this->entities_.size(); i++) {
+      if (this->entities_[i].domain != "climate")
+        continue;
+      for (const char *a : attrs_for_domain_("climate")) {
+        this->subscribe_attr_(i, a);
+        climate_subs++;
+      }
+    }
+    ESP_LOGCONFIG(TAG, "UE3: subscribed %u climate attrs", climate_subs);
+  }
+  // P7d follow-up: per-domain attribute subscriptions REMAIN DISABLED for the
+  // high-count domains (lights × full attr set, media, number, select, fan,
+  // cover). Only the two narrow, connect-time exceptions above ride the cursor
+  // walk: E7 brightness (lights) and UE3 climate attrs. The original failure
+  // below was a burst-SIZE problem, not an attr-subs-are-impossible one.
   //
   // First on-device test (2026-05-29) showed `homeassistant.turn_on/off` calls
   // dispatched from firmware (log says `tap … → homeassistant.turn_off`) but
@@ -302,6 +333,7 @@ void HAPanel::setup() {
   this->widgets_by_entity_.assign(this->entities_.size(), nullptr);
   this->unavail_labels_by_entity_.assign(this->entities_.size(), nullptr);
   this->icons_by_entity_.assign(this->entities_.size(), nullptr);
+  this->leds_by_entity_.assign(this->entities_.size(), nullptr);  // UE5
   ESP_LOGCONFIG(TAG, "P7e icon column %s",
                 this->mdi_font_ != nullptr ? "enabled (mdi_font set)" : "disabled (no mdi_font)");
 #ifdef USE_SPEAKER
@@ -355,7 +387,16 @@ void HAPanel::setup() {
   }
 #endif
   this->build_ui_();
+  // UE6: the history worker task is created lazily on first history open, NOT
+  // here — its internal-RAM stack would otherwise shrink the free heap during the
+  // memory-tight boot/WiFi-connect window and abort the WiFi scan allocator
+  // (bad_alloc in wifi_process_event_). See ensure_history_worker_.
+  ESP_LOGCONFIG(TAG, "UE6 heap @setup-end: internal free=%u largest=%u",
+                (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
+
+void HAPanel::loop() { this->poll_history_fetch_(); }
 
 void HAPanel::on_attr_(size_t entity_idx, const std::string &attr_name,
                        StringRef value) {
@@ -373,6 +414,11 @@ void HAPanel::on_attr_(size_t entity_idx, const std::string &attr_name,
     if (raw >= 0)
       this->entities_[entity_idx].last_bri_pct = (raw * 100 + 127) / 255;
   }
+  // Climate rows render the current temperature beside the mode; refresh the row
+  // whenever it changes (first arrival at connect, and live updates after).
+  if (attr_name == "current_temperature" &&
+      this->entities_[entity_idx].domain == "climate")
+    this->rebuild_entity_row_(entity_idx);
   // Drive the pending counter ONLY on first arrival per attr. Subsequent
   // pushes (HA state change while modal still open) just refresh the cache
   // — modal stays sticky during user edit, picks up new values on next open.
@@ -417,7 +463,11 @@ void HAPanel::on_state_(const std::string &entity_id, StringRef state) {
     // E9: capture chartable values into the history ring buffer, and live-tail
     // the chart if its sheet is currently open on this entity.
     this->record_history_(i);
-    if (this->history_open_ && this->history_entity_idx_ == i) {
+    // UE6: don't live-tail while a worker backfill is in flight — the redraw
+    // would hide the spinner and paint the soon-to-be-replaced old samples. The
+    // fetch result supersedes anything we'd append here anyway.
+    if (this->history_open_ && this->history_entity_idx_ == i &&
+        this->hist_fetch_state_.load(std::memory_order_relaxed) != HIST_RUNNING) {
       // Live tail: extend the open sheet's working set with the new value,
       // stamped in the same timebase as the sheet's current samples (epoch for
       // REST mode, uptime-seconds otherwise), then redraw.
@@ -522,7 +572,20 @@ void HAPanel::rebuild_entity_row_(size_t entity_idx) {
     }
     case RenderClass::SUMMARY_TEXT:
     case RenderClass::READ_ONLY_TEXT: {
-      lv_label_set_text(w, e.has_state ? e.state.c_str() : "...");
+      // Climate rows show "<mode>  <current temp>°" so the page conveys the room
+      // reading at a glance, not just the hvac-mode word. current_temperature
+      // arrives via the UE3 connect-time attr subs; on_attr_ re-runs this row.
+      if (e.domain == "climate" && e.has_state) {
+        float ct = this->get_attr_float_(entity_idx, "current_temperature", NAN);
+        char cbuf[48];
+        if (std::isnan(ct))
+          snprintf(cbuf, sizeof(cbuf), "%s", e.state.c_str());
+        else
+          snprintf(cbuf, sizeof(cbuf), "%s  %.0f\xC2\xB0", e.state.c_str(), ct);
+        lv_label_set_text(w, cbuf);
+      } else {
+        lv_label_set_text(w, e.has_state ? e.state.c_str() : "...");
+      }
       uint32_t col = 0xFFFFFF;
       if (e.state == "on" || e.state == "open" || e.state == "home" ||
           e.state == "active" || e.state == "playing")
@@ -533,6 +596,22 @@ void HAPanel::rebuild_entity_row_(size_t entity_idx) {
       else if (e.state == "unavailable" || e.state == "unknown")
         col = 0xCC4444;
       lv_obj_set_style_text_color(w, lv_color_hex(col), 0);
+      // UE5: drive the binary_sensor status LED from the same state. Reuse `col`
+      // (on=green, off=grey, unavailable=red); brightness carries the "glow":
+      // full when active, a dim ember when off, mid when unavailable.
+      if (e.domain == "binary_sensor" &&
+          entity_idx < this->leds_by_entity_.size()) {
+        lv_obj_t *led = this->leds_by_entity_[entity_idx];
+        if (led != nullptr) {
+          lv_led_set_color(led, lv_color_hex(col));
+          uint8_t bright = 60;  // off: dim ember
+          if (e.state == "on")
+            bright = 255;  // active: full glow
+          else if (e.state == "unavailable" || e.state == "unknown")
+            bright = 160;
+          lv_led_set_brightness(led, bright);
+        }
+      }
       return;
     }
   }
@@ -669,9 +748,11 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
                                  const char *icon_utf8,
                                  const lv_font_t *mdi_lv_font,
                                  lv_obj_t **out_icon,
+                                 lv_obj_t **out_led,
                                  const RowMetrics &m) {
   *out_unavail_label = nullptr;
   *out_icon = nullptr;
+  *out_led = nullptr;
   lv_obj_t *btn = lv_button_create(parent);
   lv_obj_set_width(btn, LV_PCT(100));
   lv_obj_set_height(btn, m.height);
@@ -766,6 +847,18 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
       lv_obj_set_style_text_color(w, lv_color_hex(0xAAAAAA), 0);
       lv_obj_set_style_text_font(w, m.name_font, 0);
       lv_obj_align(w, LV_ALIGN_RIGHT_MID, m.label_x, 0);
+      // UE5: binary_sensor rows also carry a glowing status dot at the far right.
+      // The on/off word shifts left of it (deterministic, never overlaps — the
+      // word is right-anchored to a slot left of the fixed LED). Colour +
+      // brightness are driven from state in rebuild_entity_row_.
+      if (e.domain == "binary_sensor") {
+        const int led_sz = m.height / 4;  // 13/16/20 px across small/med/large
+        lv_obj_t *led = lv_led_create(btn);
+        lv_obj_set_size(led, led_sz, led_sz);
+        lv_obj_align(led, LV_ALIGN_RIGHT_MID, m.label_x, 0);
+        *out_led = led;
+        lv_obj_align(w, LV_ALIGN_RIGHT_MID, m.label_x - led_sz - 8, 0);
+      }
       break;
     }
   }
@@ -838,22 +931,19 @@ void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
   lv_obj_remove_style_all(spacer);
   lv_obj_set_size(spacer, 1, 8);
 
-  // Timeouts (read-only display — substitution-driven, no runtime edit yet).
-  lv_obj_t *to_title = lv_label_create(content);
-  lv_label_set_text(to_title, "Idle timeouts");
-  lv_obj_set_style_text_color(to_title, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_text_font(to_title, &lv_font_montserrat_18, 0);
+  // ---- Power saving & burn-in protection (P8) ----
+  // Combines idle dim/blank timeouts (AMOLED burn-in mitigation) with the
+  // sleep-when-idle power controls under one heading.
+  lv_obj_t *pwr_title = lv_label_create(content);
+  lv_label_set_text(pwr_title, "Power saving & burn-in protection");
+  lv_obj_set_style_text_color(pwr_title, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(pwr_title, &lv_font_montserrat_18, 0);
 
+  // Timeouts (read-only display — substitution-driven, no runtime edit yet).
   lv_obj_t *to_dim = lv_label_create(content);
   lv_label_set_text(to_dim, "Dim after 15 s\nBlank after 45 s total");
   lv_obj_set_style_text_color(to_dim, lv_color_hex(0xAAAAAA), 0);
   lv_obj_set_style_text_font(to_dim, &lv_font_montserrat_18, 0);
-
-  // ---- Power saving (P8) ----
-  lv_obj_t *pwr_title = lv_label_create(content);
-  lv_label_set_text(pwr_title, "Power saving");
-  lv_obj_set_style_text_color(pwr_title, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_text_font(pwr_title, &lv_font_montserrat_18, 0);
 
   // Master toggle row: label left, lv_switch right.
   lv_obj_t *sleep_row = lv_obj_create(content);
@@ -925,8 +1015,10 @@ void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
   char build_buf[Application::BUILD_TIME_STR_SIZE];
   App.get_build_time_string(build_buf);
   char abuf[160];
-  snprintf(abuf, sizeof(abuf), "%s\nESPHome %s\nBuilt %s\nCreated by William Krahmer",
-           App.get_name().c_str(), ESPHOME_VERSION, build_buf);
+  snprintf(abuf, sizeof(abuf),
+           "%s\nESPHome %s\nLVGL %d.%d.%d\nBuilt %s\nCreated by William Krahmer",
+           App.get_name().c_str(), ESPHOME_VERSION, LVGL_VERSION_MAJOR,
+           LVGL_VERSION_MINOR, LVGL_VERSION_PATCH, build_buf);
   lv_label_set_text(about, abuf);
   lv_obj_set_style_text_color(about, lv_color_hex(0xAAAAAA), 0);
   lv_obj_set_style_text_font(about, &lv_font_montserrat_18, 0);
@@ -1062,6 +1154,25 @@ void HAPanel::build_ui_() {
   lv_obj_set_style_bg_opa(this->status_dot_, LV_OPA_COVER, 0);
   lv_obj_align(this->status_dot_, LV_ALIGN_RIGHT_MID, -44, 0);
 
+  // Spinner shown in the dot's spot while the HA link is being established
+  // (wifi up, api down) — replaces the old amber blink. Same style as the
+  // boot-splash spinner (1.5 s/rev, 270° sweep, amber). Hidden unless
+  // connecting; status_dot_ covers the red (wifi down) + green (connected)
+  // states. Self-animated by LVGL's anim timer, no dependence on blink phase.
+  this->status_spinner_ = lv_spinner_create(header);
+  lv_spinner_set_anim_duration(this->status_spinner_, 1500);  // 1.5 s/rev
+  lv_spinner_set_arc_sweep(this->status_spinner_, 270);       // long 270° arc
+  lv_obj_set_size(this->status_spinner_, 18, 18);
+  lv_obj_remove_flag(this->status_spinner_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_arc_width(this->status_spinner_, 3, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(this->status_spinner_, lv_color_hex(0x333333),
+                             LV_PART_MAIN);
+  lv_obj_set_style_arc_width(this->status_spinner_, 3, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(this->status_spinner_, lv_color_hex(0xDDAA33),
+                             LV_PART_INDICATOR);
+  lv_obj_align(this->status_spinner_, LV_ALIGN_RIGHT_MID, -44, 0);
+  lv_obj_add_flag(this->status_spinner_, LV_OBJ_FLAG_HIDDEN);
+
   // Battery icon, to the left of the status dot. Single LV_SYMBOL_BATTERY_*
   // glyph (5 variants) bucketed by voltage. Tint matches level.
   this->battery_icon_ = lv_label_create(header);
@@ -1136,6 +1247,7 @@ void HAPanel::build_ui_() {
       lv_obj_t *widget = nullptr;
       lv_obj_t *unavail = nullptr;
       lv_obj_t *icon = nullptr;
+      lv_obj_t *led = nullptr;
       const std::string &glyph = this->resolve_icon_(e);
       // E8: pick the size-matched MDI glyph font + row geometry.
       const lv_font_t *row_mdi_font = mdi_lv_font;
@@ -1146,7 +1258,7 @@ void HAPanel::build_ui_() {
       const RowMetrics metrics = row_metrics_for(e.size);
       lv_obj_t *btn = make_entity_row(list, e, this, &HAPanel::on_entity_row_clicked_,
                                       (uintptr_t) ei, &widget, &unavail,
-                                      glyph.c_str(), row_mdi_font, &icon, metrics);
+                                      glyph.c_str(), row_mdi_font, &icon, &led, metrics);
       // P7d: long-press → detail modal, only for domains that have one.
       // P7f: also register long-press for confirm-flagged action-only entities
       // (no detail modal) so a long-press opens the same confirm sheet as a
@@ -1159,6 +1271,7 @@ void HAPanel::build_ui_() {
       this->widgets_by_entity_[ei] = widget;
       this->unavail_labels_by_entity_[ei] = unavail;
       this->icons_by_entity_[ei] = icon;
+      this->leds_by_entity_[ei] = led;  // UE5: nullptr unless binary_sensor
       this->rebuild_entity_row_(ei);
     }
   }
@@ -1306,6 +1419,14 @@ void HAPanel::build_ui_() {
   // indicators) animate even when stuck on the very first gate — no setter
   // fires when the initial state already matches.
   this->update_blink_timer_();
+
+  // One-shot 7 s watchdog: if the splash stages haven't passed by then (API
+  // still not connected), explain the slow stage and drop the splash so the
+  // app loads while reconnection keeps running. Cancelled in set_api_connected
+  // if the link comes up first.
+  this->splash_timeout_timer_ =
+      lv_timer_create(&HAPanel::splash_timeout_cb_, 7000, this);
+  lv_timer_set_repeat_count(this->splash_timeout_timer_, 1);
 }
 
 void HAPanel::open_picker_() {
@@ -1375,16 +1496,21 @@ void HAPanel::update_status_dot_() {
   if (this->status_dot_ == nullptr)
     return;
   // E2: three states.
-  //   wifi down            → red (can't even attempt the HA link yet).
-  //   wifi up, api down     → amber blink ("link not yet re-established").
-  //   api connected        → green.
-  uint32_t col;
-  if (!this->wifi_connected_)
-    col = 0xCC4444;
-  else if (this->api_connected_)
-    col = 0x66BB66;
-  else
-    col = this->blink_on_ ? 0xDDAA33 : 0x5A4A1A;
+  //   wifi down            → red dot (can't even attempt the HA link yet).
+  //   wifi up, api down     → spinner ("link not yet re-established").
+  //   api connected        → green dot.
+  const bool connecting = this->wifi_connected_ && !this->api_connected_;
+  if (connecting) {
+    // HA link being established: show the animated spinner, hide the dot.
+    if (this->status_spinner_ != nullptr)
+      lv_obj_clear_flag(this->status_spinner_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(this->status_dot_, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  if (this->status_spinner_ != nullptr)
+    lv_obj_add_flag(this->status_spinner_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(this->status_dot_, LV_OBJ_FLAG_HIDDEN);
+  const uint32_t col = this->api_connected_ ? 0x66BB66 : 0xCC4444;
   lv_obj_set_style_bg_color(this->status_dot_, lv_color_hex(col), 0);
 }
 
@@ -1398,14 +1524,30 @@ HAPanel::SplashStage HAPanel::build_splash_stage_(lv_obj_t *parent, const char *
   lv_obj_set_style_text_font(row, &lv_font_montserrat_18, 0);
   lv_obj_align(row, LV_ALIGN_CENTER, -14, y);
 
-  // Amber pending dot — sits just right of the phrase, after the "...".
+  // Amber dim dot — sits just right of the phrase, after the "...". Shown only
+  // while the stage is queued (a later gate not yet being worked on).
   st.dot = lv_obj_create(parent);
   lv_obj_remove_style_all(st.dot);
   lv_obj_set_size(st.dot, 12, 12);
   lv_obj_set_style_radius(st.dot, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_bg_color(st.dot, lv_color_hex(0xDDAA33), 0);
-  lv_obj_set_style_bg_opa(st.dot, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_opa(st.dot, LV_OPA_30, 0);
   lv_obj_align_to(st.dot, row, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+
+  // UE2: spinner shown while this stage is the active gate. Same spot as the
+  // dot/check. The boot wait runs across loop ticks (lv_timer_handler keeps
+  // firing), so unlike the blocking history fetch this one actually animates.
+  st.spinner = lv_spinner_create(parent);
+  lv_spinner_set_anim_duration(st.spinner, 1500);  // 1.5 s/rev
+  lv_spinner_set_arc_sweep(st.spinner, 270);       // long 270° arc, calm look
+  lv_obj_set_size(st.spinner, 18, 18);
+  lv_obj_set_style_arc_width(st.spinner, 3, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(st.spinner, lv_color_hex(0x333333), LV_PART_MAIN);
+  lv_obj_set_style_arc_width(st.spinner, 3, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(st.spinner, lv_color_hex(0xDDAA33),
+                             LV_PART_INDICATOR);
+  lv_obj_align_to(st.spinner, row, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
+  lv_obj_add_flag(st.spinner, LV_OBJ_FLAG_HIDDEN);
 
   // Green checkmark — same spot, hidden until the stage completes.
   st.check = lv_label_create(parent);
@@ -1421,17 +1563,27 @@ void HAPanel::update_splash_stage_(const SplashStage &st, bool done, bool active
   if (st.dot == nullptr || st.check == nullptr)
     return;
   if (done) {
-    // Stage complete: swap amber dot for the green check.
+    // Stage complete: green check only.
     lv_obj_add_flag(st.dot, LV_OBJ_FLAG_HIDDEN);
+    if (st.spinner != nullptr)
+      lv_obj_add_flag(st.spinner, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(st.check, LV_OBJ_FLAG_HIDDEN);
     return;
   }
-  lv_obj_clear_flag(st.dot, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(st.check, LV_OBJ_FLAG_HIDDEN);
-  // Active stage pulses with the shared blink phase; a not-yet-reached stage
-  // sits dim and steady.
-  lv_opa_t opa = active ? (this->blink_on_ ? LV_OPA_COVER : LV_OPA_30) : LV_OPA_30;
-  lv_obj_set_style_bg_opa(st.dot, opa, 0);
+  if (active) {
+    // UE2: the gate being worked on shows the animated spinner (self-driven by
+    // LVGL's anim timer — no dependence on the blink phase), dot hidden.
+    lv_obj_add_flag(st.dot, LV_OBJ_FLAG_HIDDEN);
+    if (st.spinner != nullptr)
+      lv_obj_clear_flag(st.spinner, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    // Queued (a later gate not yet reached): dim steady dot, no spinner.
+    if (st.spinner != nullptr)
+      lv_obj_add_flag(st.spinner, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(st.dot, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_bg_opa(st.dot, LV_OPA_30, 0);
+  }
 }
 
 void HAPanel::update_splash_status_() {
@@ -1467,8 +1619,16 @@ void HAPanel::set_api_connected(bool connected) {
   // E5: flip the HA stage to its green check before hiding the splash — not
   // visible for long, but keeps every stage consistent for future extra ones.
   this->update_splash_status_();
-  if (connected && this->splash_ != nullptr) {
-    lv_obj_add_flag(this->splash_, LV_OBJ_FLAG_HIDDEN);
+  if (connected) {
+    // Link came up — cancel the pending splash watchdog and clear its popup if
+    // it already fired.
+    if (this->splash_timeout_timer_ != nullptr) {
+      lv_timer_delete(this->splash_timeout_timer_);
+      this->splash_timeout_timer_ = nullptr;
+    }
+    this->dismiss_splash_timeout_popup_();
+    if (this->splash_ != nullptr)
+      lv_obj_add_flag(this->splash_, LV_OBJ_FLAG_HIDDEN);
   }
   ESP_LOGI(TAG, "api %s", connected ? "connected" : "disconnected");
 }
@@ -1508,6 +1668,105 @@ void HAPanel::blink_timer_cb_(lv_timer_t *t) {
   self->update_wifi_icon_();
   self->update_status_dot_();
   self->update_splash_status_();  // E5: pulse the splash dot in step.
+}
+
+void HAPanel::splash_timeout_cb_(lv_timer_t *t) {
+  auto *self = static_cast<HAPanel *>(lv_timer_get_user_data(t));
+  // One-shot: LVGL deletes the timer after this returns (repeat_count 1), so
+  // drop our handle either way.
+  if (self != nullptr)
+    self->splash_timeout_timer_ = nullptr;
+  if (self == nullptr || self->api_connected_)
+    return;  // already connected (timer not yet cancelled) — nothing to warn.
+  // Explain the stage we're stuck on, then load the app behind the popup.
+  self->show_splash_timeout_popup_();
+  if (self->splash_ != nullptr)
+    lv_obj_add_flag(self->splash_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void HAPanel::show_splash_timeout_popup_() {
+  // Which gate stalled: Wi-Fi is the first, the HA API the second.
+  const char *stage =
+      this->wifi_connected_ ? "Home Assistant" : "Wi-Fi";
+  // The header status spinner keeps signalling the live reconnection attempts.
+  std::string msg = std::string("Connecting to ") + stage +
+                    " is taking longer than expected.\n\n"
+                    "Loading the app without a Home Assistant connection. "
+                    "It will keep trying to connect in the background.";
+  if (this->splash_timeout_popup_ != nullptr) {
+    // Built already (shouldn't recur — one-shot) — refresh text + reshow.
+    if (this->splash_timeout_label_ != nullptr)
+      lv_label_set_text(this->splash_timeout_label_, msg.c_str());
+    lv_obj_clear_flag(this->splash_timeout_popup_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(this->splash_timeout_popup_);
+    return;
+  }
+  // Dim full-screen backdrop on the top layer so it floats above every page /
+  // sheet. CLICKABLE eats taps to the app beneath while the popup is up.
+  lv_obj_t *top = lv_layer_top();
+  this->splash_timeout_popup_ = lv_obj_create(top);
+  lv_obj_remove_style_all(this->splash_timeout_popup_);
+  lv_obj_set_size(this->splash_timeout_popup_, 480, 480);
+  lv_obj_set_pos(this->splash_timeout_popup_, 0, 0);
+  lv_obj_set_style_bg_color(this->splash_timeout_popup_, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(this->splash_timeout_popup_, LV_OPA_70, 0);
+  lv_obj_add_flag(this->splash_timeout_popup_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(this->splash_timeout_popup_, LV_OBJ_FLAG_SCROLLABLE);
+
+  // Centered card.
+  lv_obj_t *card = lv_obj_create(this->splash_timeout_popup_);
+  lv_obj_remove_style_all(card);
+  lv_obj_set_size(card, 380, 280);
+  lv_obj_center(card);
+  lv_obj_set_style_bg_color(card, lv_color_hex(0x1A1A1A), 0);
+  lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(card, 12, 0);
+  lv_obj_set_style_border_width(card, 1, 0);
+  lv_obj_set_style_border_color(card, lv_color_hex(0x333333), 0);
+  lv_obj_set_style_pad_all(card, 20, 0);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *title = lv_label_create(card);
+  lv_label_set_text(title, "Still connecting");
+  lv_obj_set_style_text_color(title, lv_color_hex(0xDDAA33), 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+  lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+  this->splash_timeout_label_ = lv_label_create(card);
+  lv_label_set_text(this->splash_timeout_label_, msg.c_str());
+  lv_obj_set_style_text_color(this->splash_timeout_label_, lv_color_hex(0xCCCCCC), 0);
+  lv_obj_set_style_text_font(this->splash_timeout_label_, &lv_font_montserrat_18, 0);
+  lv_label_set_long_mode(this->splash_timeout_label_, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(this->splash_timeout_label_, 340);
+  lv_obj_align(this->splash_timeout_label_, LV_ALIGN_TOP_LEFT, 0, 34);
+
+  // Dismiss button, bottom-right of the card.
+  lv_obj_t *ok = lv_button_create(card);
+  lv_obj_set_size(ok, 110, 40);
+  lv_obj_set_style_bg_color(ok, lv_color_hex(0x2E3640), 0);
+  lv_obj_set_style_bg_color(ok, lv_color_hex(0x3A4651), LV_STATE_PRESSED);
+  lv_obj_set_style_radius(ok, 8, 0);
+  lv_obj_set_style_border_width(ok, 0, 0);
+  lv_obj_set_style_shadow_width(ok, 0, 0);
+  lv_obj_align(ok, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+  lv_obj_add_event_cb(ok, &HAPanel::on_splash_timeout_dismiss_, LV_EVENT_CLICKED,
+                      this);
+  lv_obj_t *oklbl = lv_label_create(ok);
+  lv_label_set_text(oklbl, "Continue");
+  lv_obj_set_style_text_color(oklbl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(oklbl, &lv_font_montserrat_18, 0);
+  lv_obj_center(oklbl);
+}
+
+void HAPanel::dismiss_splash_timeout_popup_() {
+  if (this->splash_timeout_popup_ != nullptr)
+    lv_obj_add_flag(this->splash_timeout_popup_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void HAPanel::on_splash_timeout_dismiss_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->dismiss_splash_timeout_popup_();
 }
 
 void HAPanel::set_active_brightness(uint8_t v) {
@@ -1865,6 +2124,14 @@ void HAPanel::on_entity_row_clicked_(lv_event_t *e) {
       self->open_history_(entity_idx);
       return;
     }
+    // Summary rows (climate / media_player / number / select) have no inline
+    // tap action — tap_entity_ would no-op. Open the detail modal directly so a
+    // short tap, not only a long-press, brings up the control surface.
+    if (en.render_class == RenderClass::SUMMARY_TEXT &&
+        HAPanel::has_detail_(en.domain)) {
+      self->open_detail_(entity_idx);
+      return;
+    }
   }
   self->tap_entity_(entity_idx);
 }
@@ -1994,6 +2261,81 @@ static lv_obj_t *add_section_label(lv_obj_t *parent, const char *text,
   return l;
 }
 
+// Some HA climate integrations report hvac_modes as Python enum reprs, e.g.
+// "<HVACMode.OFF: 'off'>" instead of the bare "off" — parse_ha_list_ keeps the
+// interior quotes since they aren't the token's outer quotes. Pull the value
+// out of the first single-quoted span; pass through anything already bare.
+static std::string clean_hvac_mode_(const std::string &s) {
+  size_t q1 = s.find('\'');
+  if (q1 != std::string::npos) {
+    size_t q2 = s.find('\'', q1 + 1);
+    if (q2 != std::string::npos && q2 > q1 + 1)
+      return s.substr(q1 + 1, q2 - q1 - 1);
+  }
+  return s;
+}
+
+// UE3: format a setpoint for the dial label — whole number when the step is an
+// integer (no "77.0"), one decimal for fractional steps (°C 0.5).
+static void fmt_setpoint_(char *buf, size_t n, float value, float step) {
+  if (step >= 0.999f)
+    snprintf(buf, n, "%.0f", value);
+  else
+    snprintf(buf, n, "%.1f", value);
+}
+
+// UE3: dual-setpoint HVAC modes use target_temp_low/high (two dials); single
+// modes (heat/cool) use one `temperature` setpoint. auto is treated as dual per
+// the "set a heat point and a cool point" expectation. off/dry/fan_only have no
+// active setpoint but still show the single dial (greyed) so the modal isn't empty.
+static bool climate_mode_is_dual_(const std::string &m) {
+  return m == "auto" || m == "heat_cool";
+}
+
+// Dial tint by HVAC mode: heat = warm, cool = blue, off = grey, else teal.
+static uint32_t climate_mode_color_(const std::string &m) {
+  if (m == "off")
+    return 0x888888;
+  if (m.find("heat") != std::string::npos)
+    return 0xFF7043;
+  if (m.find("cool") != std::string::npos)
+    return 0x4FC3F7;
+  return 0x44CCDD;
+}
+
+// UE3: build one round setpoint dial (lv_arc) inside a transparent, centered,
+// non-scrollable holder appended to `box`. Returns the arc; *out_label is its
+// centered value label. Shared by the single + both dual dials.
+static lv_obj_t *add_setpoint_dial(lv_obj_t *box, int rng_min, int rng_max,
+                                   int rng_cur, float per_unit, uint32_t color,
+                                   lv_event_cb_t cb, void *user_data,
+                                   lv_obj_t **out_label, int dial_px) {
+  lv_obj_t *holder = lv_obj_create(box);
+  lv_obj_remove_style_all(holder);
+  lv_obj_set_size(holder, LV_PCT(100), dial_px + 10);
+  lv_obj_set_style_bg_opa(holder, LV_OPA_TRANSP, 0);
+  lv_obj_clear_flag(holder, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t *arc = lv_arc_create(holder);
+  lv_obj_set_size(arc, dial_px, dial_px);
+  lv_obj_center(arc);
+  lv_arc_set_range(arc, rng_min, rng_max);
+  lv_arc_set_value(arc, rng_cur);
+  lv_obj_set_style_arc_width(arc, 14, LV_PART_MAIN);
+  lv_obj_set_style_arc_width(arc, 14, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(arc, lv_color_hex(color), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(arc, lv_color_hex(color), LV_PART_KNOB);
+  lv_obj_add_event_cb(arc, cb, LV_EVENT_VALUE_CHANGED, user_data);
+  lv_obj_t *lbl = lv_label_create(arc);
+  char buf[24];
+  fmt_setpoint_(buf, sizeof(buf), (float) rng_cur * per_unit, per_unit);
+  lv_label_set_text(lbl, buf);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+  lv_obj_center(lbl);
+  *out_label = lbl;
+  return arc;
+}
+
 void HAPanel::build_detail_modal_(lv_obj_t *scr) {
   this->detail_modal_ = lv_obj_create(scr);
   lv_obj_remove_style_all(this->detail_modal_);
@@ -2004,10 +2346,10 @@ void HAPanel::build_detail_modal_(lv_obj_t *scr) {
   lv_obj_set_style_pad_all(this->detail_modal_, 0, 0);
   lv_obj_set_style_border_width(this->detail_modal_, 0, 0);
   lv_obj_add_flag(this->detail_modal_, LV_OBJ_FLAG_HIDDEN);
+  // Clickable so background taps are swallowed (don't fall through to the page
+  // behind). No bg-tap-to-close: only Apply / Cancel dismiss the modal — a
+  // stray tap on the side/bottom while adjusting a dial must not lose edits.
   lv_obj_add_flag(this->detail_modal_, LV_OBJ_FLAG_CLICKABLE);
-  // Bg tap (on the modal itself, not a child) = cancel + close.
-  lv_obj_add_event_cb(this->detail_modal_, &HAPanel::on_detail_bg_clicked_,
-                      LV_EVENT_CLICKED, this);
 
   // Title centered at top.
   this->detail_title_ = lv_label_create(this->detail_modal_);
@@ -2091,6 +2433,12 @@ void HAPanel::clear_detail_widgets_() {
   this->dw_ct_label_ = nullptr;
   this->dw_temp_slider_ = nullptr;
   this->dw_temp_label_ = nullptr;
+  this->dw_temp_single_box_ = nullptr;
+  this->dw_temp_dual_box_ = nullptr;
+  this->dw_temp_low_slider_ = nullptr;
+  this->dw_temp_low_label_ = nullptr;
+  this->dw_temp_high_slider_ = nullptr;
+  this->dw_temp_high_label_ = nullptr;
   this->dw_temp_step_ = 0.1f;
   this->dw_hvac_dropdown_ = nullptr;
   this->dw_hvac_modes_.clear();
@@ -2163,7 +2511,8 @@ std::vector<const char *> HAPanel::attrs_for_domain_(const std::string &d) {
             "max_color_temp_kelvin", "supported_color_modes", "color_mode"};
   if (d == "climate")
     return {"current_temperature", "temperature", "hvac_modes", "min_temp",
-            "max_temp", "target_temp_step"};
+            "max_temp", "target_temp_step", "target_temp_low",
+            "target_temp_high"};
   if (d == "media_player")
     return {"media_title", "volume_level", "is_volume_muted"};
   if (d == "number")
@@ -2378,8 +2727,11 @@ void HAPanel::build_detail_climate_(lv_obj_t *parent, size_t entity_idx) {
   // HVAC mode dropdown. Fall back to a sensible default list if HA didn't
   // expose hvac_modes (e.g. attribute hadn't landed yet at modal-open time).
   std::string modes_raw;
-  if (this->get_attr_(entity_idx, "hvac_modes", &modes_raw))
+  if (this->get_attr_(entity_idx, "hvac_modes", &modes_raw)) {
     this->dw_hvac_modes_ = parse_ha_list_(modes_raw);
+    for (auto &m : this->dw_hvac_modes_)
+      m = clean_hvac_mode_(m);
+  }
   if (this->dw_hvac_modes_.empty())
     this->dw_hvac_modes_ = {"off", "heat", "cool", "auto"};
   add_section_label(parent, "Mode", 0xFFFFFF);
@@ -2398,13 +2750,17 @@ void HAPanel::build_detail_climate_(lv_obj_t *parent, size_t entity_idx) {
     }
   }
 
-  // Target temperature slider. Stored as int = temp / step so the slider can
-  // hit non-integer values without LVGL having float ranges.
+  // Setpoint dial(s). Stored as int = temp / step so the arc can hit
+  // non-integer setpoints without LVGL float ranges. heat/cool use one
+  // `temperature` dial; auto/heat_cool use two — target_temp_low (heat point)
+  // and target_temp_high (cool point). Both boxes are built; the mode-change
+  // handler shows one and hides the other so switching mode swaps the dials live
+  // (a hidden flex child takes no layout space).
   float min_t = this->get_attr_float_(entity_idx, "min_temp", 7.0f);
   float max_t = this->get_attr_float_(entity_idx, "max_temp", 35.0f);
-  float step = this->get_attr_float_(entity_idx, "target_temp_step", 0.5f);
-  float cur_target = this->get_attr_float_(entity_idx, "temperature",
-                                            (min_t + max_t) / 2.0f);
+  // Default to whole degrees when HA doesn't report a step (common on °F
+  // thermostats); honor target_temp_step when present (e.g. 0.5 on °C units).
+  float step = this->get_attr_float_(entity_idx, "target_temp_step", 1.0f);
   if (step < 0.1f) step = 0.1f;
   this->dw_temp_step_ = step;
   int scale = (int) std::round(1.0f / step);
@@ -2412,22 +2768,87 @@ void HAPanel::build_detail_climate_(lv_obj_t *parent, size_t entity_idx) {
   int rng_min = (int) std::round(min_t * scale);
   int rng_max = (int) std::round(max_t * scale);
   if (rng_max <= rng_min) rng_max = rng_min + 1;
-  int rng_cur = (int) std::round(cur_target * scale);
-  if (rng_cur < rng_min) rng_cur = rng_min;
-  if (rng_cur > rng_max) rng_cur = rng_max;
-  add_section_label(parent, "Target", 0xFFFFFF);
-  this->dw_temp_slider_ = lv_slider_create(parent);
-  lv_obj_set_width(this->dw_temp_slider_, LV_PCT(100));
-  lv_obj_set_height(this->dw_temp_slider_, 22);
-  lv_slider_set_range(this->dw_temp_slider_, rng_min, rng_max);
-  lv_slider_set_value(this->dw_temp_slider_, rng_cur, LV_ANIM_OFF);
-  lv_obj_add_event_cb(this->dw_temp_slider_, &HAPanel::on_detail_temp_slider_,
+  auto to_rng = [&](float t) {
+    int r = (int) std::round(t * scale);
+    if (r < rng_min) r = rng_min;
+    if (r > rng_max) r = rng_max;
+    return r;
+  };
+  float mid_t = (min_t + max_t) / 2.0f;
+  float cur_target = this->get_attr_float_(entity_idx, "temperature", mid_t);
+  float lo_t = this->get_attr_float_(entity_idx, "target_temp_low", NAN);
+  float hi_t = this->get_attr_float_(entity_idx, "target_temp_high", NAN);
+  // Seed the dual dials from the single setpoint when low/high aren't reported
+  // (e.g. the entity is currently in heat/cool): a small spread around the
+  // current target, clamped to range.
+  float spread = (max_t - min_t) * 0.1f;
+  if (spread < step) spread = step;
+  if (std::isnan(lo_t)) lo_t = cur_target - spread;
+  if (std::isnan(hi_t)) hi_t = cur_target + spread;
+  if (hi_t < lo_t) hi_t = lo_t;
+
+  // --- single-setpoint box (heat / cool / off) ---
+  this->dw_temp_single_box_ = lv_obj_create(parent);
+  lv_obj_remove_style_all(this->dw_temp_single_box_);
+  lv_obj_set_size(this->dw_temp_single_box_, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(this->dw_temp_single_box_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_pad_row(this->dw_temp_single_box_, 10, 0);
+  lv_obj_set_flex_flow(this->dw_temp_single_box_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_clear_flag(this->dw_temp_single_box_, LV_OBJ_FLAG_SCROLLABLE);
+  add_section_label(this->dw_temp_single_box_, "Target", 0xFFFFFF);
+  this->dw_temp_slider_ = add_setpoint_dial(
+      this->dw_temp_single_box_, rng_min, rng_max, to_rng(cur_target), step,
+      climate_mode_color_(e.state), &HAPanel::on_detail_temp_slider_, this,
+      &this->dw_temp_label_, 180);
+
+  // --- dual-setpoint box (auto / heat_cool): two dials SIDE BY SIDE so both
+  // the heat point and cool point are visible at once. Stacking pushed the
+  // lower dial below the fold and the arc traps vertical scroll, so the cool
+  // dial was unreachable. Smaller 150px dials fit two-across in the 400px
+  // content width with the header still visible. ---
+  this->dw_temp_dual_box_ = lv_obj_create(parent);
+  lv_obj_remove_style_all(this->dw_temp_dual_box_);
+  lv_obj_set_size(this->dw_temp_dual_box_, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(this->dw_temp_dual_box_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_pad_column(this->dw_temp_dual_box_, 6, 0);
+  lv_obj_set_flex_flow(this->dw_temp_dual_box_, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(this->dw_temp_dual_box_, LV_FLEX_ALIGN_SPACE_EVENLY,
+                        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_clear_flag(this->dw_temp_dual_box_, LV_OBJ_FLAG_SCROLLABLE);
+  auto add_dial_col = [&](const char *title, uint32_t color, int rng_cur,
+                          lv_event_cb_t cb, lv_obj_t **out_label) {
+    lv_obj_t *col = lv_obj_create(this->dw_temp_dual_box_);
+    lv_obj_remove_style_all(col);
+    lv_obj_set_size(col, 196, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(col, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_row(col, 4, 0);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+    add_section_label(col, title, color);
+    return add_setpoint_dial(col, rng_min, rng_max, rng_cur, step, color, cb,
+                             this, out_label, 150);
+  };
+  this->dw_temp_low_slider_ =
+      add_dial_col("Heat to", 0xFF7043, to_rng(lo_t),
+                   &HAPanel::on_detail_temp_low_slider_, &this->dw_temp_low_label_);
+  this->dw_temp_high_slider_ =
+      add_dial_col("Cool to", 0x4FC3F7, to_rng(hi_t),
+                   &HAPanel::on_detail_temp_high_slider_, &this->dw_temp_high_label_);
+
+  // Toggle which box is visible by mode; re-run on dropdown change. Base the
+  // initial choice on the dropdown's selected mode (not raw e.state) so the
+  // dials always agree with the dropdown even if hvac_modes lacks e.state.
+  lv_obj_add_event_cb(this->dw_hvac_dropdown_,
+                      &HAPanel::on_detail_hvac_mode_changed_,
                       LV_EVENT_VALUE_CHANGED, this);
-  this->dw_temp_label_ = lv_label_create(parent);
-  snprintf(buf, sizeof(buf), "%.1f", (float) rng_cur / scale);
-  lv_label_set_text(this->dw_temp_label_, buf);
-  lv_obj_set_style_text_color(this->dw_temp_label_, lv_color_hex(0xAAAAAA), 0);
-  lv_obj_set_style_text_font(this->dw_temp_label_, &lv_font_montserrat_18, 0);
+  uint16_t sel = lv_dropdown_get_selected(this->dw_hvac_dropdown_);
+  const std::string &cur_mode =
+      sel < this->dw_hvac_modes_.size() ? this->dw_hvac_modes_[sel] : e.state;
+  lv_obj_add_flag(climate_mode_is_dual_(cur_mode) ? this->dw_temp_single_box_
+                                                  : this->dw_temp_dual_box_,
+                  LV_OBJ_FLAG_HIDDEN);
 }
 
 void HAPanel::build_detail_media_player_(lv_obj_t *parent, size_t entity_idx) {
@@ -2475,20 +2896,34 @@ void HAPanel::build_detail_media_player_(lv_obj_t *parent, size_t entity_idx) {
   if (v100 < 0) v100 = 0;
   if (v100 > 100) v100 = 100;
   add_section_label(parent, "Volume", 0xFFFFFF);
-  this->dw_volume_slider_ = lv_slider_create(parent);
-  lv_obj_set_width(this->dw_volume_slider_, LV_PCT(100));
-  lv_obj_set_height(this->dw_volume_slider_, 22);
-  lv_slider_set_range(this->dw_volume_slider_, 0, 100);
-  lv_slider_set_value(this->dw_volume_slider_, v100, LV_ANIM_OFF);
+  // UE3: round volume dial (lv_arc), 0-100, same VALUE_CHANGED handler + apply
+  // path as the old slider. Holder centers the square arc in the flex column.
+  lv_obj_t *vol_holder = lv_obj_create(parent);
+  lv_obj_remove_style_all(vol_holder);
+  lv_obj_set_size(vol_holder, LV_PCT(100), 190);
+  lv_obj_set_style_bg_opa(vol_holder, LV_OPA_TRANSP, 0);
+  lv_obj_clear_flag(vol_holder, LV_OBJ_FLAG_SCROLLABLE);
+  this->dw_volume_slider_ = lv_arc_create(vol_holder);
+  lv_obj_set_size(this->dw_volume_slider_, 180, 180);
+  lv_obj_center(this->dw_volume_slider_);
+  lv_arc_set_range(this->dw_volume_slider_, 0, 100);
+  lv_arc_set_value(this->dw_volume_slider_, v100);
+  lv_obj_set_style_arc_width(this->dw_volume_slider_, 14, LV_PART_MAIN);
+  lv_obj_set_style_arc_width(this->dw_volume_slider_, 14, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(this->dw_volume_slider_, lv_color_hex(0x44CCDD),
+                             LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(this->dw_volume_slider_, lv_color_hex(0x44CCDD),
+                            LV_PART_KNOB);
   lv_obj_add_event_cb(this->dw_volume_slider_,
                       &HAPanel::on_detail_volume_slider_,
                       LV_EVENT_VALUE_CHANGED, this);
-  this->dw_volume_label_ = lv_label_create(parent);
+  this->dw_volume_label_ = lv_label_create(this->dw_volume_slider_);
   char buf[24];
   snprintf(buf, sizeof(buf), "%d %%", v100);
   lv_label_set_text(this->dw_volume_label_, buf);
-  lv_obj_set_style_text_color(this->dw_volume_label_, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_color(this->dw_volume_label_, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_style_text_font(this->dw_volume_label_, &lv_font_montserrat_18, 0);
+  lv_obj_center(this->dw_volume_label_);
 }
 
 void HAPanel::build_detail_number_(lv_obj_t *parent, size_t entity_idx) {
@@ -2724,21 +3159,44 @@ void HAPanel::apply_detail_() {
                data.count("color_temp_kelvin") ? data["color_temp_kelvin"].c_str() : "-");
     }
   } else if (d == "climate") {
-    // Always send both — HA tolerates redundant calls, and trying to track
-    // "did the user change this" adds complexity for little win.
+    // Send set_hvac_mode ONLY when the mode actually changed. A redundant mode
+    // call makes many integrations re-read/reset the target temperature, which
+    // races the set_temperature we send right after — the symptom was the new
+    // setpoint "sticking" only ~half the time. sel_mode is still resolved (even
+    // when unchanged) so the dual/single temperature branch below is correct.
+    std::string sel_mode = e.state;
     if (this->dw_hvac_dropdown_ != nullptr && !this->dw_hvac_modes_.empty()) {
       uint16_t idx = lv_dropdown_get_selected(this->dw_hvac_dropdown_);
-      if (idx < this->dw_hvac_modes_.size()) {
-        std::map<std::string, std::string> hdata;
-        hdata["entity_id"] = e.entity_id;
-        hdata["hvac_mode"] = this->dw_hvac_modes_[idx];
-        this->call_homeassistant_service("climate.set_hvac_mode", hdata);
-        ESP_LOGI(TAG, "apply %s → climate.set_hvac_mode=%s",
-                 e.entity_id.c_str(), this->dw_hvac_modes_[idx].c_str());
-      }
+      if (idx < this->dw_hvac_modes_.size())
+        sel_mode = this->dw_hvac_modes_[idx];
     }
-    if (this->dw_temp_slider_ != nullptr) {
-      int v = lv_slider_get_value(this->dw_temp_slider_);
+    if (sel_mode != e.state) {
+      std::map<std::string, std::string> hdata;
+      hdata["entity_id"] = e.entity_id;
+      hdata["hvac_mode"] = sel_mode;
+      this->call_homeassistant_service("climate.set_hvac_mode", hdata);
+      ESP_LOGI(TAG, "apply %s → climate.set_hvac_mode=%s", e.entity_id.c_str(),
+               sel_mode.c_str());
+    }
+    // Dual modes (auto/heat_cool) send target_temp_low + target_temp_high; the
+    // single `temperature` param is invalid for them. Single modes send
+    // `temperature`. Match what the visible dial(s) edited.
+    if (climate_mode_is_dual_(sel_mode) && this->dw_temp_low_slider_ != nullptr &&
+        this->dw_temp_high_slider_ != nullptr) {
+      int lo = lv_arc_get_value(this->dw_temp_low_slider_);
+      int hi = lv_arc_get_value(this->dw_temp_high_slider_);
+      char lob[24], hib[24];
+      snprintf(lob, sizeof(lob), "%.1f", (float) lo * this->dw_temp_step_);
+      snprintf(hib, sizeof(hib), "%.1f", (float) hi * this->dw_temp_step_);
+      std::map<std::string, std::string> tdata;
+      tdata["entity_id"] = e.entity_id;
+      tdata["target_temp_low"] = lob;
+      tdata["target_temp_high"] = hib;
+      this->call_homeassistant_service("climate.set_temperature", tdata);
+      ESP_LOGI(TAG, "apply %s → climate.set_temperature low=%s high=%s",
+               e.entity_id.c_str(), lob, hib);
+    } else if (this->dw_temp_slider_ != nullptr) {
+      int v = lv_arc_get_value(this->dw_temp_slider_);
       float temp = (float) v * this->dw_temp_step_;
       char buf[32];
       snprintf(buf, sizeof(buf), "%.1f", temp);
@@ -2751,7 +3209,7 @@ void HAPanel::apply_detail_() {
     }
   } else if (d == "media_player") {
     if (this->dw_volume_slider_ != nullptr) {
-      int v = lv_slider_get_value(this->dw_volume_slider_);
+      int v = lv_arc_get_value(this->dw_volume_slider_);
       char buf[16];
       snprintf(buf, sizeof(buf), "%.2f", (float) v / 100.0f);
       data["volume_level"] = buf;
@@ -2913,10 +3371,85 @@ void HAPanel::on_detail_temp_slider_(lv_event_t *e) {
   if (self == nullptr || self->dw_temp_slider_ == nullptr ||
       self->dw_temp_label_ == nullptr)
     return;
-  int v = lv_slider_get_value(self->dw_temp_slider_);
+  int v = lv_arc_get_value(self->dw_temp_slider_);
   char buf[24];
-  snprintf(buf, sizeof(buf), "%.1f", (float) v * self->dw_temp_step_);
+  fmt_setpoint_(buf, sizeof(buf), (float) v * self->dw_temp_step_,
+                self->dw_temp_step_);
   lv_label_set_text(self->dw_temp_label_, buf);
+}
+
+// UE3 dual setpoint: heat-point dial. Clamp low <= high (push high up if the
+// user drags past it) so the band stays valid.
+void HAPanel::on_detail_temp_low_slider_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->dw_temp_low_slider_ == nullptr ||
+      self->dw_temp_low_label_ == nullptr)
+    return;
+  int v = lv_arc_get_value(self->dw_temp_low_slider_);
+  char buf[24];
+  if (self->dw_temp_high_slider_ != nullptr &&
+      v > lv_arc_get_value(self->dw_temp_high_slider_)) {
+    lv_arc_set_value(self->dw_temp_high_slider_, v);
+    if (self->dw_temp_high_label_ != nullptr) {
+      fmt_setpoint_(buf, sizeof(buf), (float) v * self->dw_temp_step_,
+                    self->dw_temp_step_);
+      lv_label_set_text(self->dw_temp_high_label_, buf);
+    }
+  }
+  fmt_setpoint_(buf, sizeof(buf), (float) v * self->dw_temp_step_,
+                self->dw_temp_step_);
+  lv_label_set_text(self->dw_temp_low_label_, buf);
+}
+
+// UE3 dual setpoint: cool-point dial. Clamp high >= low (pull low down if the
+// user drags below it).
+void HAPanel::on_detail_temp_high_slider_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->dw_temp_high_slider_ == nullptr ||
+      self->dw_temp_high_label_ == nullptr)
+    return;
+  int v = lv_arc_get_value(self->dw_temp_high_slider_);
+  char buf[24];
+  if (self->dw_temp_low_slider_ != nullptr &&
+      v < lv_arc_get_value(self->dw_temp_low_slider_)) {
+    lv_arc_set_value(self->dw_temp_low_slider_, v);
+    if (self->dw_temp_low_label_ != nullptr) {
+      fmt_setpoint_(buf, sizeof(buf), (float) v * self->dw_temp_step_,
+                    self->dw_temp_step_);
+      lv_label_set_text(self->dw_temp_low_label_, buf);
+    }
+  }
+  fmt_setpoint_(buf, sizeof(buf), (float) v * self->dw_temp_step_,
+                self->dw_temp_step_);
+  lv_label_set_text(self->dw_temp_high_label_, buf);
+}
+
+// UE3: HVAC mode dropdown changed — swap single vs dual setpoint dials and
+// re-tint the single dial to the newly selected mode.
+void HAPanel::on_detail_hvac_mode_changed_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->dw_hvac_dropdown_ == nullptr ||
+      self->dw_temp_single_box_ == nullptr ||
+      self->dw_temp_dual_box_ == nullptr)
+    return;
+  uint16_t idx = lv_dropdown_get_selected(self->dw_hvac_dropdown_);
+  if (idx >= self->dw_hvac_modes_.size())
+    return;
+  const std::string &mode = self->dw_hvac_modes_[idx];
+  if (climate_mode_is_dual_(mode)) {
+    lv_obj_add_flag(self->dw_temp_single_box_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(self->dw_temp_dual_box_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(self->dw_temp_single_box_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(self->dw_temp_dual_box_, LV_OBJ_FLAG_HIDDEN);
+    if (self->dw_temp_slider_ != nullptr) {
+      uint32_t col = climate_mode_color_(mode);
+      lv_obj_set_style_arc_color(self->dw_temp_slider_, lv_color_hex(col),
+                                 LV_PART_INDICATOR);
+      lv_obj_set_style_bg_color(self->dw_temp_slider_, lv_color_hex(col),
+                                LV_PART_KNOB);
+    }
+  }
 }
 
 void HAPanel::on_detail_number_slider_(lv_event_t *e) {
@@ -2939,7 +3472,7 @@ void HAPanel::on_detail_volume_slider_(lv_event_t *e) {
   if (self == nullptr || self->dw_volume_slider_ == nullptr ||
       self->dw_volume_label_ == nullptr)
     return;
-  int v = lv_slider_get_value(self->dw_volume_slider_);
+  int v = lv_arc_get_value(self->dw_volume_slider_);
   char buf[24];
   snprintf(buf, sizeof(buf), "%d %%", v);
   lv_label_set_text(self->dw_volume_label_, buf);
@@ -3324,14 +3857,30 @@ void HAPanel::on_confirm_cover_close_(lv_event_t *e) {
 // only chartable read-only entities allocate one. HA pushes on change only, so
 // this is "last 240 changes since boot", decimated to the chart width on draw.
 static const size_t HISTORY_CAP = 240;
+// UE7: deeper ring for `realtime: true` entities (scope mode). A high-rate feed
+// at f Hz holds HISTORY_CAP_RT / f seconds; 600 backs the 30 s Live window up to
+// 20 Hz. ~600 × 8 B = ~4.7 KB each — paid only by the handful of realtime
+// entities, NOT the ~50 ordinary sensors (internal heap is tight; see 082f308).
+static const size_t HISTORY_CAP_RT = 600;
 // Window chip → seconds. Index matches history_window_idx_ (0 = 1h, …).
-static const uint32_t HISTORY_WINDOW_S[3] = {3600u, 6u * 3600u, 24u * 3600u};
-// Cap the points fed to lv_chart so a long window decimates to ~screen width.
-static const size_t MAX_CHART_POINTS = 100;
+// UE7: index 3 = "Live" — a short scope window for watching high-rate sensors
+// scroll in real time. 30 s decimates near 1:1 to MAX_CHART_POINTS, so the trace
+// sweeps visibly. Backed by the realtime ring (HISTORY_CAP_RT) for those entities.
+static const uint32_t HISTORY_WINDOW_S[4] = {3600u, 6u * 3600u, 24u * 3600u, 30u};
+// Cap the points fed to lv_chart. ~200 across the 432 px chart ≈ 2 px/point — a
+// smooth scope trace without sub-pixel waste. Long windows decimate down to it.
+static const size_t MAX_CHART_POINTS = 200;
 // Cap the points kept from a REST response. Bounds the internal-heap vector (a
-// 24 h per-minute series is ~1440 pts); 3× MAX_CHART_POINTS leaves headroom for
-// the chart's own decimation. The chart never shows more than MAX_CHART_POINTS.
+// 24 h per-minute series is ~1440 pts). ≥ MAX_CHART_POINTS so the chart's own
+// decimation still has every point it needs; kept at 300 to limit internal heap
+// during the fetch (REST = non-realtime only). The chart never shows more than
+// MAX_CHART_POINTS.
 static const size_t SAMPLE_CAP = 300;
+// UE7: fixed slot count for the Live roll-mode trace. The newest sample sits in
+// the rightmost slot; the chart shows at most this many samples at a constant
+// X scale (≈432 px / 60 ≈ 7 px/sample). Time span shown ≈ LIVE_CHART_POINTS /
+// sample_rate seconds (60 ≈ 30 s at 2 Hz). Raise for a wider / smoother sweep.
+static const size_t LIVE_CHART_POINTS = 60;
 
 // Format an elapsed duration (in seconds) as a compact "-12s" / "-45m" /
 // "-2.5h" axis label.
@@ -3392,7 +3941,10 @@ void HAPanel::record_history_(size_t entity_idx) {
     return;  // skip unavailable/unknown/non-numeric transients
   // Ring-buffer samples are stamped in uptime-seconds (millis()/1000).
   e.history.push_back({millis() / 1000u, v});
-  if (e.history.size() > HISTORY_CAP)
+  // UE7: realtime entities keep a deeper ring so the short scope window stays
+  // fully backed at high sample rates.
+  const size_t cap = e.realtime ? HISTORY_CAP_RT : HISTORY_CAP;
+  if (e.history.size() > cap)
     e.history.erase(e.history.begin());
 }
 
@@ -3445,9 +3997,11 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   lv_obj_align(this->history_value_, LV_ALIGN_TOP_LEFT, 24, 52);
 
   // Numeric chart (line). Hidden when the open entity is a binary_sensor.
+  // UE4: shortened 230→176 and dropped to y=150 (bottom stays at 326) to free a
+  // band above it for the top-right analog gauge.
   this->history_chart_ = lv_chart_create(this->history_sheet_);
-  lv_obj_set_size(this->history_chart_, 432, 230);
-  lv_obj_align(this->history_chart_, LV_ALIGN_TOP_MID, 0, 96);
+  lv_obj_set_size(this->history_chart_, 432, 176);
+  lv_obj_align(this->history_chart_, LV_ALIGN_TOP_MID, 0, 150);
   lv_obj_set_style_bg_color(this->history_chart_, lv_color_hex(0x111111), 0);
   lv_obj_set_style_bg_opa(this->history_chart_, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(this->history_chart_, 0, 0);
@@ -3468,8 +4022,8 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   // one of the two is visible per open. Children (bands) are rebuilt on redraw.
   this->history_strip_ = lv_obj_create(this->history_sheet_);
   lv_obj_remove_style_all(this->history_strip_);
-  lv_obj_set_size(this->history_strip_, 432, 230);
-  lv_obj_align(this->history_strip_, LV_ALIGN_TOP_MID, 0, 96);
+  lv_obj_set_size(this->history_strip_, 432, 176);
+  lv_obj_align(this->history_strip_, LV_ALIGN_TOP_MID, 0, 150);
   lv_obj_set_style_bg_color(this->history_strip_, lv_color_hex(0x111111), 0);
   lv_obj_set_style_bg_opa(this->history_strip_, LV_OPA_COVER, 0);
   lv_obj_set_style_radius(this->history_strip_, 8, 0);
@@ -3477,6 +4031,64 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   lv_obj_set_style_clip_corner(this->history_strip_, true, 0);
   lv_obj_clear_flag(this->history_strip_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
+
+  // UE6: real lv_spinner over the chart footprint, shown during the worker-task
+  // backfill. The fetch no longer blocks the main loop, so lv_timer_handler keeps
+  // firing and this self-animates (retiring the UE2 hand-rotated arc + its
+  // spin_history_/lv_refr_now pumping). No knob, not clickable.
+  this->history_spinner_ = lv_spinner_create(this->history_sheet_);
+  lv_spinner_set_anim_duration(this->history_spinner_, 1500);  // 1.5 s/rev — match splash
+  lv_spinner_set_arc_sweep(this->history_spinner_, 270);       // 270° arc — match splash
+  lv_obj_set_size(this->history_spinner_, 60, 60);
+  lv_obj_align(this->history_spinner_, LV_ALIGN_TOP_MID, 0, 208);
+  lv_obj_remove_flag(this->history_spinner_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_arc_width(this->history_spinner_, 6, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(this->history_spinner_, lv_color_hex(0x222222),
+                             LV_PART_MAIN);
+  lv_obj_set_style_arc_width(this->history_spinner_, 6, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(this->history_spinner_, lv_color_hex(0x44CCDD),
+                             LV_PART_INDICATOR);
+  lv_obj_add_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
+
+  // UE4: analog "now" gauge — a round lv_scale + line needle, top-right in the
+  // band freed by the shortened chart, just under the ✕ button. It renders the
+  // *current* value (same as history_value_) as a needle angle; the chart stays
+  // the focus (gauge = now, chart = history). Tick labels are off: the numbers
+  // live in history_value_ / history_range_label_, and rotated labels on a 96 px
+  // dial would only clutter it. Hidden for binary_sensor and no-data (see
+  // redraw_history_); shown only once numeric data is drawn.
+  this->history_gauge_ = lv_scale_create(this->history_sheet_);
+  lv_obj_set_size(this->history_gauge_, 96, 96);
+  lv_obj_align(this->history_gauge_, LV_ALIGN_TOP_RIGHT, -24, 48);
+  lv_obj_remove_flag(this->history_gauge_, LV_OBJ_FLAG_CLICKABLE);
+  lv_scale_set_mode(this->history_gauge_, LV_SCALE_MODE_ROUND_INNER);
+  lv_scale_set_label_show(this->history_gauge_, false);
+  lv_scale_set_total_tick_count(this->history_gauge_, 21);
+  lv_scale_set_major_tick_every(this->history_gauge_, 5);
+  // 270° sweep starting at 7-8 o'clock (rotation 135) — the classic gauge layout.
+  lv_scale_set_angle_range(this->history_gauge_, 270);
+  lv_scale_set_rotation(this->history_gauge_, 135);
+  // Main = the arc track; ITEMS = minor ticks; INDICATOR = major ticks.
+  lv_obj_set_style_arc_width(this->history_gauge_, 3, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(this->history_gauge_, lv_color_hex(0x444444),
+                             LV_PART_MAIN);
+  lv_obj_set_style_line_color(this->history_gauge_, lv_color_hex(0x666666),
+                              LV_PART_ITEMS);
+  lv_obj_set_style_length(this->history_gauge_, 4, LV_PART_ITEMS);
+  lv_obj_set_style_line_width(this->history_gauge_, 1, LV_PART_ITEMS);
+  lv_obj_set_style_line_color(this->history_gauge_, lv_color_hex(0xAAAAAA),
+                              LV_PART_INDICATOR);
+  lv_obj_set_style_length(this->history_gauge_, 8, LV_PART_INDICATOR);
+  lv_obj_set_style_line_width(this->history_gauge_, 2, LV_PART_INDICATOR);
+
+  // Needle: a line child of the scale; lv_scale_set_line_needle_value owns its
+  // point array and re-aims it each redraw. Teal to match the chart series.
+  this->history_gauge_needle_ = lv_line_create(this->history_gauge_);
+  lv_obj_set_style_line_width(this->history_gauge_needle_, 3, 0);
+  lv_obj_set_style_line_color(this->history_gauge_needle_,
+                              lv_color_hex(0x44CCDD), 0);
+  lv_obj_set_style_line_rounded(this->history_gauge_needle_, true, 0);
+  lv_obj_add_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
 
   // Bottom row under the chart: time span (left = oldest visible sample age,
   // right = "now") + centered value range. Time markers make the x-axis legible
@@ -3499,7 +4111,7 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   lv_obj_set_style_text_font(this->history_time_right_, &lv_font_montserrat_18, 0);
   lv_obj_align(this->history_time_right_, LV_ALIGN_TOP_RIGHT, -24, 332);
 
-  // Window chips: 1h / 6h / 24h segmented row.
+  // Window chips: 1h / 6h / 24h / Live segmented row.
   lv_obj_t *chips = lv_obj_create(this->history_sheet_);
   lv_obj_remove_style_all(chips);
   lv_obj_set_size(chips, 480, 56);
@@ -3513,10 +4125,10 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
                         LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_clear_flag(chips, LV_OBJ_FLAG_SCROLLABLE);
 
-  const char *chip_text[3] = {"1h", "6h", "24h"};
-  for (int i = 0; i < 3; i++) {
+  const char *chip_text[4] = {"1h", "6h", "24h", "Live"};
+  for (int i = 0; i < 4; i++) {
     lv_obj_t *chip = lv_button_create(chips);
-    lv_obj_set_size(chip, 124, 44);
+    lv_obj_set_size(chip, 92, 44);
     lv_obj_set_style_bg_color(chip, lv_color_hex(0x1A1A1A), 0);
     lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(chip, 8, 0);
@@ -3537,13 +4149,16 @@ void HAPanel::open_history_(size_t entity_idx) {
     return;
   const Entity &e = this->entities_[entity_idx];
   this->history_entity_idx_ = entity_idx;
-  this->history_window_idx_ = 0;  // default 1 h on every open
+  // UE7: realtime entities open on the "Live" window (idx 3); everyone else
+  // keeps the 1 h default (idx 0).
+  this->history_window_idx_ = e.realtime ? 3 : 0;
   lv_label_set_text(this->history_title_, e.friendly_name.c_str());
   lv_obj_clear_flag(this->history_sheet_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(this->history_sheet_);
   this->history_open_ = true;
-  this->load_history_samples_(entity_idx, this->history_window_idx_);
-  this->redraw_history_();
+  // UE6: async for REST (spinner now, redraw when the worker finishes); the
+  // no-REST path inside redraws synchronously.
+  this->start_history_load_(entity_idx, this->history_window_idx_);
   ESP_LOGI(TAG, "history open: %s", e.entity_id.c_str());
 }
 
@@ -3555,14 +4170,269 @@ void HAPanel::close_history_() {
   ESP_LOGD(TAG, "history close");
 }
 
+void HAPanel::show_history_loading_() {
+  // Loading state: spinner up over a cleared chart area. (montserrat_18 has no
+  // ellipsis glyph, hence the literal "...".)
+  lv_label_set_text(this->history_value_, "Loading...");
+  lv_obj_add_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
+  if (this->history_gauge_ != nullptr)
+    lv_obj_add_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text(this->history_time_left_, "");
+  lv_label_set_text(this->history_time_right_, "");
+  lv_label_set_text(this->history_range_label_, "");
+  if (this->history_spinner_ != nullptr) {
+    lv_obj_clear_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(this->history_spinner_);
+  }
+}
+
+void HAPanel::start_history_load_(size_t entity_idx, uint8_t window_idx) {
+  if (entity_idx >= this->entities_.size())
+    return;
+  // No REST deps, or a realtime entity that opts out of backfill → synchronous
+  // ring-buffer copy + immediate redraw (no fetch, no spinner).
+  if (!this->history_rest_enabled_() || this->entities_[entity_idx].realtime) {
+    this->history_rest_mode_ = false;
+    this->history_samples_ = this->entities_[entity_idx].history;
+    this->redraw_history_();
+    return;
+  }
+  // REST: show the spinner now and record the desired request.
+  this->show_history_loading_();
+  this->hist_want_entity_ = entity_idx;
+  this->hist_want_window_ = window_idx;
+  this->hist_seq_want_++;
+  this->hist_want_pending_ = true;
+  // Prefer the async worker (no UI freeze); fall back to a blocking fetch on the
+  // main loop if the worker can't be created (heap too low for its stack).
+  if (this->ensure_history_worker_())
+    this->dispatch_history_fetch_();
+  else
+    this->run_history_fetch_sync_();
+}
+
+bool HAPanel::ensure_history_worker_() {
+  if (this->hist_task_ != nullptr)
+    return true;
+  if (this->hist_req_sem_ == nullptr) {
+    this->hist_req_sem_ = xSemaphoreCreateBinary();
+    if (this->hist_req_sem_ == nullptr) {
+      ESP_LOGW(TAG, "history: semaphore alloc failed — using sync fetch");
+      return false;
+    }
+  }
+  // 8 KB stack (core 0, prio 2): the same GET + parse already ran inside the main
+  // loop task's stack in the pre-task path, so 8 KB is ample for LAN http + the
+  // shallow ArduinoJson DOM. A https base URL (mbedTLS) would need far more.
+  // Created lazily so its stack doesn't compete with the WiFi scan allocator at
+  // boot. Persistent once up (no per-open create/delete churn).
+  BaseType_t r = xTaskCreatePinnedToCore(&HAPanel::history_task_trampoline_,
+                                         "ha_hist", 8192, this, 2,
+                                         &this->hist_task_, 0);
+  if (r != pdPASS) {
+    this->hist_task_ = nullptr;
+    ESP_LOGW(TAG, "history worker create failed — using sync fetch "
+                  "(internal free=%u largest=%u)",
+             (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    return false;
+  }
+  ESP_LOGI(TAG, "UE6: history worker task started on core 0");
+  return true;
+}
+
+void HAPanel::run_history_fetch_sync_() {
+  // Blocking fetch on the main loop (WDT backstop covers it) — the pre-UE6
+  // behavior, used only when the worker task couldn't be created.
+  std::string url;
+  if (!this->build_history_url_(this->hist_want_entity_, this->hist_want_window_,
+                                &url)) {
+    this->hist_want_pending_ = false;
+    this->history_rest_mode_ = false;
+    if (this->hist_want_entity_ < this->entities_.size())
+      this->history_samples_ = this->entities_[this->hist_want_entity_].history;
+    if (this->history_open_ &&
+        this->history_entity_idx_ == this->hist_want_entity_)
+      this->redraw_history_();
+    return;
+  }
+  this->hist_req_url_ = url;
+  this->hist_req_is_binary_ =
+      this->entities_[this->hist_want_entity_].domain == "binary_sensor";
+  this->hist_want_pending_ = false;
+  const bool ok = this->run_history_fetch_();  // blocks
+  if (ok) {
+    this->history_samples_.swap(this->hist_staging_);
+    this->history_rest_mode_ = true;
+  } else {
+    this->history_rest_mode_ = false;
+    if (this->hist_want_entity_ < this->entities_.size())
+      this->history_samples_ = this->entities_[this->hist_want_entity_].history;
+  }
+  this->hist_staging_.clear();
+  if (this->history_open_ &&
+      this->history_entity_idx_ == this->hist_want_entity_)
+    this->redraw_history_();
+}
+
+void HAPanel::dispatch_history_fetch_() {
+  // Don't touch the request fields while the worker may be reading them.
+  if (this->hist_fetch_state_.load(std::memory_order_acquire) == HIST_RUNNING)
+    return;
+  if (!this->hist_want_pending_)
+    return;
+  std::string url;
+  if (!this->build_history_url_(this->hist_want_entity_, this->hist_want_window_,
+                                &url)) {
+    // Clock not valid yet / bad idx → fall back to the ring buffer synchronously.
+    ESP_LOGW(TAG, "history: cannot build URL — ring-buffer fallback");
+    this->hist_want_pending_ = false;
+    this->history_rest_mode_ = false;
+    if (this->hist_want_entity_ < this->entities_.size())
+      this->history_samples_ = this->entities_[this->hist_want_entity_].history;
+    if (this->history_open_ &&
+        this->history_entity_idx_ == this->hist_want_entity_)
+      this->redraw_history_();
+    return;
+  }
+  this->hist_req_url_ = url;
+  this->hist_req_is_binary_ =
+      this->entities_[this->hist_want_entity_].domain == "binary_sensor";
+  this->hist_req_seq_ = this->hist_seq_want_;
+  this->hist_want_pending_ = false;
+  // Publish the request, then wake the worker. The store(release) + semaphore
+  // give ensure the worker sees the request fields above.
+  this->hist_fetch_state_.store(HIST_RUNNING, std::memory_order_release);
+  xSemaphoreGive(this->hist_req_sem_);
+}
+
+void HAPanel::poll_history_fetch_() {
+  if (this->hist_req_sem_ == nullptr)
+    return;  // no worker
+  uint8_t s = this->hist_fetch_state_.load(std::memory_order_acquire);
+  if (s != HIST_DONE_OK && s != HIST_DONE_FAIL)
+    return;
+  this->hist_fetch_state_.store(HIST_IDLE, std::memory_order_relaxed);
+  const bool ok = (s == HIST_DONE_OK);
+  // Only the newest desired request matters: a window switch mid-fetch bumped
+  // hist_seq_want_ past the in-flight seq, so an older result is dropped.
+  const bool current = (this->hist_req_seq_ == this->hist_seq_want_);
+  if (current) {
+    if (ok) {
+      this->history_samples_.swap(this->hist_staging_);
+      this->history_rest_mode_ = true;
+    } else {
+      ESP_LOGW(TAG, "history REST fetch failed — falling back to ring buffer");
+      this->history_rest_mode_ = false;
+      if (this->hist_want_entity_ < this->entities_.size())
+        this->history_samples_ = this->entities_[this->hist_want_entity_].history;
+    }
+    if (this->history_open_ &&
+        this->history_entity_idx_ == this->hist_want_entity_)
+      this->redraw_history_();
+  }
+  this->hist_staging_.clear();
+  // A newer request queued while the worker was busy → dispatch it now.
+  if (this->hist_want_pending_)
+    this->dispatch_history_fetch_();
+}
+
+void HAPanel::update_history_gauge_(float vmin, float vmax, float current) {
+  if (this->history_gauge_ == nullptr || this->history_gauge_needle_ == nullptr)
+    return;
+  // Pad the data window's range so the needle floats inside the dial instead of
+  // pinning to an end (the current value is itself part of [vmin,vmax]). A flat
+  // series gets a synthetic span so the scale isn't degenerate.
+  float span = vmax - vmin;
+  float pad = span > 0.0f ? span * 0.15f
+                          : (std::fabs(vmax) > 1.0f ? std::fabs(vmax) * 0.1f : 1.0f);
+  float gmin = vmin - pad, gmax = vmax + pad;
+  // Scale ×10 for one decimal of needle resolution. Labels are off, so the
+  // scaled ints are never shown — they only set the needle's angular position.
+  int32_t lo = (int32_t) std::lround(gmin * 10.0f);
+  int32_t hi = (int32_t) std::lround(gmax * 10.0f);
+  if (hi <= lo) hi = lo + 1;
+  lv_scale_set_range(this->history_gauge_, lo, hi);
+  int32_t nv = (int32_t) std::lround(current * 10.0f);
+  if (nv < lo) nv = lo;
+  if (nv > hi) nv = hi;
+  lv_scale_set_line_needle_value(this->history_gauge_, this->history_gauge_needle_,
+                                 34, nv);
+  lv_obj_clear_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
+}
+
+// UE7: roll-mode draw for the Live window. Pins the newest sample to the right
+// edge at a fixed X scale; older samples step left one slot each; blank slots on
+// the left until the trace fills. `now` is the per-mode clock from redraw_history_
+// (uptime-seconds for the realtime ring, epoch for a REST-backed Live view).
+void HAPanel::redraw_live_roll_(const Entity &e, uint32_t now) {
+  const size_t N = LIVE_CHART_POINTS;
+  const size_t total = this->history_samples_.size();
+  const size_t k = total < N ? total : N;  // samples actually drawn
+  if (k == 0) {
+    lv_chart_set_point_count(this->history_chart_, 0);
+    lv_chart_refresh(this->history_chart_);
+    lv_label_set_text(this->history_value_, "No data yet");
+    lv_label_set_text(this->history_time_left_, "");
+    lv_label_set_text(this->history_time_right_, "");
+    lv_label_set_text(this->history_range_label_, "");
+    if (this->history_gauge_ != nullptr)
+      lv_obj_add_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  // The k most-recent samples are the tail of the ring.
+  const size_t first = total - k;  // index of the oldest drawn sample
+  float vmin = this->history_samples_[first].value;
+  float vmax = vmin;
+  for (size_t i = first; i < total; i++) {
+    float v = this->history_samples_[i].value;
+    if (v < vmin) vmin = v;
+    if (v > vmax) vmax = v;
+  }
+  int32_t lo = (int32_t) std::floor(vmin * 10.0f);
+  int32_t hi = (int32_t) std::ceil(vmax * 10.0f);
+  if (lo == hi) { lo -= 10; hi += 10; }  // flat series → vertical room
+  lv_chart_set_axis_range(this->history_chart_, LV_CHART_AXIS_PRIMARY_Y, lo, hi);
+
+  // Fixed slot count. Left (N-k) slots blank, the k samples fill the right,
+  // newest in the last slot → trace originates from the right and grows left.
+  lv_chart_set_point_count(this->history_chart_, (uint32_t) N);
+  for (size_t slot = 0; slot < N - k; slot++)
+    lv_chart_set_series_value_by_id(this->history_chart_, this->history_series_,
+                                    (uint32_t) slot, LV_CHART_POINT_NONE);
+  for (size_t i = 0; i < k; i++)
+    lv_chart_set_series_value_by_id(
+        this->history_chart_, this->history_series_, (uint32_t) (N - k + i),
+        (int32_t) std::lround(this->history_samples_[first + i].value * 10.0f));
+  lv_chart_refresh(this->history_chart_);
+
+  lv_label_set_text(this->history_value_, e.has_state ? e.state.c_str() : "...");
+  char buf[24];
+  fmt_age_(now - this->history_samples_[first].t_s, buf, sizeof(buf));
+  lv_label_set_text(this->history_time_left_, buf);
+  lv_label_set_text(this->history_time_right_, "now");
+  char range[40];
+  snprintf(range, sizeof(range), "%.1f - %.1f", vmin, vmax);
+  lv_label_set_text(this->history_range_label_, range);
+
+  float gnow;
+  if (!HAPanel::state_to_value_(e, &gnow))
+    gnow = this->history_samples_.back().value;
+  this->update_history_gauge_(vmin, vmax, gnow);
+}
+
 void HAPanel::redraw_history_() {
   if (this->history_sheet_ == nullptr ||
       this->history_entity_idx_ >= this->entities_.size())
     return;
+  // The fetch is done by the time we redraw — hide the loading spinner.
+  if (this->history_spinner_ != nullptr)
+    lv_obj_add_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
   const Entity &e = this->entities_[this->history_entity_idx_];
 
   // Highlight the active window chip.
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 4; i++) {
     if (this->history_chips_[i] == nullptr)
       continue;
     lv_obj_set_style_bg_color(
@@ -3590,6 +4460,8 @@ void HAPanel::redraw_history_() {
   if (is_binary) {
     // ---- on/off band strip ----
     lv_obj_add_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
+    if (this->history_gauge_ != nullptr)  // UE4: gauge is numeric-only
+      lv_obj_add_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clean(this->history_strip_);
     // The strip's x-axis is genuinely time-proportional, so it spans the full
@@ -3602,7 +4474,7 @@ void HAPanel::redraw_history_() {
     float cur_val = 0.0f;
     uint32_t seg_start = cutoff;
     const int32_t strip_w = 432;
-    const int32_t strip_h = 230;
+    const int32_t strip_h = 176;  // UE4: matches the shortened chart footprint
     for (const auto &s : this->history_samples_) {
       if (s.t_s <= cutoff) {
         cur_val = s.value;
@@ -3664,18 +4536,46 @@ void HAPanel::redraw_history_() {
   lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
 
+  // UE7: Live = roll-mode scope. Fixed X scale: the newest sample is pinned to
+  // the right edge, older samples fill leftward one slot each, and the unfilled
+  // left slots stay blank until the trace grows into them. A fresh feed therefore
+  // starts as a short segment on the right and extends left (no index-spread
+  // "squish" that rescales as points accumulate). Sample-order based, so it is
+  // immune to the ring's 1 s timestamp resolution.
+  if (this->history_window_idx_ == 3) {
+    this->redraw_live_roll_(e, now);
+    return;
+  }
+
   // Collect in-window values in order, tracking the oldest visible timestamp so
   // the left axis label reflects the real data span. The line chart spaces
   // points evenly (not time-proportionally), so labelling the actual span — not
   // the chosen window — is what keeps a data-starved 6h view honest.
   std::vector<float> vals;
   uint32_t oldest_t = now;
+  bool have_anchor = false;
+  float anchor_val = 0.0f;
   for (const auto &s : this->history_samples_) {
-    if (s.t_s >= cutoff) {
-      if (vals.empty())
-        oldest_t = s.t_s;
-      vals.push_back(s.value);
+    if (s.t_s < cutoff) {
+      // Last value *before* the window — carried forward as the line's starting
+      // level (like the binary strip's anchor band).
+      anchor_val = s.value;
+      have_anchor = true;
+      continue;
     }
+    if (vals.empty())
+      oldest_t = s.t_s;
+    vals.push_back(s.value);
+  }
+  // Seed the line with the value as of the window start. HA's
+  // significant_changes_only returns ~1 boundary point for a flat sensor, and its
+  // timestamp sits right at the window edge; the redraw recomputes `cutoff` from
+  // a slightly later `now` (the async fetch adds latency), so without this anchor
+  // that lone sample drifts just outside the window and the chart intermittently
+  // shows "No data yet" even though the value is known.
+  if (have_anchor) {
+    vals.insert(vals.begin(), anchor_val);
+    oldest_t = cutoff;
   }
   if (vals.empty()) {
     lv_chart_set_point_count(this->history_chart_, 0);
@@ -3684,8 +4584,14 @@ void HAPanel::redraw_history_() {
     lv_label_set_text(this->history_time_left_, "");
     lv_label_set_text(this->history_time_right_, "");
     lv_label_set_text(this->history_range_label_, "");
+    if (this->history_gauge_ != nullptr)  // UE4: no needle without data
+      lv_obj_add_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
     return;
   }
+  // A single sample can't draw a line — duplicate it into a flat two-point
+  // segment so a steady sensor (e.g. pool temp pinned at 84°) renders a flat line.
+  if (vals.size() == 1)
+    vals.push_back(vals[0]);
 
   // Decimate to MAX_CHART_POINTS by striding so a 24 h window stays light.
   std::vector<float> pts;
@@ -3723,6 +4629,14 @@ void HAPanel::redraw_history_() {
   char range[40];
   snprintf(range, sizeof(range), "%.1f - %.1f", vmin, vmax);
   lv_label_set_text(this->history_range_label_, range);
+
+  // UE4: aim the analog gauge at the current value (prefer the live state so it
+  // matches history_value_; fall back to the freshest in-window sample), with
+  // the dial scaled to this window's value range.
+  float gnow;
+  if (!HAPanel::state_to_value_(e, &gnow))
+    gnow = vals.back();
+  this->update_history_gauge_(vmin, vmax, gnow);
 }
 
 void HAPanel::on_history_close_(lv_event_t *e) {
@@ -3737,13 +4651,12 @@ void HAPanel::on_history_chip_(lv_event_t *e) {
     return;
   lv_obj_t *chip = lv_event_get_target_obj(e);
   size_t idx = (size_t) (uintptr_t) lv_obj_get_user_data(chip);
-  if (idx > 2 || idx == self->history_window_idx_)
+  if (idx > 3 || idx == self->history_window_idx_)
     return;  // re-tapping the active window would needlessly re-fetch
   self->history_window_idx_ = (uint8_t) idx;
-  // REST mode re-fetches the new span; ring-buffer mode just re-windows the
-  // copy it already holds (load_history_samples_ re-copies — cheap).
-  self->load_history_samples_(self->history_entity_idx_, self->history_window_idx_);
-  self->redraw_history_();
+  // UE6: REST mode dispatches a worker fetch for the new span (async, redraw on
+  // completion); ring-buffer mode re-windows its copy and redraws synchronously.
+  self->start_history_load_(self->history_entity_idx_, self->history_window_idx_);
 }
 
 // ---------- E9 REST history backfill ----------
@@ -3753,43 +4666,9 @@ bool HAPanel::history_rest_enabled_() const {
          !this->history_base_url_.empty() && !this->history_token_.empty();
 }
 
-void HAPanel::load_history_samples_(size_t entity_idx, uint8_t window_idx) {
-  this->history_samples_.clear();
-  this->history_rest_mode_ = false;
-  if (this->history_rest_enabled_()) {
-    // Blocking fetch — paint a "Loading..." state first so the UI isn't frozen
-    // mid-stall with stale content. (montserrat_18 has no ellipsis glyph.)
-    lv_label_set_text(this->history_value_, "Loading...");
-    lv_refr_now(NULL);
-    if (this->fetch_history_(entity_idx, window_idx)) {
-      this->history_rest_mode_ = true;
-      return;
-    }
-    ESP_LOGW(TAG, "history REST fetch failed — falling back to ring buffer");
-  }
-  // Ring-buffer fallback: the entity's since-boot samples.
-  if (entity_idx < this->entities_.size())
-    this->history_samples_ = this->entities_[entity_idx].history;
-}
-
-bool HAPanel::iso_to_epoch_(const char *s, int64_t *out) {
-  int y, mo, d, h, mi, se;
-  if (s == nullptr ||
-      sscanf(s, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6)
-    return false;
-  // days_from_civil (Howard Hinnant) → days since 1970-01-01, UTC.
-  int yy = y - (mo <= 2 ? 1 : 0);
-  int64_t era = (yy >= 0 ? yy : yy - 399) / 400;
-  int64_t yoe = yy - era * 400;
-  int64_t doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-  int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-  int64_t days = era * 146097 + doe - 719468;
-  *out = days * 86400 + h * 3600 + mi * 60 + se;
-  return true;
-}
-
-bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
-  if (entity_idx >= this->entities_.size() || window_idx > 2)
+bool HAPanel::build_history_url_(size_t entity_idx, uint8_t window_idx,
+                                 std::string *out) {
+  if (entity_idx >= this->entities_.size() || window_idx > 3)
     return false;
   auto t = this->history_time_->utcnow();
   if (!t.is_valid()) {
@@ -3811,9 +4690,48 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
   while (!base.empty() && base.back() == '/')
     base.pop_back();
   const Entity &e = this->entities_[entity_idx];
-  std::string url = base + "/api/history/period/" + start_iso +
-                    "?filter_entity_id=" + e.entity_id +
-                    "&minimal_response&no_attributes&significant_changes_only";
+  *out = base + "/api/history/period/" + start_iso +
+         "?filter_entity_id=" + e.entity_id +
+         "&minimal_response&no_attributes&significant_changes_only";
+  return true;
+}
+
+// UE6 worker entry. Persistent: blocks on the request semaphore, runs one fetch,
+// publishes the result, repeats. Lives on core 0 (loopTask/LVGL are on core 1).
+void HAPanel::history_task_trampoline_(void *param) {
+  auto *self = static_cast<HAPanel *>(param);
+  for (;;) {
+    xSemaphoreTake(self->hist_req_sem_, portMAX_DELAY);
+    bool ok = self->run_history_fetch_();
+    // Release so the matching acquire in poll_history_fetch_() sees hist_staging_.
+    self->hist_fetch_state_.store(ok ? HIST_DONE_OK : HIST_DONE_FAIL,
+                                  std::memory_order_release);
+  }
+}
+
+bool HAPanel::iso_to_epoch_(const char *s, int64_t *out) {
+  int y, mo, d, h, mi, se;
+  if (s == nullptr ||
+      sscanf(s, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6)
+    return false;
+  // days_from_civil (Howard Hinnant) → days since 1970-01-01, UTC.
+  int yy = y - (mo <= 2 ? 1 : 0);
+  int64_t era = (yy >= 0 ? yy : yy - 399) / 400;
+  int64_t yoe = yy - era * 400;
+  int64_t doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  int64_t days = era * 146097 + doe - 719468;
+  *out = days * 86400 + h * 3600 + mi * 60 + se;
+  return true;
+}
+
+bool HAPanel::run_history_fetch_() {
+  // WORKER THREAD (core 0). Reads only hist_req_url_ / hist_req_is_binary_ and
+  // the immutable http client + token; writes only hist_staging_. No lv_* calls
+  // and no entity-vector access — that's what makes running off the main loop
+  // safe (LVGL is single-threaded). Result handed back via hist_fetch_state_.
+  const std::string &url = this->hist_req_url_;
+  const bool is_binary = this->hist_req_is_binary_;
 
   std::vector<http_request::Header> headers;
   http_request::Header auth;
@@ -3851,7 +4769,9 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
   bool read_ok = true;
   while (true) {
     int r = container->read(body + blen, BODY_CAP - blen);
-    App.feed_wdt();
+    // Yield so core 0's idle task runs while we stream — keeps the task WDT happy
+    // even though this task blocks on the socket. (The main loop on core 1 is
+    // never blocked, which is the whole point of the worker.)
     yield();
     if (r > 0) {
       blen += (size_t) r;
@@ -3900,17 +4820,16 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
   if (series.isNull())
     return false;
 
-  const bool is_binary = e.domain == "binary_sensor";
   // Decimate at ingestion. A 24 h window of a per-minute sensor is ~1440 points;
-  // history_samples_ lives on internal heap, and a vector that big forced a
+  // the staging vector lives on internal heap, and a vector that big forced a
   // contiguous realloc that abort()ed under fragmentation. The chart only draws
   // ~100 points anyway, so cap here. Keep every stride-th point (stride≈1 for
   // the small binary transition series, so no transitions are dropped).
   const size_t n = series.size();
   // ceil division so the kept count never exceeds SAMPLE_CAP.
   const size_t stride = n > SAMPLE_CAP ? (n + SAMPLE_CAP - 1) / SAMPLE_CAP : 1;
-  this->history_samples_.clear();
-  this->history_samples_.reserve((n > SAMPLE_CAP ? SAMPLE_CAP : n) + 4);
+  this->hist_staging_.clear();
+  this->hist_staging_.reserve((n > SAMPLE_CAP ? SAMPLE_CAP : n) + 4);
   size_t i = 0;
   for (JsonObject pt : series) {
     bool keep = (i % stride) == 0;
@@ -3942,12 +4861,11 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
       continue;
     // Store UTC epoch-seconds directly; redraw_history_ uses the live HA clock
     // as "now" in REST mode, so ages/spans are correct regardless of uptime.
-    this->history_samples_.push_back({(uint32_t) ep, v});
+    this->hist_staging_.push_back({(uint32_t) ep, v});
   }
-  ESP_LOGI(TAG, "history: %u points for %s (%u B)",
-           (unsigned) this->history_samples_.size(), e.entity_id.c_str(),
-           (unsigned) blen);
-  return !this->history_samples_.empty();
+  ESP_LOGI(TAG, "history: %u points (%u B)",
+           (unsigned) this->hist_staging_.size(), (unsigned) blen);
+  return !this->hist_staging_.empty();
 }
 
 }  // namespace ha_panel

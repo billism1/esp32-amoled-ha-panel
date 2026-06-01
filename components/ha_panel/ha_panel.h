@@ -1,10 +1,16 @@
 // ha_panel.h — runtime model + state subscription + LVGL UI tree.
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <string>
 #include <vector>
+
+// UE6: history backfill runs on a pinned FreeRTOS worker task.
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "esphome/core/component.h"
 #include "esphome/core/string_ref.h"
@@ -76,6 +82,12 @@ struct Entity {
   // E8: per-entity render size. Defaults to SMALL (today's look) so existing
   // configs render byte-for-byte unchanged.
   EntitySize size{EntitySize::SMALL};
+  // UE7: realtime opt-in. When true the history sheet skips the REST backfill
+  // for this entity (no /api/history/period fetch, no spinner) and plots purely
+  // from the in-device ring buffer + on_state_ live-tail, defaulting to the
+  // short "Live" window. For high-rate (e.g. 1 Hz MQTT) sensors that HA does not
+  // record, where a REST fetch is wasted and the live stream is the data source.
+  bool realtime{false};
   // E9: in-device history ring buffer. Only populated for chartable read-only
   // entities (numeric sensor / binary_sensor); empty for everything else. Fed
   // from on_state_ since boot, capped at HISTORY_CAP, wiped on reboot / sleep
@@ -98,6 +110,8 @@ struct Page {
 class HAPanel : public Component, public api::CustomAPIDevice {
  public:
   void setup() override;
+  // UE6: polls the history worker task's completion flag (main thread).
+  void loop() override;
   void dump_config() override;
   // Run after LVGL (PROCESSOR) is initialised so lv_scr_act() is valid.
   float get_setup_priority() const override { return setup_priority::AFTER_CONNECTION; }
@@ -106,7 +120,7 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void add_page(const std::string &name);
   void add_entity(const std::string &entity_id, const std::string &friendly_name,
                   const std::string &icon_override = "", bool confirm = false,
-                  EntitySize size = EntitySize::SMALL);
+                  EntitySize size = EntitySize::SMALL, bool realtime = false);
   // P7e: MDI glyph font for the per-entity icon column. nullptr → icons off,
   // rows fall back to the pre-P7e name-at-left layout.
   void set_mdi_font(font::Font *f) { this->mdi_font_ = f; }
@@ -240,7 +254,8 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // E5: a splash init-stage's indicator handles — an amber dot that blinks
   // while the stage is in progress, swapped for a green check when it is done.
   struct SplashStage {
-    lv_obj_t *dot{nullptr};    // amber pending indicator (blinks while active)
+    lv_obj_t *dot{nullptr};      // amber dim dot shown while the stage is queued
+    lv_obj_t *spinner{nullptr};  // UE2: animated spinner shown while stage active
     lv_obj_t *check{nullptr};  // green LV_SYMBOL_OK shown when stage done
   };
   // E5: build one splash init-stage row (phrase + amber dot + hidden green
@@ -255,6 +270,13 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // a pending (amber) state. Called whenever wifi/api connection state changes.
   void update_blink_timer_();
   static void blink_timer_cb_(lv_timer_t *t);
+  // Fires once ~7 s after boot. If the splash stages still haven't passed (api
+  // not connected), show the "taking longer than expected" popup and drop the
+  // splash so the app loads while reconnection keeps running in the background.
+  static void splash_timeout_cb_(lv_timer_t *t);
+  void show_splash_timeout_popup_();
+  void dismiss_splash_timeout_popup_();
+  static void on_splash_timeout_dismiss_(lv_event_t *e);
   bool is_settings_active_() const;
   // P7b: stage / commit / revert brightness slider edits.
   void apply_brightness_();
@@ -308,6 +330,12 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void open_history_(size_t entity_idx);
   void close_history_();
   void redraw_history_();
+  // UE7: roll-mode draw for the Live window — newest sample pinned to the right
+  // at a fixed X scale, blank slots padding the left until the trace fills.
+  void redraw_live_roll_(const Entity &e, uint32_t now);
+  // UE4: point the analog gauge's needle at `current`, scaling its range from the
+  // window's [vmin,vmax] (padded so the needle isn't pinned) and revealing it.
+  void update_history_gauge_(float vmin, float vmax, float current);
   // E9: append the current state to an entity's history ring buffer. No-op for
   // non-chartable entities. Called from on_state_ on every state change.
   void record_history_(size_t entity_idx);
@@ -320,14 +348,35 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static bool state_to_value_(const Entity &e, float *out);
   // E9: true when all four REST-backfill dependencies are wired.
   bool history_rest_enabled_() const;
-  // E9: populate history_samples_ for the open sheet. Tries REST backfill when
-  // enabled (sets history_rest_mode_ on success); otherwise copies the entity's
-  // ring buffer. Window selects the fetch span / filter.
-  void load_history_samples_(size_t entity_idx, uint8_t window_idx);
-  // E9: blocking GET /api/history/period/... → history_samples_. Returns false
-  // on any failure (caller falls back to the ring buffer). Converts HA's
-  // absolute timestamps to device-clock millis so the chart/labels are uniform.
-  bool fetch_history_(size_t entity_idx, uint8_t window_idx);
+  // UE6: begin loading the open sheet's samples for `window_idx`. REST path is
+  // async — shows the spinner and hands a request to the worker task (redraw
+  // deferred to poll_history_fetch_); the no-REST path copies the ring buffer
+  // and redraws synchronously. Replaces the old blocking load_history_samples_.
+  void start_history_load_(size_t entity_idx, uint8_t window_idx);
+  // UE6: paint the loading state (spinner up, chart/strip/gauge hidden).
+  void show_history_loading_();
+  // UE6: lazily create the worker task (+ semaphore) on first use, NOT at boot —
+  // its internal-RAM stack must not starve the WiFi scan allocator during the
+  // memory-tight boot/connect window. Returns false if creation fails (low heap).
+  bool ensure_history_worker_();
+  // UE6: synchronous fallback when the worker can't be created — runs the fetch
+  // on the main loop (blocks; WDT backstop covers it), same as the pre-task path.
+  void run_history_fetch_sync_();
+  // UE6: (main) dispatch the latest desired request to the worker, or defer if a
+  // fetch is already in flight (poll re-dispatches on completion).
+  void dispatch_history_fetch_();
+  // UE6: (main, from loop()) consume a finished fetch — swap staging in / fall
+  // back to the ring buffer, redraw if still relevant, re-dispatch if superseded.
+  void poll_history_fetch_();
+  // UE6: (main) build the /api/history/period URL for the window. False if the
+  // HA clock isn't valid yet (caller falls back to the ring buffer).
+  bool build_history_url_(size_t entity_idx, uint8_t window_idx, std::string *out);
+  // UE6: (WORKER THREAD) GET hist_req_url_ + parse into hist_staging_. Touches no
+  // lv_* and no entity state — only the socket, a PSRAM buffer, and hist_staging_.
+  bool run_history_fetch_();
+  // UE6: worker task entry — waits on hist_req_sem_, runs run_history_fetch_,
+  // publishes the result via hist_fetch_state_ (release).
+  static void history_task_trampoline_(void *param);
   // E9: parse a leading ISO-8601 "YYYY-MM-DDTHH:MM:SS" into a UTC epoch.
   static bool iso_to_epoch_(const char *s, int64_t *out);
 
@@ -369,6 +418,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static void on_detail_brightness_slider_(lv_event_t *e);
   static void on_detail_ct_slider_(lv_event_t *e);
   static void on_detail_temp_slider_(lv_event_t *e);
+  static void on_detail_temp_low_slider_(lv_event_t *e);
+  static void on_detail_temp_high_slider_(lv_event_t *e);
+  static void on_detail_hvac_mode_changed_(lv_event_t *e);
   static void on_detail_number_slider_(lv_event_t *e);
   static void on_detail_volume_slider_(lv_event_t *e);
   static void on_detail_fan_slider_(lv_event_t *e);
@@ -403,6 +455,10 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *header_label_{nullptr};
   lv_obj_t *clock_label_{nullptr};
   lv_obj_t *status_dot_{nullptr};
+  // Shown in place of status_dot_ while the HA link is being established (wifi
+  // up, api down) — same style as the boot-splash spinner. Replaces the old
+  // amber blink.
+  lv_obj_t *status_spinner_{nullptr};
   lv_obj_t *wifi_icon_{nullptr};
   lv_obj_t *battery_icon_{nullptr};
   lv_obj_t *tileview_{nullptr};
@@ -416,6 +472,13 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // adding SplashStage members + build/update calls.
   SplashStage splash_wifi_stage_{};
   SplashStage splash_ha_stage_{};
+  // Popup raised by splash_timeout_cb_ when the splash stages stall past ~7 s,
+  // explaining the slow stage while the app loads anyway. splash_timeout_label_
+  // holds the stage-specific message; the timer is one-shot, nulled after it
+  // fires or once the API connects first.
+  lv_obj_t *splash_timeout_popup_{nullptr};
+  lv_obj_t *splash_timeout_label_{nullptr};
+  lv_timer_t *splash_timeout_timer_{nullptr};
   // E1: settings overlay sheet (was a tileview tile). settings_open_ tracks
   // visibility; the revert-on-close trigger replaces the old
   // revert-on-navigate-away-from-tile path.
@@ -438,6 +501,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // we hide the switch (which would otherwise look like a normal "off") and
   // show this red text label in its slot. nullptr for non-binary rows.
   std::vector<lv_obj_t *> unavail_labels_by_entity_;
+  // UE5: glowing status LED for binary_sensor rows (right slot). nullptr for
+  // every other entity. Colour + brightness driven by rebuild_entity_row_.
+  std::vector<lv_obj_t *> leds_by_entity_;
 
   // P7e: MDI glyph font for the icon column. nullptr → icons disabled.
   font::Font *mdi_font_{nullptr};
@@ -532,12 +598,21 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   bool dw_brightness_known_{false};
   lv_obj_t *dw_ct_slider_{nullptr};
   lv_obj_t *dw_ct_label_{nullptr};
-  lv_obj_t *dw_temp_slider_{nullptr};   // climate target temp, ×10 units
+  lv_obj_t *dw_temp_slider_{nullptr};   // climate single setpoint arc (heat/cool)
   lv_obj_t *dw_temp_label_{nullptr};
+  // UE3: dual-setpoint dials for auto/heat_cool (low = heat point, high = cool
+  // point). single_box xor dual_box is shown per selected mode; the hidden one
+  // takes no flex layout space. All three arcs share dw_temp_step_ scaling.
+  lv_obj_t *dw_temp_single_box_{nullptr};
+  lv_obj_t *dw_temp_dual_box_{nullptr};
+  lv_obj_t *dw_temp_low_slider_{nullptr};
+  lv_obj_t *dw_temp_low_label_{nullptr};
+  lv_obj_t *dw_temp_high_slider_{nullptr};
+  lv_obj_t *dw_temp_high_label_{nullptr};
   float dw_temp_step_{0.1f};
   lv_obj_t *dw_hvac_dropdown_{nullptr};
   std::vector<std::string> dw_hvac_modes_;
-  lv_obj_t *dw_volume_slider_{nullptr};
+  lv_obj_t *dw_volume_slider_{nullptr};  // media volume arc (UE3), 0-100
   lv_obj_t *dw_volume_label_{nullptr};
   lv_obj_t *dw_number_slider_{nullptr};
   lv_obj_t *dw_number_label_{nullptr};
@@ -561,13 +636,23 @@ class HAPanel : public Component, public api::CustomAPIDevice {
 
   // E9 history chart sheet. Built once, hidden. Numeric sensors render in
   // history_chart_ (line); binary_sensors in history_strip_ (on/off bands) —
-  // exactly one is visible per open. history_window_idx_ selects 1h/6h/24h.
+  // exactly one is visible per open. history_window_idx_ selects 1h/6h/24h/Live.
   lv_obj_t *history_sheet_{nullptr};
   lv_obj_t *history_title_{nullptr};
   lv_obj_t *history_value_{nullptr};
   lv_obj_t *history_chart_{nullptr};
   lv_chart_series_t *history_series_{nullptr};
   lv_obj_t *history_strip_{nullptr};
+  // UE4: analog "now" gauge for numeric sensors — an lv_scale (round) + line
+  // needle, top-right above the chart. Same value the big label shows; range
+  // tracks the window's padded min/max. Hidden for binary_sensor and no-data.
+  lv_obj_t *history_gauge_{nullptr};
+  lv_obj_t *history_gauge_needle_{nullptr};
+  // Loading indicator over the chart during the REST backfill. UE6 made this a
+  // real lv_spinner: the fetch now runs on a worker task, so the main loop keeps
+  // ticking lv_timer_handler and the spinner self-animates (the old UE2 hand-
+  // rotated arc was a workaround for the loop being blocked, now retired).
+  lv_obj_t *history_spinner_{nullptr};
   // Bottom row under the chart: left/right are the time span of the *displayed
   // data* (oldest visible sample's age → "now"), so a window with no older data
   // reads honestly instead of looking identical at every chip. Center shows the
@@ -575,10 +660,10 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *history_time_left_{nullptr};
   lv_obj_t *history_time_right_{nullptr};
   lv_obj_t *history_range_label_{nullptr};
-  lv_obj_t *history_chips_[3]{nullptr, nullptr, nullptr};
+  lv_obj_t *history_chips_[4]{nullptr, nullptr, nullptr, nullptr};
   size_t history_entity_idx_{0};
   bool history_open_{false};
-  uint8_t history_window_idx_{0};  // 0 = 1h, 1 = 6h, 2 = 24h
+  uint8_t history_window_idx_{0};  // 0 = 1h, 1 = 6h, 2 = 24h, 3 = Live
   // E9: working sample set for the open sheet — REST-backfilled points or a copy
   // of the entity's ring buffer. redraw_history_ reads this; the live tail
   // appends to it. history_rest_mode_ gates whether a window change re-fetches.
@@ -590,6 +675,30 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   time::RealTimeClock *history_time_{nullptr};
   std::string history_base_url_;
   std::string history_token_;
+
+  // UE6: history fetch worker. The blocking GET + JSON parse run here (core 0)
+  // so they never stall loopTask/LVGL (core 1) — the stall tripped the task WDT
+  // on 6h/24h windows. Handoff: main fills the request fields + gives
+  // hist_req_sem_; worker fills hist_staging_ and stores hist_fetch_state_ with
+  // release; loop() loads it with acquire (the barrier), then swaps staging in.
+  // The worker touches ONLY hist_req_url_ / hist_req_is_binary_ / hist_staging_
+  // and the http client — never lv_* or the entity vector.
+  enum : uint8_t { HIST_IDLE = 0, HIST_RUNNING, HIST_DONE_OK, HIST_DONE_FAIL };
+  TaskHandle_t hist_task_{nullptr};
+  SemaphoreHandle_t hist_req_sem_{nullptr};
+  std::atomic<uint8_t> hist_fetch_state_{HIST_IDLE};
+  // Request (main → worker): written only when no fetch is in flight.
+  std::string hist_req_url_;
+  bool hist_req_is_binary_{false};
+  uint32_t hist_req_seq_{0};  // seq of the dispatched (in-flight) request
+  // Result (worker → main): valid only after HIST_DONE_OK.
+  std::vector<HistorySample> hist_staging_;
+  // Latest desired request (main-only). Bumped per user action; supersedes an
+  // in-flight fetch on rapid window switches so only the newest result is drawn.
+  uint32_t hist_seq_want_{0};
+  size_t hist_want_entity_{0};
+  uint8_t hist_want_window_{0};
+  bool hist_want_pending_{false};  // a desired fetch not yet handed to the worker
 };
 
 }  // namespace ha_panel

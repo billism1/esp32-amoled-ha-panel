@@ -2392,6 +2392,474 @@ ESP32-S3-Box-3 reference config (same PA pin).
 
 ---
 
+### Phase UE1 — Build-config guard for the new widget types
+
+**Outcome:** All five new widget types (`arc`, `scale`, `led`, `spinner`,
+`roller`) now compile and link from the C++ runtime tree. Enabled via
+`build_flags` in [boards/waveshare-2.16.yaml](boards/waveshare-2.16.yaml), the
+same mechanism P7/E9 already use — **not** the YAML font-anchor trick the plan
+floated. The anchor trick is for *fonts*; for widget *types* this project's
+precedent is `-DLV_USE_*=1` build flags (ha_panel builds widgets at runtime via
+the LVGL C API, so ESPHome's YAML-driven `LV_USE_*` detection strips out
+anything not referenced in YAML).
+
+**Why build_flags, not anchors:** ESPHome's `generate_lv_conf_h()` hard-defines
+every unused `LV_USE_*` to `0` in the generated `lv_conf.h`, *except* macros it
+sees in `build_flags` (`-DLV_USE_X=1`) — those are omitted from the header and
+defined by the compiler `-D` flag instead. So a build flag is the reliable way
+to force a runtime-only widget type to link. Confirmed before the change:
+`LV_USE_ARC`, `LV_USE_SCALE`, `LV_USE_LED`, `LV_USE_SPINNER`, `LV_USE_ROLLER`
+were all `= 0`.
+
+**LVGL version note:** the bundled LVGL is **9.5.0**, where `lv_meter` was
+removed and replaced by `lv_scale`. UE4's gauge is therefore `lv_scale`
+(`LV_USE_SCALE`), not the old `lv_meter`. ESPHome has no `scale` widget type —
+only a `meter` widget that emulates the old API on top of `lv_scale`.
+
+**Dependency chain discovered the hard way (two failed links):** enabling
+`LV_USE_SCALE` alone fails to compile `lv_scale.c`:
+- `error: 'lv_line_class' undeclared` → the line-needle path needs
+  `LV_USE_LINE=1`.
+- `implicit declaration of 'lv_image_set_rotation'` → the image-needle rotation
+  path needs `LV_USE_IMAGE=1`.
+
+This matches ESPHome's own `MeterType.get_uses()` returning
+`(scale, line, image, label)`. Net: `LV_USE_SCALE` pulls in `LV_USE_LINE` +
+`LV_USE_IMAGE` (label was already on). Flags added:
+
+```
+-DLV_USE_ARC=1
+-DLV_USE_LINE=1     # required by LV_USE_SCALE
+-DLV_USE_IMAGE=1    # required by LV_USE_SCALE
+-DLV_USE_SCALE=1
+-DLV_USE_LED=1
+-DLV_USE_SPINNER=1
+-DLV_USE_ROLLER=1
+```
+
+**Verification:** clean `esphome compile` links `firmware.elf` (RAM 16.5%, Flash
+19.4% — ~1.58 MB) with `lv_arc.c.o` / `lv_led.c.o` / `lv_roller.c.o` /
+`lv_spinner.c.o` / `lv_scale.c.o` (+ `lv_line.c.o`, `lv_image.c.o`) all in the
+object tree. No per-instance YAML declaration needed.
+
+**Caveat (pre-existing, unrelated):** on this Windows host `esphome compile`
+exits non-zero *after* a successful firmware build with
+`ERROR Could not match idedata` / "Set the terminal codepage to utf-8". That is
+ESPHome's post-build IDE-metadata step choking on the Windows codepage, not a
+link failure — `firmware.factory.bin` and `firmware.ota.bin` are produced
+regardless.
+
+---
+
+### Phase UE2 — Spinner for loading states
+
+**Outcome:** Shipped loading indicators in two places: a hand-rotated arc over
+the **history chart** during the REST backfill, and a per-stage `lv_spinner` on
+the **boot splash**.
+
+**History sheet — the blocking-loop puzzle, and the way through it.** First pass
+concluded a history spinner was impossible: `LvglComponent::loop()` calls
+`lv_timer_handler()` on the **single main loop**, and the E9 backfill
+(`history_http_->get()` in [fetch_history_](components/ha_panel/ha_panel.cpp))
+blocks that loop, so LVGL never ticks during the fetch — and `lv_spinner`'s
+animation is driven by `lv_timer_handler`, which additionally can't be
+re-entered (the fetch runs inside the open-history LVGL event). That conclusion
+was too quick. Two facts make an animated indicator viable:
+- ESPHome sets `lv_tick_set_cb([]{ return millis(); })`, so LVGL's clock keeps
+  advancing during the block — it isn't tied to `loop()`.
+- The body is read in a **chunked loop** (`container->read` + `yield()` per
+  iteration), which is a place to do work mid-fetch.
+
+So `history_spinner_` is a plain `lv_arc` (60° bright segment on a faint
+track), **not** an `lv_spinner`. `spin_history_()` bumps its rotation from
+`millis()` and calls `lv_refr_now(NULL)` — the same re-entrancy-safe repaint the
+code already used to paint "Loading..." at
+[ha_panel.cpp:3761](components/ha_panel/ha_panel.cpp#L3761). It's pumped from the
+read loop on a ~30 fps gate. Raised in `load_history_samples_`, hidden at the top
+of `redraw_history_` (covers success / fallback / "No data yet" / error). The
+body transfer animates; only the TCP connect and the one-shot JSON parse are
+brief frozen gaps. (The earlier "history spinner not viable" note was wrong and
+is superseded by this.)
+
+**Motion is stepped, not smooth — on purpose.** `spin_history_()` can only tick
+when `container->read()` returns a chunk, and chunks arrive network-paced and
+lumpy, so a continuous `millis()`-based angle judders (uneven jumps). It instead
+advances a fixed 30° per call (12 clock-tick positions): uniform steps read as a
+deliberate stepping loader at any update rate, and double as iterative-progress
+feedback (one step ≈ one data burst). Smooth constant-rate motion isn't possible
+while the fetch blocks the loop — the only path to that is moving the blocking
+HTTP read onto a second FreeRTOS task so the main loop animates a real
+`lv_spinner` at full framerate (LVGL is not thread-safe, so the worker would
+touch only the socket + PSRAM buffer; parse + draw stay on the main loop).
+Deferred as a complexity bump not worth it for a loading indicator; the stepped
+arc was the chosen trade.
+
+**Why not the detail modal (the plan's secondary target):** the async
+attribute-fetch path (`request_detail_attrs_`, with a "Loading…" placeholder and
+a 1500 ms safety timeout) is **parked dead code** — never called.
+`open_detail_` builds the modal synchronously and instantly
+([ha_panel.cpp:2141](components/ha_panel/ha_panel.cpp#L2141)), so there is no
+live placeholder to replace.
+
+**What shipped (boot splash):** each init stage row (`build_splash_stage_`) now
+carries three indicators sharing the same right-of-text anchor:
+- `spinner` (new) — 18 px `lv_spinner`, 1 s/rev, 60° arc, amber indicator
+  (`0xDDAA33`) on a dim track (`0x333333`). Shown only while the stage is the
+  **active** gate.
+- `dot` — the amber dot, now demoted to a steady `LV_OPA_30` marker for a
+  **queued** stage (a later gate not yet reached, e.g. HA before Wi-Fi is up).
+- `check` — green `LV_SYMBOL_OK`, shown when the stage is **done** (unchanged).
+
+`update_splash_stage_` switches between the three on `(done, active)`. The boot
+wait progresses across loop ticks, so the spinner genuinely animates — and it is
+self-driven by LVGL's anim timer, so it no longer depends on the `blink_on_`
+phase the old pulsing dot used. The shared blink timer still runs for the header
+status dot; re-applying splash state on each tick is idempotent.
+
+**Verification:** clean `esphome compile` links (RAM 16.5%, Flash 19.4%). Two
+on-device checks to eyeball on the panel: (1) the splash spinner during boot —
+async by construction, so it ticks; (2) the history arc turning on a 1h/6h/24h
+load — animates during the body read, freezes only over the TCP connect + JSON
+parse. `LV_USE_SPINNER` and `LV_USE_ARC` came in with UE1.
+
+---
+
+### Phase UE3 — Arc dials (climate setpoint + media volume)
+
+**Outcome:** The climate **target-temp** slider and the media-player **volume**
+slider in the detail modal are now round `lv_arc` dials with the value label
+centered inside the ring. Pure widget swap — no HA-side change.
+
+**Why it's a drop-in.** `lv_arc` is value-compatible with `lv_slider`:
+`lv_arc_set_range` / `lv_arc_set_value` / `lv_arc_get_value` mirror the slider
+calls, and it fires the same `LV_EVENT_VALUE_CHANGED`. So the existing handlers
+(`on_detail_temp_slider_`, `on_detail_volume_slider_`) and the `apply_detail_`
+read path only needed `lv_slider_get_value` → `lv_arc_get_value`; the int-scaling
+math for the non-integer climate step (`temp = value * step`) is reused verbatim.
+Members keep their `dw_*_slider_` names (both are `lv_obj_t*`); only the comments
+were retagged.
+
+**Layout.** Each arc is a fixed 180×180 square. The detail content is a
+**flex-column** whose section labels are left-aligned full-width, so a centered
+arc can't just be dropped in — it would left-align too. Each dial is wrapped in a
+transparent, non-scrollable holder (`LV_PCT(100)` × 190) and `lv_obj_center`-ed
+inside it, isolating the centering from the labels. The value label is a **child
+of the arc**, centered, so it sits in the ring's hole. The content area scrolls
+(`LV_DIR_VER`) and the Apply/Cancel row is pinned separately at y=396, so the
+taller dial coexists with both without collision.
+
+**Touch + color.** Arc/indicator width is 14 px with the default draggable knob
+(tinted to match) for a fingertip-sized hit target on 480×480 — flagged for
+on-device tuning. The climate indicator is tinted from the existing `e.state`
+HVAC-mode read: `off` = grey `0x888888`, contains `heat` = warm `0xFF7043`,
+contains `cool` = blue `0x4FC3F7`, else (auto/heat_cool/dry/fan_only) = teal
+`0x44CCDD`. (`heat_cool` matches `heat` first → warm; acceptable for v1.) The
+volume dial uses the teal accent. `LV_USE_ARC` came in with UE1.
+
+**Data fix found in validation — climate attrs were never loaded.** First
+on-panel test showed the dial pinned at **21** and **"Current: --"** for a real
+°F thermostat in `cool`. Root cause predates UE3 (the old slider had the same
+bug): the panel subscribes to entity **state** only, so for climate it gets the
+hvac-mode string (`"cool"` → Mode dropdown correct) but **none of the climate
+attributes**. The modal built from an empty `Entity::attrs`, so `temperature`
+(target) and `current_temperature` fell back — `(min_temp 7 + max_temp 35) / 2 =
+21`, with the 7/35 defaults being **Celsius** while the device reports °F.
+
+These attrs (`current_temperature`, `temperature`, `min_temp`, `max_temp`,
+`target_temp_step`, `hvac_modes`) are **standard HA `ClimateEntity` schema**, not
+integration custom props — fetchable by name via the native API. Fix reuses the
+**E7 precedent**: subscribe them at **connect time** so they ride the initial
+`state_subs` cursor walk (no re-arm) and are cached before the first modal open —
+no dynamic query at open. Scoped to climate only (6 attrs × few entities),
+deliberately far under the ~278-sub burst that saturated the P7d iter-1 attempt;
+the P7d failure was a burst-**size** problem, not "attr subs are impossible." See
+the `UE3:` log line + the connect-time block in `setup()`.
+
+**Mode-aware setpoints — single vs dual dials.** HA splits climate setpoints by
+mode: `heat`/`cool` carry one `temperature`; `auto`/`heat_cool` carry **two** —
+`target_temp_low` (heat point) + `target_temp_high` (cool point), and sending the
+single `temperature` param to a dual-mode entity is invalid. `lv_arc` has one
+knob, so the builder constructs **two boxes** in the flex column: a single-dial
+box ("Target", 180px) and a dual-dial box with two **side-by-side** 150px dials
+("Heat to" warm = low, "Cool to" blue = high). Side-by-side, not stacked: stacking
+pushed the cool dial below the fold and the arc traps vertical scroll, so it was
+unreachable; two-across fits the 400px content width with the header visible.
+Both boxes are built once; `climate_mode_is_dual_(mode)` picks which is shown and the
+other gets `LV_OBJ_FLAG_HIDDEN` (a hidden flex child consumes no layout space).
+The HVAC-mode dropdown's `VALUE_CHANGED` (`on_detail_hvac_mode_changed_`) re-runs
+the toggle, so switching to `auto` reveals two dials live and re-tints the single
+dial otherwise. The dual handlers clamp low ≤ high (drag past the other knob
+pushes it). `apply_detail_` branches on the **selected** mode: dual sends
+`target_temp_low`+`target_temp_high`, single sends `temperature` — same
+`climate.set_temperature` service. `auto` is treated as dual per the "set a heat
+point and a cool point" intent; dual dials seed from `target_temp_low/high` when
+present, else a small spread around the current target. The shared 180px-dial
+construction is factored into the file-static `add_setpoint_dial`.
+
+**hvac_modes enum-repr quirk (found in validation).** Some integrations report
+`hvac_modes` as Python enum reprs — the dropdown showed `<HVACMode.OFF: 'off'>`
+etc. `parse_ha_list_` only strips a token's *outer* quotes, so the interior
+`'off'` survived. That broke more than display: preselect (`== e.state`),
+`climate_mode_is_dual_`, and the `set_hvac_mode` payload all compare against bare
+`off`/`heat_cool`. `clean_hvac_mode_` pulls the value out of the first
+single-quoted span (pass-through for already-bare tokens), applied to each mode
+after parse.
+
+**Setpoint "sticks ~half the time" is the cloud thermostat, not firmware
+(ruled out).** `climate.thermostat_downstairs` is Honeywell **Lyric**
+(`platform: lyric`), cloud-polled. HA shows the new setpoint optimistically, but
+the authoritative value arrives on the next poll from Honeywell's cloud; when the
+poll beats the write (or the write is throttled/dropped) the old value returns —
+intermittent by timing. Verified via direct HA access: test writes returned
+"state change could not be verified within timeout" and the log carried a
+DNS/SSL timeout to `api.honeywellhome.com`. The panel sends a single integer
+`set_temperature`, clamped to the reported 60–80 range, with no redundant
+`set_hvac_mode` — i.e. correct every time; the loss is downstream. (The earlier
+redundant-`set_hvac_mode` removal still stands as a correctness fix.) No
+firmware change warranted; for reliability the fix is HA-side (space writes,
+`homeassistant.update_entity` to force a poll, or a permanent hold in the
+Honeywell app).
+
+**Page row shows current temperature.** Climate is a `SUMMARY_TEXT` render class
+that previously displayed only the hvac-mode word (`"cool"`). The row now renders
+`"<mode>  <current_temperature>°"` (e.g. `cool  77°`), reading the same
+connect-time `current_temperature` attr. `on_attr_` re-runs `rebuild_entity_row_`
+for climate when that attr arrives/changes, so the row is correct on connect and
+tracks the live reading. (`°` = U+00B0, present in LVGL's built-in Montserrat.)
+
+**Tap opens the modal, not only long-press.** `SUMMARY_TEXT` domains (climate,
+media_player, number, select) had no inline tap action — `tap_entity_` no-ops
+for them. `on_entity_row_clicked_` now opens the detail modal directly for any
+`SUMMARY_TEXT` entity with a detail builder, so a short tap brings up the control
+surface (long-press still works; LVGL doesn't fire `SHORT_CLICKED` after a
+`LONG_PRESSED`, so no double-open).
+
+**Verification:** clean `esphome compile` links (RAM 16.5%, Flash 19.5%).
+On-device checks: (1) climate modal shows a round setpoint dial colored by mode,
+**reading the true target + current temp in the device's unit**, drag + Apply
+calls `climate.set_temperature` unchanged; (2) switch Mode to `auto`/`heat_cool`
+→ two dials (Heat to / Cool to) appear, drag + Apply sends
+`target_temp_low`/`target_temp_high`; (3) climate page row reads `<mode> <temp>°`
+and updates live; (4) a single **tap** (not just long-press) on a climate row
+opens the modal; (5) media volume dial drag + Apply calls `media_player.volume_set`
+unchanged; (6) arc-drag ergonomics on the round panel; (7) connect log shows no
+`Buffer full` / unresponsive-disconnect (2 climates × 8 attrs added).
+
+---
+
+### Phase UE4 — Analog gauge on the sensor history sheet
+
+**Outcome:** The numeric-sensor history sheet now carries a small round **analog
+gauge** (`lv_scale` + `lv_line` needle) top-right, rendering the *current* value
+as a needle angle to complement the trend chart (gauge = now, chart = history).
+Zero new data — the needle reads the same value as `history_value_`. Compiles +
+links clean (RAM 16.5%, Flash 19.5%, +0.1 % over UE1); **on-device validation
+pending** (per the plan's no-commit-before-flash gate).
+
+**Widget = `lv_scale`, not `lv_meter`.** LVGL 9.5 removed `lv_meter`; the v9
+replacement is `lv_scale` with a separately-created needle line aimed via
+`lv_scale_set_line_needle_value(scale, line, length, value)` (the line's point
+array is owned/re-aimed by the scale each call — cheap to re-run on every
+redraw). Round look: `LV_SCALE_MODE_ROUND_INNER`, `angle_range 270`,
+`rotation 135` (low end ≈ 7-8 o'clock, the classic gauge sweep). Parts:
+`LV_PART_MAIN` = arc track, `LV_PART_ITEMS` = minor ticks, `LV_PART_INDICATOR` =
+major ticks. `LV_USE_SCALE` (+ its `LV_USE_LINE`/`LV_USE_IMAGE` deps) came in
+with UE1.
+
+**Placement — the chart had to give up height.** The sheet was already full
+(title + value + 432×230 chart + time row + chips). The top band above the chart
+(< y96) is only ~50 px tall and the close ✕ owns the top-right corner — too
+small for a readable dial. So the **chart was shortened 230→176 px** (top
+y96→150, bottom unchanged at 326) and the 96×96 gauge dropped into the freed
+band at `TOP_RIGHT (-24, 48)` — just below the ✕ (4 px gap) and above the chart
+(6 px gap), with the big value label balancing it on the left. The chart stays
+the dominant element (432 wide). The UE2 loading arc and the binary on/off strip
+were re-centered/resized to the new 176 px chart footprint (`strip_h` 230→176,
+spinner align y 181→208).
+
+**Range tracks the window, needle floats.** The chart already computes
+`vmin`/`vmax` for its Y axis; the gauge reuses them, **padded ±15 %** so the
+current value (which is itself one of the samples, often the extreme) doesn't pin
+to a dial end. A flat/degenerate series gets a synthetic span. Values are scaled
+**×10 internally** for one-decimal needle resolution (a 0.2→0.4 kW band would
+collapse to integers otherwise); tick **labels are off**
+(`lv_scale_set_label_show(false)`), so the scaled ints never surface — the
+numbers already live in `history_value_` (current) and `history_range_label_`
+(min–max), and rotated labels on a 96 px dial would only clutter it.
+
+**Driven from the existing redraw path.** `update_history_gauge_(vmin, vmax,
+current)` is called at the tail of `redraw_history_`'s numeric branch, which runs
+on open *and* on every live-tail append — so the needle tracks live with no new
+timer. `current` prefers the live state (`state_to_value_`, matching the big
+label) and falls back to the freshest in-window sample. The gauge is
+**numeric-only**: explicitly hidden in the `binary_sensor` strip branch and the
+no-data branch, shown only once a numeric series is drawn (default-hidden at
+build, so it never flashes during the blocking fetch).
+
+**Colored zones — deferred.** The plan floated optional green→amber→red sections.
+Skipped for v1: the color semantics aren't universal (high temp = bad, high
+battery = good, high humidity = neutral), and v1 is config-free. Needle + ticks
+on the panel's teal accent (`0x44CCDD`) only. Revisit if a per-entity
+direction/threshold hint ever lands.
+
+**Verification:** clean `esphome compile` links `firmware.elf` + factory/OTA
+bins. On-device checks to eyeball on the 480×480 panel: (1) tap a numeric sensor
+→ a round gauge appears top-right with the needle at the current reading,
+alongside the (now shorter) trend chart; (2) the needle moves on live updates and
+on 1h/6h/24h window changes; (3) the needle isn't pinned to an end for a
+narrow-band sensor (padding works); (4) tap a `binary_sensor` → no gauge, just
+the on/off strip; (5) the gauge + chart + time row + chips all fit without
+overlap or corner-clip.
+
+---
+
+### Phase UE5 — Glowing LED on binary_sensor rows
+
+**Outcome:** `binary_sensor` rows now carry a small **glowing `lv_led` dot** at
+the far-right of the row, driven by the on/off state (green glow = on, dim grey
+ember = off, red = unavailable). Pure on-device polish — same `e.state` the row
+text already reads, no new HA data. Compiles + links clean (RAM 16.5%, Flash
+19.5%, +448 B over UE4); **on-device validation pending** (no-commit-before-flash
+gate).
+
+**Render class.** binary_sensor maps to `RenderClass::READ_ONLY_TEXT` (the shared
+lock/cover/summary/read-only arm of both `make_entity_row` and
+`rebuild_entity_row_`). The LED is built once per row in `make_entity_row` (gated
+on `e.domain == "binary_sensor"`) and **driven from state** in the
+`rebuild_entity_row_` READ_ONLY_TEXT arm — same path that already recolours the
+row text, so no new timer and live updates ride the existing rebuild.
+
+**Layout — dot rightmost, word beside it.** The on/off word was kept (colour-blind
+redundancy + it was already there) and the dot added at the far-right slot
+(`LV_ALIGN_RIGHT_MID, label_x`). The word is re-anchored to
+`label_x - led_sz - 8` so it sits *left* of the fixed dot and can never overlap
+it regardless of "on" vs "off" width. LED size scales with the row:
+`m.height / 4` → 13 / 16 / 20 px for small / medium / large. Other render classes
+are untouched — `make_entity_row` sets `*out_led = nullptr` and only the binary
+arm fills it, so `leds_by_entity_[ei]` is nullptr everywhere else and the rebuild
+drive is a no-op for them.
+
+**Colour + brightness.** Colour reuses the arm's existing `col` (on = green
+`0x66BB66`, off = grey `0x888888`, unavailable/unknown = red `0xCC4444` — the
+panel's standard convention), so the dot and the word always agree. Brightness
+carries the "glow": `lv_led_set_brightness` = 255 when on (full), 60 when off (a
+dim ember rather than fully dark, so the dot is still locatable), 160 when
+unavailable. `LV_USE_LED` came in with UE1.
+
+**Plumbing.** One new per-entity handle vector `leds_by_entity_` (mirrors
+`widgets_/icons_/unavail_labels_by_entity_`): `.assign(n, nullptr)` alongside the
+others in `setup()`, filled at the row-build call site via a new `out_led`
+out-param on `make_entity_row`, read back in `rebuild_entity_row_`.
+
+**Verification:** clean `esphome compile` links `firmware.elf` + factory/OTA bins.
+On-device checks to eyeball: (1) door/motion/window binary sensors show a green
+glowing dot when active, a dim grey dot when clear; (2) the dot tracks live state
+changes; (3) an unavailable binary sensor shows a red dot; (4) the on/off word
+and dot don't overlap at any row size; (5) non-binary rows (switches, sensors,
+climate, etc.) are visually unchanged.
+
+---
+
+### Phase UE6 — History fetch on a core-pinned worker task
+
+**Outcome:** moved the E9 history backfill (the blocking HTTP GET + JSON parse)
+off the main loop onto a **persistent FreeRTOS worker task pinned to core 0**.
+loopTask/LVGL stay on core 1 and never stall, which fixes the crash and lets the
+loader become a real `lv_spinner`. **Validated on-device** — but only after
+freeing internal RAM (the worker's task stack had nowhere to live); see the
+"memory wall" addendum below.
+
+**The crash this fixes.** `http_request->get()` blocks the main loop while HA
+computes a `/api/history/period` query; on 6h/24h windows that ran several
+seconds and the default ~5 s task WDT rebooted the panel (`task_wdt: loopTask
+(CPU 1) did not reset`). A committed band-aid (raise `CONFIG_ESP_TASK_WDT_TIMEOUT_S`
+to 15 s + a `feed_wdt()` before the parse) stopped the crash but left the UI
+frozen for up to the 8 s http timeout, and the UE2 "spinner" was a hand-rotated
+`lv_arc` precisely because the loop was blocked. UE6 is the proper fix.
+
+**Why the split is safe.** LVGL is single-threaded — every `lv_*` call must stay
+on loopTask. The blocking work touches *no* LVGL: only the socket, a PSRAM body
+buffer, and a staging `vector<HistorySample>`. So the worker owns exactly those
+three and nothing else (no `entities_`, no widgets); the main thread owns all
+drawing. Core 0 for the worker because loopTask/LVGL render on core 1 — no
+contention.
+
+**Handshake.** `dispatch_history_fetch_()` (main) builds the URL, sets
+`hist_req_url_`/`hist_req_is_binary_`/`hist_req_seq_`, stores `hist_fetch_state_ =
+HIST_RUNNING` with **release**, and gives `hist_req_sem_`. The worker
+(`history_task_trampoline_` → `run_history_fetch_`) wakes, fetches into
+`hist_staging_`, and stores `HIST_DONE_OK`/`FAIL` with **release**.
+`poll_history_fetch_()` (main, from the new `loop()` override) loads the flag with
+**acquire** — that release/acquire pair is the only barrier needed — then
+`swap()`s staging into `history_samples_` and redraws. No mutex: the main thread
+reads staging only after `DONE`, by which point the worker is parked back on the
+semaphore. The semaphore give/take is itself a full barrier, so the worker sees
+the request fields written before it.
+
+**Supersede + cancellation.** Each user action (open, window chip) bumps
+`hist_seq_want_`. On completion, `hist_req_seq_ != hist_seq_want_` means a newer
+request superseded this one → the result is dropped (no redraw) and the pending
+request is re-dispatched. A request that arrives while the worker is busy isn't
+lost: `dispatch_*` early-returns on `HIST_RUNNING` leaving `hist_want_pending_`,
+and `poll_*` re-dispatches after consuming the stale result. Redraw also guards
+on the sheet still being open on the same entity, and the live-tail in `on_state_`
+skips its redraw while a fetch is `HIST_RUNNING` (so it can't hide the spinner or
+paint the soon-to-be-replaced samples).
+
+**Spinner.** `history_spinner_` is now a real `lv_spinner` (1 s/rev, 60° sweep),
+self-animated by `lv_timer_handler` because the loop runs during the fetch.
+Removed `spin_history_()`, `history_spin_step_`, and the read-loop
+`lv_refr_now`/`feed_wdt` pumping that the blocked-loop workaround needed.
+
+**WDT backstop lowered 15 s → 10 s.** With loopTask never blocked, the default
+would even suffice; 10 s comfortably covers the worker briefly starving core-0's
+idle task during the one-shot `parse_json` (the chunked read loop `yield()`s, so
+the streaming phase doesn't).
+
+**Gotchas handled / noted.** Task stack is 16 KB — fine for this LAN `http` HA URL
+(no TLS); a **https** base URL pulls in mbedTLS and needs ~16–20 KB+ (noted in the
+board YAML comment). Only history uses `ha_http`, so the client has a single
+consumer — no locking. Risk to confirm on-device: that ESPHome's `http_request`
+has no implicit main-task affinity when driven from the worker.
+
+**The memory wall (found on-device).** First flash with the worker created
+eagerly in `setup()` **bricked WiFi**: `abort()` in `wifi_process_event_` →
+`std::vector<WiFiScanResult>::reserve` → `operator new` → `bad_alloc`. The 16 KB
+task stack (internal RAM) had shrunk the free internal heap below what the WiFi
+scan allocator needed. Two follow-ups:
+- **Lazy creation + sync fallback.** The worker is now created on the *first
+  history open* (`ensure_history_worker_`), not at boot — so the boot/WiFi-connect
+  window keeps its heap. Stack cut 16 KB → 8 KB. If creation still fails (low
+  heap), `run_history_fetch_sync_()` runs the fetch on the main loop (blocking,
+  WDT-covered) so history degrades gracefully instead of breaking.
+- **The real disease: internal SRAM exhaustion.** Even lazily, the 8 KB task
+  wouldn't create, and `esp_http_client` failed with `HTTP -1`. A heap probe
+  (`heap_caps_get_*`, kept as a diagnostic) showed **~13 KB free internal, largest
+  block 7.7 KB** at runtime. Root cause: `lvgl: buffer_size: 25%` allocates a
+  ~115 KB draw buffer in **internal DMA RAM** (PSRAM isn't used for it). Dropping
+  it to **10%** (~46 KB) freed ~69 KB — after which the worker creates, the async
+  path runs, `HTTP -1` is gone, and a 24 h / 287-point / 97 KB fetch loads clean.
+  This is committed separately (it's a device-wide fix, not UE6-specific).
+
+**Flat-sensor anchor (found on-device).** A steady sensor (pool temp pinned at
+84°) intermittently showed "No data yet". HA's `significant_changes_only` returns
+~1 boundary point whose timestamp sits at the window start; `redraw_history_`
+recomputes `cutoff` from a slightly later `now` (the async fetch adds latency), so
+that lone sample drifted just *outside* the window and was filtered out.
+`redraw_history_`'s numeric branch now carries an **anchor** — the last value
+before the cutoff is prepended as the line's starting level (mirroring the binary
+strip), and a 1-point series is duplicated into a flat 2-point line. A flat sensor
+now always renders a flat line, fixing both the intermittency and a pre-existing
+"single value → no line at all" gap.
+
+**Verification (on-device, passed):** worker logs `history worker task started on
+core 0` and fetches run on the `[ha_hist]` task; 1h/6h/24h cycle repeatedly across
+many entities with **no reboot**; the real `lv_spinner` turns during the fetch;
+24 h / 287-point fetches load; flat sensors show a flat line every open; no
+`HTTP -1`, no `bad_alloc`. The earlier band-aid WDT was lowered 15 s → 10 s.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks

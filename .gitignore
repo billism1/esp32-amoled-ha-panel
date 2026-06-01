@@ -2,6 +2,8 @@
 secrets.yaml
 secrets.*.yaml
 !secrets.example.yaml
+test/secrets.json
+!test/secrets.example.json
 
 # ESPHome build artifacts
 .esphome/
@@ -21,6 +23,7 @@ env/
 # the scheduled-task lock and other runtime files are not.
 .claude/scheduled_tasks.lock
 .claude/*.lock
+.claude/settings.json
 
 # OS / editor cruft
 .DS_Store
