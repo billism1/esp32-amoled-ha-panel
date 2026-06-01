@@ -4400,6 +4400,9 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
   }
 
   // Response: [ [ {state,last_changed}, ... ] ] — one inner array per entity.
+  // Feed the WDT first: the read loop fed it, but parsing up to 128 KB of JSON
+  // is itself an unfed blocking section on top of the (already long) GET.
+  App.feed_wdt();
   JsonDocument doc = json::parse_json(body, blen);
   alloc.deallocate(body, BODY_CAP);  // doc copied what it needs (PSRAM-backed)
   if (doc.isNull()) {

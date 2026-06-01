@@ -28,8 +28,11 @@ Sequenced easy → hard so each lands as an independent, shippable commit:
 3. **UE3** — arc dials (climate setpoint + media volume).
 4. **UE4** — gauge on the sensor history sheet.
 5. **UE5** — glowing LED on binary_sensor rows.
-6. **UE6** — roller drum for select / HVAC mode / fan speed.
-7. **UE7** — device_class-aware severity for the binary_sensor LED (follow-up to
+6. **UE6** — history fetch on a core-pinned worker task (crash fix: the blocking
+   GET tripped the task WDT on 6h/24h windows; also unfreezes the UI + enables a
+   real `lv_spinner`, retiring UE2's hand-rotated arc). Infra, not a widget swap.
+7. **UE7** — roller drum for select / HVAC mode / fan speed.
+8. **UE8** — device_class-aware severity for the binary_sensor LED (follow-up to
    UE5; leaves the "no new HA data" scope — needs the `device_class` attr).
 
 ---
@@ -287,9 +290,82 @@ tracks state, distinct from the flat text rows around them.
 
 ---
 
-## UE6 — Roller drum for option pickers
+## UE6 — History fetch on a core-pinned worker task
 
-**Status:** ⬜ not started · target tag: `ue6-roller`
+**Status:** ⬜ not started · target tag: `ue6-history-worker`
+
+**Why (a real crash, not polish):** the E9 history backfill issues a **blocking**
+`http_request->get()` on the main loop while HA computes the
+`/api/history/period` query. On 6h/24h windows HA takes several seconds; the
+default ~5 s task watchdog fired mid-fetch and **rebooted the panel** (`task_wdt:
+loopTask (CPU 1) did not reset the watchdog`). 1h usually responds fast enough to
+survive. A band-aid (raise `CONFIG_ESP_TASK_WDT_TIMEOUT_S` to 15 s + `feed_wdt()`
+before the JSON parse) stops the crash but leaves the UI frozen for up to the 8 s
+http timeout, and the UE2 loading "spinner" is a hand-rotated `lv_arc` precisely
+because the loop is blocked. This phase does the **proper** fix.
+
+**This is infra, not a widget swap** — it intentionally leaves the "drop-in LVGL
+widget" theme of the other UE items. Sequenced here because it's a live crash and
+because it retires the UE2 arc hack.
+
+**Change:** move the blocking work (TCP connect + HTTP body read + JSON parse —
+none of which touches LVGL) onto a **persistent FreeRTOS worker task pinned to
+core 0**. `loopTask`/LVGL stay on core 1, keep ticking `lv_timer_handler`, feed
+their own WDT, and animate a **real `lv_spinner`**. LVGL is single-threaded, so
+the split is along the "touches no `lv_*`" line: the worker only touches the
+socket, a PSRAM buffer, and a staging `vector<HistorySample>` it owns.
+
+Handshake (ordering matters):
+- [ ] Create the worker once in `setup()`, pinned to **core 0**
+      (`xTaskCreatePinnedToCore`), blocked on a binary semaphore / task
+      notification. Persistent, not spawn-per-open (avoids task create/delete
+      heap churn).
+- [ ] **Main → worker:** fill a request struct (url, token, window, `seq++`), set
+      `std::atomic<State> = RUNNING`, give the semaphore. Worker reads only the
+      request struct — never `entities_` or any `lv_*`.
+- [ ] **Worker:** `get()` + chunked read into the PSRAM buffer + `parse_json` →
+      write the staging sample vector it owns; store result code; set
+      `State = DONE` with **release** ordering.
+- [ ] **Worker → main:** `loop()` polls the atomic with **acquire** ordering; on
+      `DONE`, swap staging → `history_samples_` and call `redraw_history_()`. The
+      release/acquire pair is the memory barrier — no mutex needed as long as main
+      reads staging only after `DONE`.
+- [ ] **Cancellation:** sheet close / window switch bumps `seq`. On `DONE`,
+      compare `result.seq == current_seq`; drop stale results so a late fetch
+      can't redraw into a closed/other sheet.
+- [ ] Swap the UE2 hand-rotated `history_spinner_` arc for a real `lv_spinner`
+      (now that the loop runs during the fetch); keep `spin_history_()` only if a
+      fallback is still wanted.
+- [ ] Lower the WDT backstop from the band-aid's 15 s to a modest ~10 s (the
+      `get()` connect phase still briefly blocks core 0); keep `feed_wdt()` in the
+      worker's chunked read loop.
+
+**Gotchas:**
+- **Stack size:** ArduinoJson recursion + HTTP need headroom. LAN `http` ≈ 8 KB;
+  if the HA URL is **https**, mbedTLS pushes it to ~16–20 KB (`verify_ssl: false`
+  does *not* remove the TLS stack cost). Size the task stack accordingly or it
+  stack-overflows.
+- **Single consumer:** only history uses `ha_http`, so no locking on the client —
+  but don't let any other code call it concurrently with the worker.
+- **Worker WDT during connect:** the connect phase has no yield; register the
+  worker to the task WDT and feed it in the read loop, or rely on the ~10 s
+  backstop. loopTask's own WDT is satisfied because the loop is no longer blocked.
+
+**Exit criteria:** opening a numeric sensor and cycling 1h/6h/24h repeatedly never
+reboots; the chart paints when data lands; a real `lv_spinner` turns smoothly
+during the fetch instead of the stepped arc; closing or switching mid-fetch
+doesn't redraw stale data.
+
+**Risks / unknowns:**
+- ESPHome's `http_request` / `esp_http_client` called from a non-loop task —
+  verify it has no implicit main-task affinity (it shouldn't; it's a plain client).
+- Task stack tuning is empirical; watch for `Stack canary watchpoint triggered`.
+
+---
+
+## UE7 — Roller drum for option pickers
+
+**Status:** ⬜ not started · target tag: `ue7-roller`
 
 **Pairs with (existing):**
 - `select` detail modal dropdown in
@@ -328,9 +404,9 @@ choosing a value and Apply calls the same service as the dropdown did.
 
 ---
 
-## UE7 — device_class-aware severity for the binary_sensor LED
+## UE8 — device_class-aware severity for the binary_sensor LED
 
-**Status:** ⬜ not started · target tag: `ue7-led-severity`
+**Status:** ⬜ not started · target tag: `ue8-led-severity`
 
 **Why:** UE5 shipped a status LED that paints **green = "on"** for every
 binary_sensor. That's semantically wrong for a whole class of sensors where "on"
