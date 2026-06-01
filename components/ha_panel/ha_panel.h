@@ -82,6 +82,12 @@ struct Entity {
   // E8: per-entity render size. Defaults to SMALL (today's look) so existing
   // configs render byte-for-byte unchanged.
   EntitySize size{EntitySize::SMALL};
+  // UE7: realtime opt-in. When true the history sheet skips the REST backfill
+  // for this entity (no /api/history/period fetch, no spinner) and plots purely
+  // from the in-device ring buffer + on_state_ live-tail, defaulting to the
+  // short "Live" window. For high-rate (e.g. 1 Hz MQTT) sensors that HA does not
+  // record, where a REST fetch is wasted and the live stream is the data source.
+  bool realtime{false};
   // E9: in-device history ring buffer. Only populated for chartable read-only
   // entities (numeric sensor / binary_sensor); empty for everything else. Fed
   // from on_state_ since boot, capped at HISTORY_CAP, wiped on reboot / sleep
@@ -114,7 +120,7 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void add_page(const std::string &name);
   void add_entity(const std::string &entity_id, const std::string &friendly_name,
                   const std::string &icon_override = "", bool confirm = false,
-                  EntitySize size = EntitySize::SMALL);
+                  EntitySize size = EntitySize::SMALL, bool realtime = false);
   // P7e: MDI glyph font for the per-entity icon column. nullptr → icons off,
   // rows fall back to the pre-P7e name-at-left layout.
   void set_mdi_font(font::Font *f) { this->mdi_font_ = f; }
@@ -609,7 +615,7 @@ class HAPanel : public Component, public api::CustomAPIDevice {
 
   // E9 history chart sheet. Built once, hidden. Numeric sensors render in
   // history_chart_ (line); binary_sensors in history_strip_ (on/off bands) —
-  // exactly one is visible per open. history_window_idx_ selects 1h/6h/24h.
+  // exactly one is visible per open. history_window_idx_ selects 1h/6h/24h/Live.
   lv_obj_t *history_sheet_{nullptr};
   lv_obj_t *history_title_{nullptr};
   lv_obj_t *history_value_{nullptr};
@@ -633,10 +639,10 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *history_time_left_{nullptr};
   lv_obj_t *history_time_right_{nullptr};
   lv_obj_t *history_range_label_{nullptr};
-  lv_obj_t *history_chips_[3]{nullptr, nullptr, nullptr};
+  lv_obj_t *history_chips_[4]{nullptr, nullptr, nullptr, nullptr};
   size_t history_entity_idx_{0};
   bool history_open_{false};
-  uint8_t history_window_idx_{0};  // 0 = 1h, 1 = 6h, 2 = 24h
+  uint8_t history_window_idx_{0};  // 0 = 1h, 1 = 6h, 2 = 24h, 3 = Live
   // E9: working sample set for the open sheet — REST-backfilled points or a copy
   // of the entity's ring buffer. redraw_history_ reads this; the live tail
   // appends to it. history_rest_mode_ gates whether a window change re-fetches.

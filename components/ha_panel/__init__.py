@@ -37,6 +37,10 @@ CONF_CONFIRM = "confirm"
 # E8: per-entity render size. Scales the whole row (height, name font, icon,
 # right-side widget). Strict enum — an unrecognised value is a compile error.
 CONF_SIZE = "size"
+# UE7: realtime opt-in. Skips the REST history backfill for this entity and plots
+# from the in-device ring buffer + live-tail, defaulting to the short "Live"
+# window. For high-rate (1 Hz) sensors HA does not record (e.g. MQTT test feeds).
+CONF_REALTIME = "realtime"
 # E9: optional REST history backfill. When this block is present the history
 # chart sheet fetches GET /api/history/period/... over http_request; when it's
 # absent the chart uses only the in-device ring buffer (since-boot samples).
@@ -82,6 +86,8 @@ ENTITY_SCHEMA = cv.Schema(
         cv.Optional(CONF_SIZE, default="small"): cv.one_of(
             *ENTITY_SIZES, lower=True
         ),
+        # UE7: bypass REST backfill, plot live from the ring buffer.
+        cv.Optional(CONF_REALTIME, default=False): cv.boolean,
     }
 )
 
@@ -152,5 +158,6 @@ async def to_code(config):
                     ent[CONF_ICON],
                     confirm,
                     ENTITY_SIZES[ent[CONF_SIZE]],
+                    ent[CONF_REALTIME],
                 )
             )

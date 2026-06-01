@@ -35,7 +35,7 @@ void HAPanel::add_page(const std::string &name) {
 
 void HAPanel::add_entity(const std::string &entity_id, const std::string &friendly_name,
                          const std::string &icon_override, bool confirm,
-                         EntitySize size) {
+                         EntitySize size, bool realtime) {
   if (this->pages_.empty()) {
     ESP_LOGE(TAG, "add_entity called before any page — codegen bug");
     return;
@@ -48,6 +48,7 @@ void HAPanel::add_entity(const std::string &entity_id, const std::string &friend
   e.icon_override = icon_override;
   e.confirm = confirm;
   e.size = size;
+  e.realtime = realtime;
   size_t idx = this->entities_.size();
   this->entities_.push_back(std::move(e));
   this->pages_.back().entity_indices.push_back(idx);
@@ -3718,7 +3719,10 @@ void HAPanel::on_confirm_cover_close_(lv_event_t *e) {
 // this is "last 240 changes since boot", decimated to the chart width on draw.
 static const size_t HISTORY_CAP = 240;
 // Window chip → seconds. Index matches history_window_idx_ (0 = 1h, …).
-static const uint32_t HISTORY_WINDOW_S[3] = {3600u, 6u * 3600u, 24u * 3600u};
+// UE7: index 3 = "Live" — a short window for watching high-rate (1 Hz) sensors
+// scroll in real time. 120 s of 1 Hz data ≈ the ring buffer's reach and
+// decimates near 1:1 to MAX_CHART_POINTS, so the line moves visibly each second.
+static const uint32_t HISTORY_WINDOW_S[4] = {3600u, 6u * 3600u, 24u * 3600u, 120u};
 // Cap the points fed to lv_chart so a long window decimates to ~screen width.
 static const size_t MAX_CHART_POINTS = 100;
 // Cap the points kept from a REST response. Bounds the internal-heap vector (a
@@ -3952,7 +3956,7 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   lv_obj_set_style_text_font(this->history_time_right_, &lv_font_montserrat_18, 0);
   lv_obj_align(this->history_time_right_, LV_ALIGN_TOP_RIGHT, -24, 332);
 
-  // Window chips: 1h / 6h / 24h segmented row.
+  // Window chips: 1h / 6h / 24h / Live segmented row.
   lv_obj_t *chips = lv_obj_create(this->history_sheet_);
   lv_obj_remove_style_all(chips);
   lv_obj_set_size(chips, 480, 56);
@@ -3966,10 +3970,10 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
                         LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_clear_flag(chips, LV_OBJ_FLAG_SCROLLABLE);
 
-  const char *chip_text[3] = {"1h", "6h", "24h"};
-  for (int i = 0; i < 3; i++) {
+  const char *chip_text[4] = {"1h", "6h", "24h", "Live"};
+  for (int i = 0; i < 4; i++) {
     lv_obj_t *chip = lv_button_create(chips);
-    lv_obj_set_size(chip, 124, 44);
+    lv_obj_set_size(chip, 92, 44);
     lv_obj_set_style_bg_color(chip, lv_color_hex(0x1A1A1A), 0);
     lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(chip, 8, 0);
@@ -3990,7 +3994,9 @@ void HAPanel::open_history_(size_t entity_idx) {
     return;
   const Entity &e = this->entities_[entity_idx];
   this->history_entity_idx_ = entity_idx;
-  this->history_window_idx_ = 0;  // default 1 h on every open
+  // UE7: realtime entities open on the "Live" window (idx 3); everyone else
+  // keeps the 1 h default (idx 0).
+  this->history_window_idx_ = e.realtime ? 3 : 0;
   lv_label_set_text(this->history_title_, e.friendly_name.c_str());
   lv_obj_clear_flag(this->history_sheet_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(this->history_sheet_);
@@ -4029,8 +4035,9 @@ void HAPanel::show_history_loading_() {
 void HAPanel::start_history_load_(size_t entity_idx, uint8_t window_idx) {
   if (entity_idx >= this->entities_.size())
     return;
-  // No REST deps → synchronous ring-buffer copy + immediate redraw.
-  if (!this->history_rest_enabled_()) {
+  // No REST deps, or a realtime entity that opts out of backfill → synchronous
+  // ring-buffer copy + immediate redraw (no fetch, no spinner).
+  if (!this->history_rest_enabled_() || this->entities_[entity_idx].realtime) {
     this->history_rest_mode_ = false;
     this->history_samples_ = this->entities_[entity_idx].history;
     this->redraw_history_();
@@ -4210,7 +4217,7 @@ void HAPanel::redraw_history_() {
   const Entity &e = this->entities_[this->history_entity_idx_];
 
   // Highlight the active window chip.
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 4; i++) {
     if (this->history_chips_[i] == nullptr)
       continue;
     lv_obj_set_style_bg_color(
@@ -4418,7 +4425,7 @@ void HAPanel::on_history_chip_(lv_event_t *e) {
     return;
   lv_obj_t *chip = lv_event_get_target_obj(e);
   size_t idx = (size_t) (uintptr_t) lv_obj_get_user_data(chip);
-  if (idx > 2 || idx == self->history_window_idx_)
+  if (idx > 3 || idx == self->history_window_idx_)
     return;  // re-tapping the active window would needlessly re-fetch
   self->history_window_idx_ = (uint8_t) idx;
   // UE6: REST mode dispatches a worker fetch for the new span (async, redraw on
@@ -4435,7 +4442,7 @@ bool HAPanel::history_rest_enabled_() const {
 
 bool HAPanel::build_history_url_(size_t entity_idx, uint8_t window_idx,
                                  std::string *out) {
-  if (entity_idx >= this->entities_.size() || window_idx > 2)
+  if (entity_idx >= this->entities_.size() || window_idx > 3)
     return false;
   auto t = this->history_time_->utcnow();
   if (!t.is_valid()) {

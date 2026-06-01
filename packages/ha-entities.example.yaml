@@ -32,6 +32,13 @@
 # baked subset — see tools/build-mdi-glyphs.py to add new ones. Unknown names
 # fall back to a generic glyph and log once.
 #
+# Realtime plot (UE7): add `realtime: true` to a numeric sensor / binary_sensor
+# to skip the REST history backfill and plot purely from the in-device ring
+# buffer + live stream. The history sheet opens on a short "Live" window (~2 min)
+# that scrolls in real time. For high-rate feeds (e.g. 1 Hz MQTT sensors) that HA
+# does not record, where a backfill fetch is wasted and the live stream is the
+# data source. No effect on entities HA records normally — leave it off for those.
+#
 # Row size (E8): add an optional `size:` to make a row bigger and more glanceable
 # from across the room. Values: small (default, today's look), medium, large.
 # Size scales the whole row together — height, name font, icon glyph, and the
@@ -70,6 +77,9 @@ ha_panel:
           size: medium
         - entity_id: sensor.living_room_temperature
           friendly_name: "Temperature"
+        - entity_id: sensor.live_power_draw
+          friendly_name: "Live Power"
+          realtime: true          # UE7: high-rate, unrecorded → live ring-buffer plot
 
     - name: "Kitchen"
       entities:
