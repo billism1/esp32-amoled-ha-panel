@@ -2713,6 +2713,53 @@ overlap or corner-clip.
 
 ---
 
+### Phase UE5 — Glowing LED on binary_sensor rows
+
+**Outcome:** `binary_sensor` rows now carry a small **glowing `lv_led` dot** at
+the far-right of the row, driven by the on/off state (green glow = on, dim grey
+ember = off, red = unavailable). Pure on-device polish — same `e.state` the row
+text already reads, no new HA data. Compiles + links clean (RAM 16.5%, Flash
+19.5%, +448 B over UE4); **on-device validation pending** (no-commit-before-flash
+gate).
+
+**Render class.** binary_sensor maps to `RenderClass::READ_ONLY_TEXT` (the shared
+lock/cover/summary/read-only arm of both `make_entity_row` and
+`rebuild_entity_row_`). The LED is built once per row in `make_entity_row` (gated
+on `e.domain == "binary_sensor"`) and **driven from state** in the
+`rebuild_entity_row_` READ_ONLY_TEXT arm — same path that already recolours the
+row text, so no new timer and live updates ride the existing rebuild.
+
+**Layout — dot rightmost, word beside it.** The on/off word was kept (colour-blind
+redundancy + it was already there) and the dot added at the far-right slot
+(`LV_ALIGN_RIGHT_MID, label_x`). The word is re-anchored to
+`label_x - led_sz - 8` so it sits *left* of the fixed dot and can never overlap
+it regardless of "on" vs "off" width. LED size scales with the row:
+`m.height / 4` → 13 / 16 / 20 px for small / medium / large. Other render classes
+are untouched — `make_entity_row` sets `*out_led = nullptr` and only the binary
+arm fills it, so `leds_by_entity_[ei]` is nullptr everywhere else and the rebuild
+drive is a no-op for them.
+
+**Colour + brightness.** Colour reuses the arm's existing `col` (on = green
+`0x66BB66`, off = grey `0x888888`, unavailable/unknown = red `0xCC4444` — the
+panel's standard convention), so the dot and the word always agree. Brightness
+carries the "glow": `lv_led_set_brightness` = 255 when on (full), 60 when off (a
+dim ember rather than fully dark, so the dot is still locatable), 160 when
+unavailable. `LV_USE_LED` came in with UE1.
+
+**Plumbing.** One new per-entity handle vector `leds_by_entity_` (mirrors
+`widgets_/icons_/unavail_labels_by_entity_`): `.assign(n, nullptr)` alongside the
+others in `setup()`, filled at the row-build call site via a new `out_led`
+out-param on `make_entity_row`, read back in `rebuild_entity_row_`.
+
+**Verification:** clean `esphome compile` links `firmware.elf` + factory/OTA bins.
+On-device checks to eyeball: (1) door/motion/window binary sensors show a green
+glowing dot when active, a dim grey dot when clear; (2) the dot tracks live state
+changes; (3) an unavailable binary sensor shows a red dot; (4) the on/off word
+and dot don't overlap at any row size; (5) non-binary rows (switches, sensors,
+climate, etc.) are visually unchanged.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks

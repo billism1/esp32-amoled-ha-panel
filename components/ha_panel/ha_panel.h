@@ -447,6 +447,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // we hide the switch (which would otherwise look like a normal "off") and
   // show this red text label in its slot. nullptr for non-binary rows.
   std::vector<lv_obj_t *> unavail_labels_by_entity_;
+  // UE5: glowing status LED for binary_sensor rows (right slot). nullptr for
+  // every other entity. Colour + brightness driven by rebuild_entity_row_.
+  std::vector<lv_obj_t *> leds_by_entity_;
 
   // P7e: MDI glyph font for the icon column. nullptr → icons disabled.
   font::Font *mdi_font_{nullptr};

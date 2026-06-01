@@ -330,6 +330,7 @@ void HAPanel::setup() {
   this->widgets_by_entity_.assign(this->entities_.size(), nullptr);
   this->unavail_labels_by_entity_.assign(this->entities_.size(), nullptr);
   this->icons_by_entity_.assign(this->entities_.size(), nullptr);
+  this->leds_by_entity_.assign(this->entities_.size(), nullptr);  // UE5
   ESP_LOGCONFIG(TAG, "P7e icon column %s",
                 this->mdi_font_ != nullptr ? "enabled (mdi_font set)" : "disabled (no mdi_font)");
 #ifdef USE_SPEAKER
@@ -579,6 +580,22 @@ void HAPanel::rebuild_entity_row_(size_t entity_idx) {
       else if (e.state == "unavailable" || e.state == "unknown")
         col = 0xCC4444;
       lv_obj_set_style_text_color(w, lv_color_hex(col), 0);
+      // UE5: drive the binary_sensor status LED from the same state. Reuse `col`
+      // (on=green, off=grey, unavailable=red); brightness carries the "glow":
+      // full when active, a dim ember when off, mid when unavailable.
+      if (e.domain == "binary_sensor" &&
+          entity_idx < this->leds_by_entity_.size()) {
+        lv_obj_t *led = this->leds_by_entity_[entity_idx];
+        if (led != nullptr) {
+          lv_led_set_color(led, lv_color_hex(col));
+          uint8_t bright = 60;  // off: dim ember
+          if (e.state == "on")
+            bright = 255;  // active: full glow
+          else if (e.state == "unavailable" || e.state == "unknown")
+            bright = 160;
+          lv_led_set_brightness(led, bright);
+        }
+      }
       return;
     }
   }
@@ -715,9 +732,11 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
                                  const char *icon_utf8,
                                  const lv_font_t *mdi_lv_font,
                                  lv_obj_t **out_icon,
+                                 lv_obj_t **out_led,
                                  const RowMetrics &m) {
   *out_unavail_label = nullptr;
   *out_icon = nullptr;
+  *out_led = nullptr;
   lv_obj_t *btn = lv_button_create(parent);
   lv_obj_set_width(btn, LV_PCT(100));
   lv_obj_set_height(btn, m.height);
@@ -812,6 +831,18 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
       lv_obj_set_style_text_color(w, lv_color_hex(0xAAAAAA), 0);
       lv_obj_set_style_text_font(w, m.name_font, 0);
       lv_obj_align(w, LV_ALIGN_RIGHT_MID, m.label_x, 0);
+      // UE5: binary_sensor rows also carry a glowing status dot at the far right.
+      // The on/off word shifts left of it (deterministic, never overlaps — the
+      // word is right-anchored to a slot left of the fixed LED). Colour +
+      // brightness are driven from state in rebuild_entity_row_.
+      if (e.domain == "binary_sensor") {
+        const int led_sz = m.height / 4;  // 13/16/20 px across small/med/large
+        lv_obj_t *led = lv_led_create(btn);
+        lv_obj_set_size(led, led_sz, led_sz);
+        lv_obj_align(led, LV_ALIGN_RIGHT_MID, m.label_x, 0);
+        *out_led = led;
+        lv_obj_align(w, LV_ALIGN_RIGHT_MID, m.label_x - led_sz - 8, 0);
+      }
       break;
     }
   }
@@ -1181,6 +1212,7 @@ void HAPanel::build_ui_() {
       lv_obj_t *widget = nullptr;
       lv_obj_t *unavail = nullptr;
       lv_obj_t *icon = nullptr;
+      lv_obj_t *led = nullptr;
       const std::string &glyph = this->resolve_icon_(e);
       // E8: pick the size-matched MDI glyph font + row geometry.
       const lv_font_t *row_mdi_font = mdi_lv_font;
@@ -1191,7 +1223,7 @@ void HAPanel::build_ui_() {
       const RowMetrics metrics = row_metrics_for(e.size);
       lv_obj_t *btn = make_entity_row(list, e, this, &HAPanel::on_entity_row_clicked_,
                                       (uintptr_t) ei, &widget, &unavail,
-                                      glyph.c_str(), row_mdi_font, &icon, metrics);
+                                      glyph.c_str(), row_mdi_font, &icon, &led, metrics);
       // P7d: long-press → detail modal, only for domains that have one.
       // P7f: also register long-press for confirm-flagged action-only entities
       // (no detail modal) so a long-press opens the same confirm sheet as a
@@ -1204,6 +1236,7 @@ void HAPanel::build_ui_() {
       this->widgets_by_entity_[ei] = widget;
       this->unavail_labels_by_entity_[ei] = unavail;
       this->icons_by_entity_[ei] = icon;
+      this->leds_by_entity_[ei] = led;  // UE5: nullptr unless binary_sensor
       this->rebuild_entity_row_(ei);
     }
   }

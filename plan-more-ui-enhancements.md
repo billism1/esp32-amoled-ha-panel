@@ -29,6 +29,8 @@ Sequenced easy → hard so each lands as an independent, shippable commit:
 4. **UE4** — gauge on the sensor history sheet.
 5. **UE5** — glowing LED on binary_sensor rows.
 6. **UE6** — roller drum for select / HVAC mode / fan speed.
+7. **UE7** — device_class-aware severity for the binary_sensor LED (follow-up to
+   UE5; leaves the "no new HA data" scope — needs the `device_class` attr).
 
 ---
 
@@ -244,7 +246,8 @@ current reading alongside the trend chart; binary sensors are unaffected.
 
 ## UE5 — Glowing LED on binary_sensor rows
 
-**Status:** ⬜ not started · target tag: `ue5-led`
+**Status:** 🟡 built, compiles + links clean (RAM 16.5%, Flash 19.5%) ·
+on-device validation pending · target tag: `ue5-led`
 
 **Pairs with (existing):** read-only `binary_sensor` rows. State styling lives in
 [rebuild_entity_row_](components/ha_panel/ha_panel.cpp#L441); binary/read-only
@@ -257,16 +260,21 @@ unavailable — using `lv_led_set_color` + `lv_led_set_brightness`. No new state
 read the same `e.state` the text arm reads.
 
 Tasks:
-- [ ] Confirm which `render_class` binary sensors fall under and whether the LED
-      should attach in `rebuild_entity_row_` or at row-build time
-      ([rebuild logic at :441](components/ha_panel/ha_panel.cpp#L441); row
-      construction elsewhere — locate `make_entity_row`).
-- [ ] Add an `lv_led` to the icon column (or beside the value) for binary
-      sensors only; leave other render classes untouched.
-- [ ] Map state → color + brightness in the existing per-state switch; respect
-      the unavailable (`0xCC4444`) convention already used.
-- [ ] Keep it cheap: one LED per binary-sensor row, updated in the existing
-      rebuild path, no extra timer.
+- [x] Confirmed: binary_sensor falls under **`READ_ONLY_TEXT`** (the shared
+      lock/cover/summary/read-only arm). LED created at **row-build time** in
+      `make_entity_row` (new `out_led` out-param, binary-only) and **driven** in
+      `rebuild_entity_row_`'s READ_ONLY_TEXT arm — no new timer, rides the
+      existing rebuild path.
+- [x] Added an `lv_led` at the **far-right** slot for binary sensors only; the
+      on/off word shifts left of it (right-anchored to `label_x - led_sz - 8`, so
+      it never overlaps the fixed dot). Other render classes untouched (`out_led`
+      stays nullptr; `leds_by_entity_[ei]` nullptr). LED size = `m.height / 4`
+      (13/16/20 px across small/med/large rows).
+- [x] State → colour reuses the arm's existing `col` (on = green `0x66BB66`,
+      off = grey `0x888888`, unavailable/unknown = red `0xCC4444`); brightness
+      carries the glow: `255` on, `60` off (dim ember), `160` unavailable.
+- [x] Cheap: one `lv_led` per binary-sensor row, stored in `leds_by_entity_`,
+      updated only in `rebuild_entity_row_`. No extra timer.
 
 **Exit criteria:** Door/motion/window binary sensors show a glowing dot that
 tracks state, distinct from the flat text rows around them.
@@ -317,6 +325,100 @@ choosing a value and Apply calls the same service as the dropdown did.
   rework, especially when stacked with other controls (climate has mode +
   setpoint + current-temp label).
 - Keep the dropdown for very long option lists if the roller gets unwieldy.
+
+---
+
+## UE7 — device_class-aware severity for the binary_sensor LED
+
+**Status:** ⬜ not started · target tag: `ue7-led-severity`
+
+**Why:** UE5 shipped a status LED that paints **green = "on"** for every
+binary_sensor. That's semantically wrong for a whole class of sensors where "on"
+means *bad*: a water-leak (`moisture`) sensor "on" = a leak, smoke/gas/CO "on" =
+an alarm, `battery` "on" = low battery, `problem`/`safety`/`tamper` "on" = a
+fault. Painting those green reads as "all good" at exactly the moment something is
+wrong. binary_sensor "on" doesn't mean "good" — it means "detected/active", and
+whether that's good, bad, or neutral depends on the entity's **`device_class`**.
+
+This is the one item in this plan that **leaves the "no new HA data" scope**: it
+needs the `device_class` attribute, which the panel doesn't subscribe today. That
+is acceptable and intentional — it's the same kind of standard-attribute fetch
+UE3 used for climate (`current_temperature` et al.), not an HA-side change. Flag
+it, don't pretend it fits the original constraint.
+
+**Step 1 — DECIDE the approach (do this first, before any code).** Options, in
+rough order of correctness:
+
+- **A — device_class-aware severity (LEAN / recommended; what HA does).**
+  Subscribe `device_class` at connect time (E7/UE3 precedent: rides the initial
+  `state_subs` cursor walk, no re-arm), classify each binary_sensor into a
+  severity bucket, and colour the LED by **(bucket, state)** instead of by raw
+  on/off:
+  - *Problem/alarm classes* — `moisture`, `smoke`, `gas`, `co`, `safety`,
+    `problem`, `tamper`, `heat`, `cold`, `battery` (low when "on") — "on" = **red
+    glow**, "off" = dim green/grey (all clear).
+  - *Neutral/activity classes* — `motion`, `occupancy`, `presence`, `door`,
+    `window`, `opening`, `garage_door`, `light`, `sound`, `running`, `power`,
+    `plug`, `vibration`, `moving` — "on" = **amber/accent glow** (active), "off"
+    = dim grey. No good/bad claim.
+  - *Positive classes* — `connectivity` ("on" = connected), `battery_charging`
+    ("on" = charging) — "on" = **green**, "off" = dim/red.
+  - Unknown / no device_class → fall back to the UE5 behaviour (green on / grey
+    off) so nothing regresses.
+  This matches Home Assistant's own frontend, which colours/swaps the
+  binary_sensor presentation by device_class (problem classes alert red/amber on
+  detection; door/motion are neutral "active" highlights, not green). **Pick this
+  unless something below changes the calculus.**
+
+- **B — activity-only, no value judgment.** Drop green/red entirely: "on" =
+  bright accent, "off" = dim. The dot only signals "active now", never good/bad.
+  Never wrong, needs no new attribute — but loses the at-a-glance alarm signal
+  that makes a leak/smoke dot actually useful. Fallback if A proves too costly.
+
+- **C — amber-active (HA-ish middle, no new attribute).** "on" = amber glow
+  (HA's real "active" colour), "off" = dim grey, unavailable = red. Kills the
+  false-"green = good" problem immediately without subscribing `device_class`,
+  but still can't make a leak sensor go *red* on detection. A reasonable interim
+  if we want the fix now and A later.
+
+- **D — per-entity YAML override (`on_color:` / `severity:`).** Maximum control,
+  maximum config; against the "config-free v1" principle. Only worth it as an
+  escape hatch layered on top of A for misclassified entities.
+
+**Decision:** lean **A**. Revisit only if the connect-time attr cost or the
+classification table proves not worth it on-device; C is the documented fallback.
+
+Tasks (assuming A):
+- [ ] **Decide** (above) and record the choice + reasoning in `DEVELOPMENT.md`.
+- [ ] Subscribe `device_class` for binary_sensors at connect time (mirror the
+      UE3 climate-attr connect-time subscription; scoped to binary_sensors only
+      to keep the TX burst small — see the P7d/P7e TX-saturation lesson).
+- [ ] Add a `binary_sensor_severity_(device_class)` classifier → enum
+      {PROBLEM, ACTIVITY, POSITIVE, UNKNOWN} with the class lists above.
+- [ ] Replace the UE5 colour/brightness logic in `rebuild_entity_row_`'s
+      READ_ONLY_TEXT arm with a **(severity, state)** lookup; keep the UE5
+      green-on/grey-off as the UNKNOWN fallback so missing device_class doesn't
+      regress.
+- [ ] Re-run the row on `device_class` arrival (`on_attr_` →
+      `rebuild_entity_row_`, same pattern UE3 used for `current_temperature`) so
+      the colour is right once the attr lands, not just on first paint.
+- [ ] Optional: also swap the row **icon** by device_class+state the way HA does
+      (e.g. leak drip, open vs closed door) — likely its own follow-up, not part
+      of this LED-colour phase.
+
+**Exit criteria:** A water-leak / smoke / low-battery binary_sensor shows a **red**
+glowing dot when "on" (alarm), not green; motion/door/window show a neutral
+amber "active" dot when "on"; connectivity/charging show green when "on";
+sensors with no `device_class` keep the UE5 behaviour. No connect-time
+`Buffer full` / unresponsive-disconnect from the added subscriptions.
+
+**Risks / unknowns:**
+- New connect-time subscription — watch the TX budget (the P7d iter-1 lesson).
+  binary_sensors are usually few; scope strictly to them.
+- `device_class` can be absent or non-standard (custom integrations); the
+  UNKNOWN fallback must be solid.
+- Colour-only severity is invisible to colour-blind users — the on/off **word**
+  stays (already kept in UE5) as the redundant channel; don't drop it.
 
 ---
 
