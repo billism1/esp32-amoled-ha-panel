@@ -3718,16 +3718,24 @@ void HAPanel::on_confirm_cover_close_(lv_event_t *e) {
 // only chartable read-only entities allocate one. HA pushes on change only, so
 // this is "last 240 changes since boot", decimated to the chart width on draw.
 static const size_t HISTORY_CAP = 240;
+// UE7: deeper ring for `realtime: true` entities (scope mode). A high-rate feed
+// at f Hz holds HISTORY_CAP_RT / f seconds; 600 backs the 30 s Live window up to
+// 20 Hz. ~600 × 8 B = ~4.7 KB each — paid only by the handful of realtime
+// entities, NOT the ~50 ordinary sensors (internal heap is tight; see 082f308).
+static const size_t HISTORY_CAP_RT = 600;
 // Window chip → seconds. Index matches history_window_idx_ (0 = 1h, …).
-// UE7: index 3 = "Live" — a short window for watching high-rate (1 Hz) sensors
-// scroll in real time. 120 s of 1 Hz data ≈ the ring buffer's reach and
-// decimates near 1:1 to MAX_CHART_POINTS, so the line moves visibly each second.
-static const uint32_t HISTORY_WINDOW_S[4] = {3600u, 6u * 3600u, 24u * 3600u, 120u};
-// Cap the points fed to lv_chart so a long window decimates to ~screen width.
-static const size_t MAX_CHART_POINTS = 100;
+// UE7: index 3 = "Live" — a short scope window for watching high-rate sensors
+// scroll in real time. 30 s decimates near 1:1 to MAX_CHART_POINTS, so the trace
+// sweeps visibly. Backed by the realtime ring (HISTORY_CAP_RT) for those entities.
+static const uint32_t HISTORY_WINDOW_S[4] = {3600u, 6u * 3600u, 24u * 3600u, 30u};
+// Cap the points fed to lv_chart. ~200 across the 432 px chart ≈ 2 px/point — a
+// smooth scope trace without sub-pixel waste. Long windows decimate down to it.
+static const size_t MAX_CHART_POINTS = 200;
 // Cap the points kept from a REST response. Bounds the internal-heap vector (a
-// 24 h per-minute series is ~1440 pts); 3× MAX_CHART_POINTS leaves headroom for
-// the chart's own decimation. The chart never shows more than MAX_CHART_POINTS.
+// 24 h per-minute series is ~1440 pts). ≥ MAX_CHART_POINTS so the chart's own
+// decimation still has every point it needs; kept at 300 to limit internal heap
+// during the fetch (REST = non-realtime only). The chart never shows more than
+// MAX_CHART_POINTS.
 static const size_t SAMPLE_CAP = 300;
 
 // Format an elapsed duration (in seconds) as a compact "-12s" / "-45m" /
@@ -3789,7 +3797,10 @@ void HAPanel::record_history_(size_t entity_idx) {
     return;  // skip unavailable/unknown/non-numeric transients
   // Ring-buffer samples are stamped in uptime-seconds (millis()/1000).
   e.history.push_back({millis() / 1000u, v});
-  if (e.history.size() > HISTORY_CAP)
+  // UE7: realtime entities keep a deeper ring so the short scope window stays
+  // fully backed at high sample rates.
+  const size_t cap = e.realtime ? HISTORY_CAP_RT : HISTORY_CAP;
+  if (e.history.size() > cap)
     e.history.erase(e.history.begin());
 }
 
