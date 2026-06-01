@@ -16,6 +16,8 @@ Usage:
   # Broker credentials are read from secrets.json (gitignored) next to this
   # script. Copy secrets.example.json → secrets.json and fill it in.
 
+  # Available waveforms: sine, noisy, sawtooth, square, chirp
+  
   # Override broker settings on the CLI (takes precedence over secrets.json):
   python mqtt_test_publisher.py --host 192.168.1.100 --port 1883 \
       --username mqtt_user1 --password ********
