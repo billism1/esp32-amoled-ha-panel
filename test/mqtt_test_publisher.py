@@ -77,7 +77,7 @@ TOPICS = {
 
 # ── Waveform generators ───────────────────────────────────────────────────────
 
-def sine_wave(t, period=60.0, min_val=18.0, max_val=26.0):
+def sine_wave(t, period=15.0, min_val=18.0, max_val=26.0):
     """Smooth sine wave — good for testing smooth plot rendering."""
     midpoint = (min_val + max_val) / 2
     amplitude = (max_val - min_val) / 2
