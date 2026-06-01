@@ -2,6 +2,8 @@
 secrets.yaml
 secrets.*.yaml
 !secrets.example.yaml
+test/secrets.json
+!test/secrets.example.json
 
 # ESPHome build artifacts
 .esphome/
