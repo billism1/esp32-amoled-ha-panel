@@ -9,6 +9,8 @@
 #include <map>
 #include <set>
 
+#include "esp_heap_caps.h"  // UE6 diagnostics: internal-heap free / largest block
+
 #include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
@@ -384,7 +386,16 @@ void HAPanel::setup() {
   }
 #endif
   this->build_ui_();
+  // UE6: the history worker task is created lazily on first history open, NOT
+  // here — its internal-RAM stack would otherwise shrink the free heap during the
+  // memory-tight boot/WiFi-connect window and abort the WiFi scan allocator
+  // (bad_alloc in wifi_process_event_). See ensure_history_worker_.
+  ESP_LOGCONFIG(TAG, "UE6 heap @setup-end: internal free=%u largest=%u",
+                (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
+
+void HAPanel::loop() { this->poll_history_fetch_(); }
 
 void HAPanel::on_attr_(size_t entity_idx, const std::string &attr_name,
                        StringRef value) {
@@ -451,7 +462,11 @@ void HAPanel::on_state_(const std::string &entity_id, StringRef state) {
     // E9: capture chartable values into the history ring buffer, and live-tail
     // the chart if its sheet is currently open on this entity.
     this->record_history_(i);
-    if (this->history_open_ && this->history_entity_idx_ == i) {
+    // UE6: don't live-tail while a worker backfill is in flight — the redraw
+    // would hide the spinner and paint the soon-to-be-replaced old samples. The
+    // fetch result supersedes anything we'd append here anyway.
+    if (this->history_open_ && this->history_entity_idx_ == i &&
+        this->hist_fetch_state_.load(std::memory_order_relaxed) != HIST_RUNNING) {
       // Live tail: extend the open sheet's working set with the new value,
       // stamped in the same timebase as the sheet's current samples (epoch for
       // REST mode, uptime-seconds otherwise), then redraw.
@@ -3858,18 +3873,16 @@ void HAPanel::build_history_sheet_(lv_obj_t *scr) {
   lv_obj_clear_flag(this->history_strip_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
 
-  // UE2: loading arc, centered over the chart footprint. A 60° bright segment on
-  // a faint full-circle track; spin_history_() rotates it during the fetch. Not
-  // an lv_spinner because its anim would need lv_timer_handler, which can't be
-  // re-entered from inside the open-history event (same reason the fetch uses
-  // lv_refr_now). No knob, not clickable.
-  this->history_spinner_ = lv_arc_create(this->history_sheet_);
+  // UE6: real lv_spinner over the chart footprint, shown during the worker-task
+  // backfill. The fetch no longer blocks the main loop, so lv_timer_handler keeps
+  // firing and this self-animates (retiring the UE2 hand-rotated arc + its
+  // spin_history_/lv_refr_now pumping). No knob, not clickable.
+  this->history_spinner_ = lv_spinner_create(this->history_sheet_);
+  lv_spinner_set_anim_duration(this->history_spinner_, 1000);  // 1 s/rev
+  lv_spinner_set_arc_sweep(this->history_spinner_, 60);        // bright 60° segment
   lv_obj_set_size(this->history_spinner_, 60, 60);
   lv_obj_align(this->history_spinner_, LV_ALIGN_TOP_MID, 0, 208);
   lv_obj_remove_flag(this->history_spinner_, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_remove_style(this->history_spinner_, NULL, LV_PART_KNOB);
-  lv_arc_set_bg_angles(this->history_spinner_, 0, 360);
-  lv_arc_set_angles(this->history_spinner_, 0, 60);
   lv_obj_set_style_arc_width(this->history_spinner_, 6, LV_PART_MAIN);
   lv_obj_set_style_arc_color(this->history_spinner_, lv_color_hex(0x222222),
                              LV_PART_MAIN);
@@ -3982,8 +3995,9 @@ void HAPanel::open_history_(size_t entity_idx) {
   lv_obj_clear_flag(this->history_sheet_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(this->history_sheet_);
   this->history_open_ = true;
-  this->load_history_samples_(entity_idx, this->history_window_idx_);
-  this->redraw_history_();
+  // UE6: async for REST (spinner now, redraw when the worker finishes); the
+  // no-REST path inside redraws synchronously.
+  this->start_history_load_(entity_idx, this->history_window_idx_);
   ESP_LOGI(TAG, "history open: %s", e.entity_id.c_str());
 }
 
@@ -3995,17 +4009,171 @@ void HAPanel::close_history_() {
   ESP_LOGD(TAG, "history close");
 }
 
-void HAPanel::spin_history_() {
-  if (this->history_spinner_ == nullptr)
+void HAPanel::show_history_loading_() {
+  // Loading state: spinner up over a cleared chart area. (montserrat_18 has no
+  // ellipsis glyph, hence the literal "...".)
+  lv_label_set_text(this->history_value_, "Loading...");
+  lv_obj_add_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
+  if (this->history_gauge_ != nullptr)
+    lv_obj_add_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text(this->history_time_left_, "");
+  lv_label_set_text(this->history_time_right_, "");
+  lv_label_set_text(this->history_range_label_, "");
+  if (this->history_spinner_ != nullptr) {
+    lv_obj_clear_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(this->history_spinner_);
+  }
+}
+
+void HAPanel::start_history_load_(size_t entity_idx, uint8_t window_idx) {
+  if (entity_idx >= this->entities_.size())
     return;
-  // Stepped, not continuous. The blocking fetch only lets us tick when a chunk
-  // arrives (lumpy, network-paced), so a smooth millis()-based angle judders.
-  // Advancing a fixed 30° per call reads as a deliberate stepping loader at any
-  // update rate, and doubles as iterative-progress feedback — one step per data
-  // burst. lv_refr_now repaints just the dirty arc.
-  this->history_spin_step_ = (uint8_t) ((this->history_spin_step_ + 1) % 12);
-  lv_arc_set_rotation(this->history_spinner_, this->history_spin_step_ * 30);
-  lv_refr_now(NULL);
+  // No REST deps → synchronous ring-buffer copy + immediate redraw.
+  if (!this->history_rest_enabled_()) {
+    this->history_rest_mode_ = false;
+    this->history_samples_ = this->entities_[entity_idx].history;
+    this->redraw_history_();
+    return;
+  }
+  // REST: show the spinner now and record the desired request.
+  this->show_history_loading_();
+  this->hist_want_entity_ = entity_idx;
+  this->hist_want_window_ = window_idx;
+  this->hist_seq_want_++;
+  this->hist_want_pending_ = true;
+  // Prefer the async worker (no UI freeze); fall back to a blocking fetch on the
+  // main loop if the worker can't be created (heap too low for its stack).
+  if (this->ensure_history_worker_())
+    this->dispatch_history_fetch_();
+  else
+    this->run_history_fetch_sync_();
+}
+
+bool HAPanel::ensure_history_worker_() {
+  if (this->hist_task_ != nullptr)
+    return true;
+  if (this->hist_req_sem_ == nullptr) {
+    this->hist_req_sem_ = xSemaphoreCreateBinary();
+    if (this->hist_req_sem_ == nullptr) {
+      ESP_LOGW(TAG, "history: semaphore alloc failed — using sync fetch");
+      return false;
+    }
+  }
+  // 8 KB stack (core 0, prio 2): the same GET + parse already ran inside the main
+  // loop task's stack in the pre-task path, so 8 KB is ample for LAN http + the
+  // shallow ArduinoJson DOM. A https base URL (mbedTLS) would need far more.
+  // Created lazily so its stack doesn't compete with the WiFi scan allocator at
+  // boot. Persistent once up (no per-open create/delete churn).
+  BaseType_t r = xTaskCreatePinnedToCore(&HAPanel::history_task_trampoline_,
+                                         "ha_hist", 8192, this, 2,
+                                         &this->hist_task_, 0);
+  if (r != pdPASS) {
+    this->hist_task_ = nullptr;
+    ESP_LOGW(TAG, "history worker create failed — using sync fetch "
+                  "(internal free=%u largest=%u)",
+             (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    return false;
+  }
+  ESP_LOGI(TAG, "UE6: history worker task started on core 0");
+  return true;
+}
+
+void HAPanel::run_history_fetch_sync_() {
+  // Blocking fetch on the main loop (WDT backstop covers it) — the pre-UE6
+  // behavior, used only when the worker task couldn't be created.
+  std::string url;
+  if (!this->build_history_url_(this->hist_want_entity_, this->hist_want_window_,
+                                &url)) {
+    this->hist_want_pending_ = false;
+    this->history_rest_mode_ = false;
+    if (this->hist_want_entity_ < this->entities_.size())
+      this->history_samples_ = this->entities_[this->hist_want_entity_].history;
+    if (this->history_open_ &&
+        this->history_entity_idx_ == this->hist_want_entity_)
+      this->redraw_history_();
+    return;
+  }
+  this->hist_req_url_ = url;
+  this->hist_req_is_binary_ =
+      this->entities_[this->hist_want_entity_].domain == "binary_sensor";
+  this->hist_want_pending_ = false;
+  const bool ok = this->run_history_fetch_();  // blocks
+  if (ok) {
+    this->history_samples_.swap(this->hist_staging_);
+    this->history_rest_mode_ = true;
+  } else {
+    this->history_rest_mode_ = false;
+    if (this->hist_want_entity_ < this->entities_.size())
+      this->history_samples_ = this->entities_[this->hist_want_entity_].history;
+  }
+  this->hist_staging_.clear();
+  if (this->history_open_ &&
+      this->history_entity_idx_ == this->hist_want_entity_)
+    this->redraw_history_();
+}
+
+void HAPanel::dispatch_history_fetch_() {
+  // Don't touch the request fields while the worker may be reading them.
+  if (this->hist_fetch_state_.load(std::memory_order_acquire) == HIST_RUNNING)
+    return;
+  if (!this->hist_want_pending_)
+    return;
+  std::string url;
+  if (!this->build_history_url_(this->hist_want_entity_, this->hist_want_window_,
+                                &url)) {
+    // Clock not valid yet / bad idx → fall back to the ring buffer synchronously.
+    ESP_LOGW(TAG, "history: cannot build URL — ring-buffer fallback");
+    this->hist_want_pending_ = false;
+    this->history_rest_mode_ = false;
+    if (this->hist_want_entity_ < this->entities_.size())
+      this->history_samples_ = this->entities_[this->hist_want_entity_].history;
+    if (this->history_open_ &&
+        this->history_entity_idx_ == this->hist_want_entity_)
+      this->redraw_history_();
+    return;
+  }
+  this->hist_req_url_ = url;
+  this->hist_req_is_binary_ =
+      this->entities_[this->hist_want_entity_].domain == "binary_sensor";
+  this->hist_req_seq_ = this->hist_seq_want_;
+  this->hist_want_pending_ = false;
+  // Publish the request, then wake the worker. The store(release) + semaphore
+  // give ensure the worker sees the request fields above.
+  this->hist_fetch_state_.store(HIST_RUNNING, std::memory_order_release);
+  xSemaphoreGive(this->hist_req_sem_);
+}
+
+void HAPanel::poll_history_fetch_() {
+  if (this->hist_req_sem_ == nullptr)
+    return;  // no worker
+  uint8_t s = this->hist_fetch_state_.load(std::memory_order_acquire);
+  if (s != HIST_DONE_OK && s != HIST_DONE_FAIL)
+    return;
+  this->hist_fetch_state_.store(HIST_IDLE, std::memory_order_relaxed);
+  const bool ok = (s == HIST_DONE_OK);
+  // Only the newest desired request matters: a window switch mid-fetch bumped
+  // hist_seq_want_ past the in-flight seq, so an older result is dropped.
+  const bool current = (this->hist_req_seq_ == this->hist_seq_want_);
+  if (current) {
+    if (ok) {
+      this->history_samples_.swap(this->hist_staging_);
+      this->history_rest_mode_ = true;
+    } else {
+      ESP_LOGW(TAG, "history REST fetch failed — falling back to ring buffer");
+      this->history_rest_mode_ = false;
+      if (this->hist_want_entity_ < this->entities_.size())
+        this->history_samples_ = this->entities_[this->hist_want_entity_].history;
+    }
+    if (this->history_open_ &&
+        this->history_entity_idx_ == this->hist_want_entity_)
+      this->redraw_history_();
+  }
+  this->hist_staging_.clear();
+  // A newer request queued while the worker was busy → dispatch it now.
+  if (this->hist_want_pending_)
+    this->dispatch_history_fetch_();
 }
 
 void HAPanel::update_history_gauge_(float vmin, float vmax, float current) {
@@ -4036,7 +4204,7 @@ void HAPanel::redraw_history_() {
   if (this->history_sheet_ == nullptr ||
       this->history_entity_idx_ >= this->entities_.size())
     return;
-  // The fetch is done by the time we redraw — drop the loading arc.
+  // The fetch is done by the time we redraw — hide the loading spinner.
   if (this->history_spinner_ != nullptr)
     lv_obj_add_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
   const Entity &e = this->entities_[this->history_entity_idx_];
@@ -4152,12 +4320,29 @@ void HAPanel::redraw_history_() {
   // the chosen window — is what keeps a data-starved 6h view honest.
   std::vector<float> vals;
   uint32_t oldest_t = now;
+  bool have_anchor = false;
+  float anchor_val = 0.0f;
   for (const auto &s : this->history_samples_) {
-    if (s.t_s >= cutoff) {
-      if (vals.empty())
-        oldest_t = s.t_s;
-      vals.push_back(s.value);
+    if (s.t_s < cutoff) {
+      // Last value *before* the window — carried forward as the line's starting
+      // level (like the binary strip's anchor band).
+      anchor_val = s.value;
+      have_anchor = true;
+      continue;
     }
+    if (vals.empty())
+      oldest_t = s.t_s;
+    vals.push_back(s.value);
+  }
+  // Seed the line with the value as of the window start. HA's
+  // significant_changes_only returns ~1 boundary point for a flat sensor, and its
+  // timestamp sits right at the window edge; the redraw recomputes `cutoff` from
+  // a slightly later `now` (the async fetch adds latency), so without this anchor
+  // that lone sample drifts just outside the window and the chart intermittently
+  // shows "No data yet" even though the value is known.
+  if (have_anchor) {
+    vals.insert(vals.begin(), anchor_val);
+    oldest_t = cutoff;
   }
   if (vals.empty()) {
     lv_chart_set_point_count(this->history_chart_, 0);
@@ -4170,6 +4355,10 @@ void HAPanel::redraw_history_() {
       lv_obj_add_flag(this->history_gauge_, LV_OBJ_FLAG_HIDDEN);
     return;
   }
+  // A single sample can't draw a line — duplicate it into a flat two-point
+  // segment so a steady sensor (e.g. pool temp pinned at 84°) renders a flat line.
+  if (vals.size() == 1)
+    vals.push_back(vals[0]);
 
   // Decimate to MAX_CHART_POINTS by striding so a 24 h window stays light.
   std::vector<float> pts;
@@ -4232,10 +4421,9 @@ void HAPanel::on_history_chip_(lv_event_t *e) {
   if (idx > 2 || idx == self->history_window_idx_)
     return;  // re-tapping the active window would needlessly re-fetch
   self->history_window_idx_ = (uint8_t) idx;
-  // REST mode re-fetches the new span; ring-buffer mode just re-windows the
-  // copy it already holds (load_history_samples_ re-copies — cheap).
-  self->load_history_samples_(self->history_entity_idx_, self->history_window_idx_);
-  self->redraw_history_();
+  // UE6: REST mode dispatches a worker fetch for the new span (async, redraw on
+  // completion); ring-buffer mode re-windows its copy and redraws synchronously.
+  self->start_history_load_(self->history_entity_idx_, self->history_window_idx_);
 }
 
 // ---------- E9 REST history backfill ----------
@@ -4245,57 +4433,8 @@ bool HAPanel::history_rest_enabled_() const {
          !this->history_base_url_.empty() && !this->history_token_.empty();
 }
 
-void HAPanel::load_history_samples_(size_t entity_idx, uint8_t window_idx) {
-  this->history_samples_.clear();
-  this->history_rest_mode_ = false;
-  if (this->history_rest_enabled_()) {
-    // Blocking fetch — paint a "Loading..." state first so the UI isn't frozen
-    // mid-stall with stale content. (montserrat_18 has no ellipsis glyph.)
-    // UE2: also raise the loading arc; the fetch read loop spins it via
-    // spin_history_() so the wait reads as active, not hung.
-    lv_label_set_text(this->history_value_, "Loading...");
-    if (this->history_spinner_ != nullptr) {
-      // Clear the window we were just looking at so the spinner sits on a clean
-      // sheet, not overlaid on the previous chart. redraw_history_ re-shows the
-      // right one (chart vs. strip) once the new data lands.
-      lv_obj_add_flag(this->history_chart_, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_add_flag(this->history_strip_, LV_OBJ_FLAG_HIDDEN);
-      lv_label_set_text(this->history_time_left_, "");
-      lv_label_set_text(this->history_time_right_, "");
-      lv_label_set_text(this->history_range_label_, "");
-      this->history_spin_step_ = 0;
-      lv_obj_clear_flag(this->history_spinner_, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_move_foreground(this->history_spinner_);
-    }
-    lv_refr_now(NULL);
-    if (this->fetch_history_(entity_idx, window_idx)) {
-      this->history_rest_mode_ = true;
-      return;
-    }
-    ESP_LOGW(TAG, "history REST fetch failed — falling back to ring buffer");
-  }
-  // Ring-buffer fallback: the entity's since-boot samples.
-  if (entity_idx < this->entities_.size())
-    this->history_samples_ = this->entities_[entity_idx].history;
-}
-
-bool HAPanel::iso_to_epoch_(const char *s, int64_t *out) {
-  int y, mo, d, h, mi, se;
-  if (s == nullptr ||
-      sscanf(s, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6)
-    return false;
-  // days_from_civil (Howard Hinnant) → days since 1970-01-01, UTC.
-  int yy = y - (mo <= 2 ? 1 : 0);
-  int64_t era = (yy >= 0 ? yy : yy - 399) / 400;
-  int64_t yoe = yy - era * 400;
-  int64_t doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-  int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-  int64_t days = era * 146097 + doe - 719468;
-  *out = days * 86400 + h * 3600 + mi * 60 + se;
-  return true;
-}
-
-bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
+bool HAPanel::build_history_url_(size_t entity_idx, uint8_t window_idx,
+                                 std::string *out) {
   if (entity_idx >= this->entities_.size() || window_idx > 2)
     return false;
   auto t = this->history_time_->utcnow();
@@ -4318,9 +4457,48 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
   while (!base.empty() && base.back() == '/')
     base.pop_back();
   const Entity &e = this->entities_[entity_idx];
-  std::string url = base + "/api/history/period/" + start_iso +
-                    "?filter_entity_id=" + e.entity_id +
-                    "&minimal_response&no_attributes&significant_changes_only";
+  *out = base + "/api/history/period/" + start_iso +
+         "?filter_entity_id=" + e.entity_id +
+         "&minimal_response&no_attributes&significant_changes_only";
+  return true;
+}
+
+// UE6 worker entry. Persistent: blocks on the request semaphore, runs one fetch,
+// publishes the result, repeats. Lives on core 0 (loopTask/LVGL are on core 1).
+void HAPanel::history_task_trampoline_(void *param) {
+  auto *self = static_cast<HAPanel *>(param);
+  for (;;) {
+    xSemaphoreTake(self->hist_req_sem_, portMAX_DELAY);
+    bool ok = self->run_history_fetch_();
+    // Release so the matching acquire in poll_history_fetch_() sees hist_staging_.
+    self->hist_fetch_state_.store(ok ? HIST_DONE_OK : HIST_DONE_FAIL,
+                                  std::memory_order_release);
+  }
+}
+
+bool HAPanel::iso_to_epoch_(const char *s, int64_t *out) {
+  int y, mo, d, h, mi, se;
+  if (s == nullptr ||
+      sscanf(s, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6)
+    return false;
+  // days_from_civil (Howard Hinnant) → days since 1970-01-01, UTC.
+  int yy = y - (mo <= 2 ? 1 : 0);
+  int64_t era = (yy >= 0 ? yy : yy - 399) / 400;
+  int64_t yoe = yy - era * 400;
+  int64_t doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  int64_t days = era * 146097 + doe - 719468;
+  *out = days * 86400 + h * 3600 + mi * 60 + se;
+  return true;
+}
+
+bool HAPanel::run_history_fetch_() {
+  // WORKER THREAD (core 0). Reads only hist_req_url_ / hist_req_is_binary_ and
+  // the immutable http client + token; writes only hist_staging_. No lv_* calls
+  // and no entity-vector access — that's what makes running off the main loop
+  // safe (LVGL is single-threaded). Result handed back via hist_fetch_state_.
+  const std::string &url = this->hist_req_url_;
+  const bool is_binary = this->hist_req_is_binary_;
 
   std::vector<http_request::Header> headers;
   http_request::Header auth;
@@ -4355,19 +4533,13 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
   }
   size_t blen = 0;
   uint32_t last = millis();
-  uint32_t last_spin = 0;
   bool read_ok = true;
   while (true) {
     int r = container->read(body + blen, BODY_CAP - blen);
-    App.feed_wdt();
+    // Yield so core 0's idle task runs while we stream — keeps the task WDT happy
+    // even though this task blocks on the socket. (The main loop on core 1 is
+    // never blocked, which is the whole point of the worker.)
     yield();
-    // UE2: keep the loading arc turning. ~30 fps cap so the redraws don't
-    // meaningfully slow the read; lv_refr_now is safe here (same as the pre-fetch
-    // paint) where lv_timer_handler would not be (re-entrancy).
-    if (millis() - last_spin >= 33) {
-      this->spin_history_();
-      last_spin = millis();
-    }
     if (r > 0) {
       blen += (size_t) r;
       last = millis();
@@ -4400,9 +4572,6 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
   }
 
   // Response: [ [ {state,last_changed}, ... ] ] — one inner array per entity.
-  // Feed the WDT first: the read loop fed it, but parsing up to 128 KB of JSON
-  // is itself an unfed blocking section on top of the (already long) GET.
-  App.feed_wdt();
   JsonDocument doc = json::parse_json(body, blen);
   alloc.deallocate(body, BODY_CAP);  // doc copied what it needs (PSRAM-backed)
   if (doc.isNull()) {
@@ -4418,17 +4587,16 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
   if (series.isNull())
     return false;
 
-  const bool is_binary = e.domain == "binary_sensor";
   // Decimate at ingestion. A 24 h window of a per-minute sensor is ~1440 points;
-  // history_samples_ lives on internal heap, and a vector that big forced a
+  // the staging vector lives on internal heap, and a vector that big forced a
   // contiguous realloc that abort()ed under fragmentation. The chart only draws
   // ~100 points anyway, so cap here. Keep every stride-th point (stride≈1 for
   // the small binary transition series, so no transitions are dropped).
   const size_t n = series.size();
   // ceil division so the kept count never exceeds SAMPLE_CAP.
   const size_t stride = n > SAMPLE_CAP ? (n + SAMPLE_CAP - 1) / SAMPLE_CAP : 1;
-  this->history_samples_.clear();
-  this->history_samples_.reserve((n > SAMPLE_CAP ? SAMPLE_CAP : n) + 4);
+  this->hist_staging_.clear();
+  this->hist_staging_.reserve((n > SAMPLE_CAP ? SAMPLE_CAP : n) + 4);
   size_t i = 0;
   for (JsonObject pt : series) {
     bool keep = (i % stride) == 0;
@@ -4460,12 +4628,11 @@ bool HAPanel::fetch_history_(size_t entity_idx, uint8_t window_idx) {
       continue;
     // Store UTC epoch-seconds directly; redraw_history_ uses the live HA clock
     // as "now" in REST mode, so ages/spans are correct regardless of uptime.
-    this->history_samples_.push_back({(uint32_t) ep, v});
+    this->hist_staging_.push_back({(uint32_t) ep, v});
   }
-  ESP_LOGI(TAG, "history: %u points for %s (%u B)",
-           (unsigned) this->history_samples_.size(), e.entity_id.c_str(),
-           (unsigned) blen);
-  return !this->history_samples_.empty();
+  ESP_LOGI(TAG, "history: %u points (%u B)",
+           (unsigned) this->hist_staging_.size(), (unsigned) blen);
+  return !this->hist_staging_.empty();
 }
 
 }  // namespace ha_panel

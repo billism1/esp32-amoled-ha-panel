@@ -1,10 +1,16 @@
 // ha_panel.h — runtime model + state subscription + LVGL UI tree.
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <string>
 #include <vector>
+
+// UE6: history backfill runs on a pinned FreeRTOS worker task.
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "esphome/core/component.h"
 #include "esphome/core/string_ref.h"
@@ -98,6 +104,8 @@ struct Page {
 class HAPanel : public Component, public api::CustomAPIDevice {
  public:
   void setup() override;
+  // UE6: polls the history worker task's completion flag (main thread).
+  void loop() override;
   void dump_config() override;
   // Run after LVGL (PROCESSOR) is initialised so lv_scr_act() is valid.
   float get_setup_priority() const override { return setup_priority::AFTER_CONNECTION; }
@@ -312,8 +320,6 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // UE4: point the analog gauge's needle at `current`, scaling its range from the
   // window's [vmin,vmax] (padded so the needle isn't pinned) and revealing it.
   void update_history_gauge_(float vmin, float vmax, float current);
-  // UE2: advance + repaint the history loading arc during the blocking fetch.
-  void spin_history_();
   // E9: append the current state to an entity's history ring buffer. No-op for
   // non-chartable entities. Called from on_state_ on every state change.
   void record_history_(size_t entity_idx);
@@ -326,14 +332,35 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   static bool state_to_value_(const Entity &e, float *out);
   // E9: true when all four REST-backfill dependencies are wired.
   bool history_rest_enabled_() const;
-  // E9: populate history_samples_ for the open sheet. Tries REST backfill when
-  // enabled (sets history_rest_mode_ on success); otherwise copies the entity's
-  // ring buffer. Window selects the fetch span / filter.
-  void load_history_samples_(size_t entity_idx, uint8_t window_idx);
-  // E9: blocking GET /api/history/period/... → history_samples_. Returns false
-  // on any failure (caller falls back to the ring buffer). Converts HA's
-  // absolute timestamps to device-clock millis so the chart/labels are uniform.
-  bool fetch_history_(size_t entity_idx, uint8_t window_idx);
+  // UE6: begin loading the open sheet's samples for `window_idx`. REST path is
+  // async — shows the spinner and hands a request to the worker task (redraw
+  // deferred to poll_history_fetch_); the no-REST path copies the ring buffer
+  // and redraws synchronously. Replaces the old blocking load_history_samples_.
+  void start_history_load_(size_t entity_idx, uint8_t window_idx);
+  // UE6: paint the loading state (spinner up, chart/strip/gauge hidden).
+  void show_history_loading_();
+  // UE6: lazily create the worker task (+ semaphore) on first use, NOT at boot —
+  // its internal-RAM stack must not starve the WiFi scan allocator during the
+  // memory-tight boot/connect window. Returns false if creation fails (low heap).
+  bool ensure_history_worker_();
+  // UE6: synchronous fallback when the worker can't be created — runs the fetch
+  // on the main loop (blocks; WDT backstop covers it), same as the pre-task path.
+  void run_history_fetch_sync_();
+  // UE6: (main) dispatch the latest desired request to the worker, or defer if a
+  // fetch is already in flight (poll re-dispatches on completion).
+  void dispatch_history_fetch_();
+  // UE6: (main, from loop()) consume a finished fetch — swap staging in / fall
+  // back to the ring buffer, redraw if still relevant, re-dispatch if superseded.
+  void poll_history_fetch_();
+  // UE6: (main) build the /api/history/period URL for the window. False if the
+  // HA clock isn't valid yet (caller falls back to the ring buffer).
+  bool build_history_url_(size_t entity_idx, uint8_t window_idx, std::string *out);
+  // UE6: (WORKER THREAD) GET hist_req_url_ + parse into hist_staging_. Touches no
+  // lv_* and no entity state — only the socket, a PSRAM buffer, and hist_staging_.
+  bool run_history_fetch_();
+  // UE6: worker task entry — waits on hist_req_sem_, runs run_history_fetch_,
+  // publishes the result via hist_fetch_state_ (release).
+  static void history_task_trampoline_(void *param);
   // E9: parse a leading ISO-8601 "YYYY-MM-DDTHH:MM:SS" into a UTC epoch.
   static bool iso_to_epoch_(const char *s, int64_t *out);
 
@@ -594,12 +621,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // tracks the window's padded min/max. Hidden for binary_sensor and no-data.
   lv_obj_t *history_gauge_{nullptr};
   lv_obj_t *history_gauge_needle_{nullptr};
-  // UE2: loading indicator over the chart during the blocking REST backfill. A
-  // hand-rotated arc (not lv_spinner): the fetch runs inside an LVGL event, so
-  // lv_timer_handler can't be re-entered to drive a real anim — spin_history_()
-  // bumps the angle and lv_refr_now()s it from the fetch read loop instead.
+  // Loading indicator over the chart during the REST backfill. UE6 made this a
+  // real lv_spinner: the fetch now runs on a worker task, so the main loop keeps
+  // ticking lv_timer_handler and the spinner self-animates (the old UE2 hand-
+  // rotated arc was a workaround for the loop being blocked, now retired).
   lv_obj_t *history_spinner_{nullptr};
-  uint8_t history_spin_step_{0};  // UE2: 0..11 stepped position of the loader arc
   // Bottom row under the chart: left/right are the time span of the *displayed
   // data* (oldest visible sample's age → "now"), so a window with no older data
   // reads honestly instead of looking identical at every chip. Center shows the
@@ -622,6 +648,30 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   time::RealTimeClock *history_time_{nullptr};
   std::string history_base_url_;
   std::string history_token_;
+
+  // UE6: history fetch worker. The blocking GET + JSON parse run here (core 0)
+  // so they never stall loopTask/LVGL (core 1) — the stall tripped the task WDT
+  // on 6h/24h windows. Handoff: main fills the request fields + gives
+  // hist_req_sem_; worker fills hist_staging_ and stores hist_fetch_state_ with
+  // release; loop() loads it with acquire (the barrier), then swaps staging in.
+  // The worker touches ONLY hist_req_url_ / hist_req_is_binary_ / hist_staging_
+  // and the http client — never lv_* or the entity vector.
+  enum : uint8_t { HIST_IDLE = 0, HIST_RUNNING, HIST_DONE_OK, HIST_DONE_FAIL };
+  TaskHandle_t hist_task_{nullptr};
+  SemaphoreHandle_t hist_req_sem_{nullptr};
+  std::atomic<uint8_t> hist_fetch_state_{HIST_IDLE};
+  // Request (main → worker): written only when no fetch is in flight.
+  std::string hist_req_url_;
+  bool hist_req_is_binary_{false};
+  uint32_t hist_req_seq_{0};  // seq of the dispatched (in-flight) request
+  // Result (worker → main): valid only after HIST_DONE_OK.
+  std::vector<HistorySample> hist_staging_;
+  // Latest desired request (main-only). Bumped per user action; supersedes an
+  // in-flight fetch on rapid window switches so only the newest result is drawn.
+  uint32_t hist_seq_want_{0};
+  size_t hist_want_entity_{0};
+  uint8_t hist_want_window_{0};
+  bool hist_want_pending_{false};  // a desired fetch not yet handed to the worker
 };
 
 }  // namespace ha_panel

@@ -61,13 +61,11 @@ esp32:
       CONFIG_ESP32S3_DATA_CACHE_LINE_64B: y
       CONFIG_SPIRAM_FETCH_INSTRUCTIONS: y
       CONFIG_SPIRAM_RODATA: y
-      # E9 history backfill issues a *blocking* GET (http_request timeout 8s in
-      # base.yaml) that stalls the main loop while HA computes a 6h/24h history
-      # query. The default ~5s task WDT tripped mid-fetch and rebooted the panel
-      # on larger windows. Raise it above the http timeout + JSON-parse margin so
-      # a slow query loads (or cleanly times out → ring-buffer fallback) instead
-      # of crashing. Proper fix (move the read onto a worker task) is deferred.
-      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "15"
+      # UE6 moved the blocking history GET + JSON parse onto a core-0 worker task,
+      # so loopTask (core 1) is no longer stalled by it and the default ~5s WDT no
+      # longer trips. This modest backstop only covers the worker briefly blocking
+      # core 0's idle task during the one-shot JSON parse (the read loop yields).
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "10"
 
 # 8 MB stacked PSRAM on the ESP32-S3R8 requires octal mode (guide §1).
 # mipi_spi framebuffer will not init without this.

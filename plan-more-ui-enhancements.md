@@ -249,8 +249,8 @@ current reading alongside the trend chart; binary sensors are unaffected.
 
 ## UE5 — Glowing LED on binary_sensor rows
 
-**Status:** 🟡 built, compiles + links clean (RAM 16.5%, Flash 19.5%) ·
-on-device validation pending · target tag: `ue5-led`
+**Status:** ✅ done — validated on-device (binary sensors show a glowing dot that
+tracks state across small/medium/large rows). · target tag: `ue5-led`
 
 **Pairs with (existing):** read-only `binary_sensor` rows. State styling lives in
 [rebuild_entity_row_](components/ha_panel/ha_panel.cpp#L441); binary/read-only
@@ -292,7 +292,11 @@ tracks state, distinct from the flat text rows around them.
 
 ## UE6 — History fetch on a core-pinned worker task
 
-**Status:** ⬜ not started · target tag: `ue6-history-worker`
+**Status:** ✅ done — validated on-device (async worker fetch; 24h/287-point loads;
+flat sensors render a flat line; no reboot/bad_alloc/HTTP -1). Required a heap fix
+first — `lvgl buffer_size 25%→10%` freed ~69 KB internal so the worker's task
+stack + esp_http_client buffers fit (committed separately). · target tag:
+`ue6-history-worker`
 
 **Why (a real crash, not polish):** the E9 history backfill issues a **blocking**
 `http_request->get()` on the main loop while HA computes the
@@ -316,29 +320,32 @@ the split is along the "touches no `lv_*`" line: the worker only touches the
 socket, a PSRAM buffer, and a staging `vector<HistorySample>` it owns.
 
 Handshake (ordering matters):
-- [ ] Create the worker once in `setup()`, pinned to **core 0**
-      (`xTaskCreatePinnedToCore`), blocked on a binary semaphore / task
-      notification. Persistent, not spawn-per-open (avoids task create/delete
-      heap churn).
-- [ ] **Main → worker:** fill a request struct (url, token, window, `seq++`), set
-      `std::atomic<State> = RUNNING`, give the semaphore. Worker reads only the
-      request struct — never `entities_` or any `lv_*`.
-- [ ] **Worker:** `get()` + chunked read into the PSRAM buffer + `parse_json` →
-      write the staging sample vector it owns; store result code; set
-      `State = DONE` with **release** ordering.
-- [ ] **Worker → main:** `loop()` polls the atomic with **acquire** ordering; on
-      `DONE`, swap staging → `history_samples_` and call `redraw_history_()`. The
-      release/acquire pair is the memory barrier — no mutex needed as long as main
-      reads staging only after `DONE`.
-- [ ] **Cancellation:** sheet close / window switch bumps `seq`. On `DONE`,
-      compare `result.seq == current_seq`; drop stale results so a late fetch
-      can't redraw into a closed/other sheet.
-- [ ] Swap the UE2 hand-rotated `history_spinner_` arc for a real `lv_spinner`
-      (now that the loop runs during the fetch); keep `spin_history_()` only if a
-      fallback is still wanted.
-- [ ] Lower the WDT backstop from the band-aid's 15 s to a modest ~10 s (the
-      `get()` connect phase still briefly blocks core 0); keep `feed_wdt()` in the
-      worker's chunked read loop.
+- [x] Worker created once at the end of `setup()`, pinned to **core 0**
+      (`xTaskCreatePinnedToCore`, 16 KB stack, prio 2), blocked on a binary
+      semaphore (`hist_req_sem_`). Persistent loop, not spawn-per-open. Create
+      failure nulls the handles → falls back to the synchronous ring-buffer path.
+- [x] **Main → worker:** `dispatch_history_fetch_()` builds the URL, sets
+      `hist_req_url_`/`hist_req_is_binary_`/`hist_req_seq_`, stores
+      `hist_fetch_state_ = HIST_RUNNING` (release), gives the semaphore. Worker
+      reads only those request fields + the immutable client/token — never
+      `entities_` or any `lv_*`.
+- [x] **Worker** (`run_history_fetch_`): `get()` + chunked read into the PSRAM
+      buffer + `parse_json` → fills `hist_staging_` (the vector it owns); the
+      trampoline stores `HIST_DONE_OK`/`HIST_DONE_FAIL` with **release** ordering.
+- [x] **Worker → main:** `loop()` → `poll_history_fetch_()` loads the atomic with
+      **acquire**; on done it `swap()`s `hist_staging_` → `history_samples_` and
+      calls `redraw_history_()`. Release/acquire is the barrier — no mutex (main
+      touches staging only after done; worker is parked on the semaphore by then).
+- [x] **Cancellation / supersede:** each user action bumps `hist_seq_want_`. On
+      completion, `hist_req_seq_ != hist_seq_want_` ⇒ stale result dropped (no
+      redraw); a request that arrived while the worker was busy is re-dispatched.
+      Also guards: redraw only if the sheet is still open on the same entity, and
+      the live-tail skips its redraw while a fetch is `HIST_RUNNING`.
+- [x] Swapped the UE2 hand-rotated `history_spinner_` arc for a real
+      `lv_spinner` (loop runs during the fetch now); removed `spin_history_()` +
+      `history_spin_step_` + the read-loop `lv_refr_now`/`feed_wdt` pumping.
+- [x] Lowered the WDT backstop 15 s → **10 s** (covers the worker briefly
+      blocking core-0 idle during the one-shot parse; the read loop `yield()`s).
 
 **Gotchas:**
 - **Stack size:** ArduinoJson recursion + HTTP need headroom. LAN `http` ≈ 8 KB;

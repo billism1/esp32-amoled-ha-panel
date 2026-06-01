@@ -2760,6 +2760,106 @@ climate, etc.) are visually unchanged.
 
 ---
 
+### Phase UE6 — History fetch on a core-pinned worker task
+
+**Outcome:** moved the E9 history backfill (the blocking HTTP GET + JSON parse)
+off the main loop onto a **persistent FreeRTOS worker task pinned to core 0**.
+loopTask/LVGL stay on core 1 and never stall, which fixes the crash and lets the
+loader become a real `lv_spinner`. **Validated on-device** — but only after
+freeing internal RAM (the worker's task stack had nowhere to live); see the
+"memory wall" addendum below.
+
+**The crash this fixes.** `http_request->get()` blocks the main loop while HA
+computes a `/api/history/period` query; on 6h/24h windows that ran several
+seconds and the default ~5 s task WDT rebooted the panel (`task_wdt: loopTask
+(CPU 1) did not reset`). A committed band-aid (raise `CONFIG_ESP_TASK_WDT_TIMEOUT_S`
+to 15 s + a `feed_wdt()` before the parse) stopped the crash but left the UI
+frozen for up to the 8 s http timeout, and the UE2 "spinner" was a hand-rotated
+`lv_arc` precisely because the loop was blocked. UE6 is the proper fix.
+
+**Why the split is safe.** LVGL is single-threaded — every `lv_*` call must stay
+on loopTask. The blocking work touches *no* LVGL: only the socket, a PSRAM body
+buffer, and a staging `vector<HistorySample>`. So the worker owns exactly those
+three and nothing else (no `entities_`, no widgets); the main thread owns all
+drawing. Core 0 for the worker because loopTask/LVGL render on core 1 — no
+contention.
+
+**Handshake.** `dispatch_history_fetch_()` (main) builds the URL, sets
+`hist_req_url_`/`hist_req_is_binary_`/`hist_req_seq_`, stores `hist_fetch_state_ =
+HIST_RUNNING` with **release**, and gives `hist_req_sem_`. The worker
+(`history_task_trampoline_` → `run_history_fetch_`) wakes, fetches into
+`hist_staging_`, and stores `HIST_DONE_OK`/`FAIL` with **release**.
+`poll_history_fetch_()` (main, from the new `loop()` override) loads the flag with
+**acquire** — that release/acquire pair is the only barrier needed — then
+`swap()`s staging into `history_samples_` and redraws. No mutex: the main thread
+reads staging only after `DONE`, by which point the worker is parked back on the
+semaphore. The semaphore give/take is itself a full barrier, so the worker sees
+the request fields written before it.
+
+**Supersede + cancellation.** Each user action (open, window chip) bumps
+`hist_seq_want_`. On completion, `hist_req_seq_ != hist_seq_want_` means a newer
+request superseded this one → the result is dropped (no redraw) and the pending
+request is re-dispatched. A request that arrives while the worker is busy isn't
+lost: `dispatch_*` early-returns on `HIST_RUNNING` leaving `hist_want_pending_`,
+and `poll_*` re-dispatches after consuming the stale result. Redraw also guards
+on the sheet still being open on the same entity, and the live-tail in `on_state_`
+skips its redraw while a fetch is `HIST_RUNNING` (so it can't hide the spinner or
+paint the soon-to-be-replaced samples).
+
+**Spinner.** `history_spinner_` is now a real `lv_spinner` (1 s/rev, 60° sweep),
+self-animated by `lv_timer_handler` because the loop runs during the fetch.
+Removed `spin_history_()`, `history_spin_step_`, and the read-loop
+`lv_refr_now`/`feed_wdt` pumping that the blocked-loop workaround needed.
+
+**WDT backstop lowered 15 s → 10 s.** With loopTask never blocked, the default
+would even suffice; 10 s comfortably covers the worker briefly starving core-0's
+idle task during the one-shot `parse_json` (the chunked read loop `yield()`s, so
+the streaming phase doesn't).
+
+**Gotchas handled / noted.** Task stack is 16 KB — fine for this LAN `http` HA URL
+(no TLS); a **https** base URL pulls in mbedTLS and needs ~16–20 KB+ (noted in the
+board YAML comment). Only history uses `ha_http`, so the client has a single
+consumer — no locking. Risk to confirm on-device: that ESPHome's `http_request`
+has no implicit main-task affinity when driven from the worker.
+
+**The memory wall (found on-device).** First flash with the worker created
+eagerly in `setup()` **bricked WiFi**: `abort()` in `wifi_process_event_` →
+`std::vector<WiFiScanResult>::reserve` → `operator new` → `bad_alloc`. The 16 KB
+task stack (internal RAM) had shrunk the free internal heap below what the WiFi
+scan allocator needed. Two follow-ups:
+- **Lazy creation + sync fallback.** The worker is now created on the *first
+  history open* (`ensure_history_worker_`), not at boot — so the boot/WiFi-connect
+  window keeps its heap. Stack cut 16 KB → 8 KB. If creation still fails (low
+  heap), `run_history_fetch_sync_()` runs the fetch on the main loop (blocking,
+  WDT-covered) so history degrades gracefully instead of breaking.
+- **The real disease: internal SRAM exhaustion.** Even lazily, the 8 KB task
+  wouldn't create, and `esp_http_client` failed with `HTTP -1`. A heap probe
+  (`heap_caps_get_*`, kept as a diagnostic) showed **~13 KB free internal, largest
+  block 7.7 KB** at runtime. Root cause: `lvgl: buffer_size: 25%` allocates a
+  ~115 KB draw buffer in **internal DMA RAM** (PSRAM isn't used for it). Dropping
+  it to **10%** (~46 KB) freed ~69 KB — after which the worker creates, the async
+  path runs, `HTTP -1` is gone, and a 24 h / 287-point / 97 KB fetch loads clean.
+  This is committed separately (it's a device-wide fix, not UE6-specific).
+
+**Flat-sensor anchor (found on-device).** A steady sensor (pool temp pinned at
+84°) intermittently showed "No data yet". HA's `significant_changes_only` returns
+~1 boundary point whose timestamp sits at the window start; `redraw_history_`
+recomputes `cutoff` from a slightly later `now` (the async fetch adds latency), so
+that lone sample drifted just *outside* the window and was filtered out.
+`redraw_history_`'s numeric branch now carries an **anchor** — the last value
+before the cutoff is prepended as the line's starting level (mirroring the binary
+strip), and a 1-point series is duplicated into a flat 2-point line. A flat sensor
+now always renders a flat line, fixing both the intermittency and a pre-existing
+"single value → no line at all" gap.
+
+**Verification (on-device, passed):** worker logs `history worker task started on
+core 0` and fetches run on the `[ha_hist]` task; 1h/6h/24h cycle repeatedly across
+many entities with **no reboot**; the real `lv_spinner` turns during the fetch;
+24 h / 287-point fetches load; flat sensors show a flat line every open; no
+`HTTP -1`, no `bad_alloc`. The earlier band-aid WDT was lowered 15 s → 10 s.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks
