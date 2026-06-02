@@ -39,6 +39,10 @@ Sequenced easy → hard so each lands as an independent, shippable commit:
 9. **UE9** — `readonly: true` per-entity flag that suppresses every control
    surface (service taps, confirm sheet, detail modal) while keeping view +
    plots. Pure dispatch gate; no new HA data, no new widget.
+10. **UE10** — user-editable idle timeouts (dim / blank / sleep) + reset-source
+    (touch / motion) selection in Settings, with an AMOLED burn-in warning on
+    Apply when all screen protection is disabled. Config/infra like UE6 — not a
+    widget swap. Needs a per-board `is_amoled` flag (groundwork for more boards).
 
 ---
 
@@ -654,6 +658,219 @@ without the flag are unchanged. Compiles + links clean.
   never opens for a readonly row, so they're unreachable; confirm that holds).
 - **`confirm` + `readonly` interaction** — readonly must win; add a test/inspect
   pass for a row carrying both.
+
+---
+
+## UE10 — User-editable idle timeouts + reset-source selection + burn-in guard
+
+**Status:** ⬜ not started · target tag: `ue10-screen-protection`
+
+**Why:** The dim / blank / sleep timings are baked into compile-time
+substitutions ([packages/idle.yaml:22-29](packages/idle.yaml#L22-L29)) and the
+settings sheet only *displays* them as a dead read-only label
+([ha_panel.cpp:942-946](components/ha_panel/ha_panel.cpp#L942-L946), comment:
+"read-only display — substitution-driven, no runtime edit yet"). Users can't
+retune how aggressively the panel dims, blanks, or sleeps without reflashing.
+This phase makes those three timings editable + persisted, lets the user choose
+which inputs (touch / motion) reset the screen, and — because turning all of it
+off invites AMOLED burn-in — warns on Apply when no protection is left, but only
+on boards that actually have an AMOLED panel.
+
+**Config/infra, not a widget swap** — like UE6 it leaves the "drop-in LVGL
+widget" theme. Still inside the "no HA-side changes" cross-cutting rule: pure
+on-device settings, no new states or services.
+
+**Defaults = today's hard-coded values** (so nothing changes until the user
+edits): dim after **15 s**, blank after **45 s total**, sleep after **60 s**,
+both reset sources (touch + motion) **on**, sleep **enabled**. Seed every new
+global's `initial_value` from the existing substitution so a fresh flash behaves
+exactly as it does now.
+
+**Pairs with / reuses (existing):**
+- Idle state machine substitutions + interval lambda
+  ([idle.yaml:20-41](packages/idle.yaml#L20-L41),
+  [:164-191](packages/idle.yaml#L164-L191)) — the dim/blank/sleep math to be
+  driven from globals instead of `${...}`.
+- `notify_input` script ([idle.yaml:96](packages/idle.yaml#L96)) and its two call
+  sites: touch `on_touch`
+  ([waveshare-2.16.yaml:191-198](boards/waveshare-2.16.yaml#L191-L198)) and IMU
+  `on_press` ([waveshare-2.16.yaml:136-138](boards/waveshare-2.16.yaml#L136-L138))
+  — the reset-source gate sits here.
+- The **sleep settings** persist+commit pattern as the exact template:
+  `set_sleep_committer` / `set_sleep_settings` / staged
+  `apply_sleep_`+`revert_sleep_`+`*_dirty_`
+  ([ha_panel.cpp:1816-1875](components/ha_panel/ha_panel.cpp#L1816-L1875),
+  wired at [ha-amoled-panel.yaml:47-55](ha-amoled-panel.yaml#L47-L55)). UE10 adds
+  parallel committers/setters the same way.
+- Brightness **slider + live value label** as the editable-control idiom
+  ([ha_panel.cpp:913-927](components/ha_panel/ha_panel.cpp#L913-L927)).
+- `confirm_sheet_` (Proceed/Cancel overlay) for the burn-in warning, and
+  `update_sleep_mode_enabled_`'s grey-when-disabled pattern
+  ([ha_panel.cpp:1833-1844](components/ha_panel/ha_panel.cpp#L1833-L1844)) for the
+  sleep-timeout control.
+
+---
+
+### Part A — make dim / blank / sleep timeouts runtime globals
+
+**Change:** Promote the three substitutions to `restore_value: yes` globals
+(mirroring `active_brightness_g` / `sleep_enabled_g`), seed each `initial_value`
+from the current substitution, and read the globals in the interval lambda.
+
+- `dim_timeout_g` (uint16_t, sec) ← `${dim_timeout_s}` = 15
+- `blank_timeout_g` (uint16_t, sec) — **store TOTAL blank time** to match the
+  UI's "Blank after N total". Seed = 45 (today's 15 + 30). Drop the additive
+  `blank_at = dim_at + ...` at [idle.yaml:174](packages/idle.yaml#L174); compute
+  `blank_at = blank_timeout_g * 1000` directly. (Decouples the two so editing
+  dim doesn't shift blank.)
+- `sleep_timeout_g` (uint16_t, sec) ← `${sleep_timeout_s}` = 60
+
+**Disable semantics:** value `0` = that tier never fires. Interval guards become
+`if (dim_g != 0 && since >= dim_at)` etc. Lets the user turn dim and/or blank
+fully off (the input to the burn-in check in Part D). Sleep already has its
+`sleep_enabled_g` master gate; `sleep_timeout_g` just sets the delay.
+
+**Validation (clamp on Apply, in the committer or `apply_timeouts_`):** when a
+tier is enabled (non-zero), keep the ordering sane — `dim ≤ blank_total ≤
+sleep`. Clamp rather than reject so the UI never wedges. Document the chosen
+min/max range (suggest 5–600 s; 0 = Never for dim/blank).
+
+Tasks:
+- [ ] Add the three globals to [idle.yaml](packages/idle.yaml#L43) (`restore_value:
+      yes`, seeded from the existing substitutions; keep the substitutions as the
+      `initial_value` source so the default literally *is* today's value).
+- [ ] Rewrite the interval lambda
+      ([idle.yaml:169-190](packages/idle.yaml#L169-L190)) to read the globals and
+      honor the `0 = disabled` guards.
+- [ ] Add `set_timeouts_committer(std::function<void(uint16_t dim, uint16_t
+      blankTotal, uint16_t sleepSec)>)` + `set_timeout_settings(dim, blankTotal,
+      sleepSec)` seeder on `HAPanel` (template: the sleep committer/setter).
+- [ ] Wire both in [ha-amoled-panel.yaml](ha-amoled-panel.yaml#L47) `on_boot`:
+      committer writes the three globals; seeder pushes the restored globals into
+      the settings controls (mirror the `set_sleep_*` block).
+
+### Part B — editable controls in the settings sheet
+
+**Change:** Replace the read-only `to_dim` label
+([ha_panel.cpp:942-946](components/ha_panel/ha_panel.cpp#L942-L946)) with three
+editable rows under the existing "Power saving & burn-in protection" heading,
+each staged like brightness (`staged_*`, `*_dirty_`, `apply_*`, `revert_*`).
+
+**DECIDE the input control (pick before coding):**
+- **Slider + live "N s" label (recommended).** Matches the brightness slider
+  already in this sheet; one `lv_slider` per timeout, value label beside it,
+  min position = `0`/"Never" for dim & blank. Lowest new-code, consistent idiom.
+- **+/- stepper buttons.** More precise for discrete seconds, but new widget
+  plumbing (two buttons + label per row) not used elsewhere here.
+- **`lv_roller`.** Compact discrete picker; UE1 already enabled `LV_USE_ROLLER`.
+  Good for a fixed value list (5/10/15/30/45/60/120/Never) but heavier to wire.
+
+Recommend the slider for parity; revisit if fingertip precision on the 480-round
+panel proves fiddly on-device.
+
+Tasks:
+- [ ] Three labeled rows: "Dim after", "Blank after (total)", "Sleep after",
+      each with the chosen control + a live seconds label (0 renders as
+      "Never" for dim/blank).
+- [ ] Grey/disable the **Sleep after** control when the existing "Sleep when
+      idle" switch is off — reuse `update_sleep_mode_enabled_`'s
+      disable+`LV_OPA_50` treatment
+      ([ha_panel.cpp:1833-1844](components/ha_panel/ha_panel.cpp#L1833-L1844)).
+- [ ] Stage edits + add `apply_timeouts_` / `revert_timeouts_` and hook them into
+      the settings Apply / Cancel handlers alongside `apply_sleep_` etc.
+
+### Part C — choose what resets the screen (touch / motion / both / none)
+
+**Change:** Two persisted bool globals gate the two `notify_input` call sites so
+the user picks which inputs un-dim/un-blank the screen.
+
+- `reset_on_touch_g` (bool, default **true**)
+- `reset_on_motion_g` (bool, default **true**)
+
+Gate by wrapping each board call site in an `if` on its global (touch `on_touch`
+→ `reset_on_touch_g`; IMU `on_press` → `reset_on_motion_g`), or split
+`notify_input` into `notify_input_touch` / `notify_input_motion` thin wrappers
+that check the gate then delegate. Either source independently selectable → all
+four combinations (both / touch / motion / none).
+
+**⚠️ Scope boundary — this is NOT the sleep-wake control.** The gate sits only at
+`notify_input`, which drives the dim/blank **idle timer**. Waking from a full
+*sleep* tier is separate hardware/IDF: deep sleep wakes on the touch INT pin
+(`deep_sleep.wakeup_pin` GPIO11,
+[waveshare-2.16.yaml:164-168](boards/waveshare-2.16.yaml#L164-L168)) and light
+sleep blocks in `ha_power::enter_light_sleep()` until a touch
+([idle.yaml:156](packages/idle.yaml#L156)). So disabling "touch resets screen"
+still lets touch wake the panel from sleep — by design, per the request ("not
+the wake from sleep option"). Call this out in the UI copy / DEVELOPMENT.md so
+it doesn't read as a bug.
+
+Tasks:
+- [ ] Add the two globals to [idle.yaml](packages/idle.yaml#L43)
+      (`restore_value: yes`, default true).
+- [ ] Gate the touch + IMU call sites in
+      [waveshare-2.16.yaml](boards/waveshare-2.16.yaml#L136) on the respective
+      global.
+- [ ] UI: two switches ("Touch wakes screen", "Motion wakes screen") in the
+      settings sheet — staged + committed via a new `set_reset_sources_committer`
+      / `set_reset_sources` pair (sleep-committer template).
+
+### Part D — AMOLED burn-in warning when all protection is off
+
+**Trigger:** On settings **Apply**, if dim is disabled (`0`) **and** blank is
+disabled (`0`) **and** sleep is disabled (`!sleep_enabled_`) — i.e. the screen
+will sit at full brightness indefinitely — **and** the board is AMOLED, show a
+confirm overlay before committing: warn about permanent burn-in, with
+**Proceed** (commit anyway) / **Cancel** (return to settings). Non-AMOLED boards
+skip the warning entirely (LCD/IPS don't burn in the same way). Reset-source
+"none" is a *separate* usability footgun (see Risks), not part of this burn-in
+gate.
+
+**AMOLED flag (per-board groundwork):** add `bool is_amoled_{false}` +
+`set_is_amoled(bool)` to `HAPanel`. The board package declares the screen type;
+forward it from `on_boot` like the other setters. Default **false** is the safe
+choice (no warning) for any future board that forgets to set it.
+- `boards/waveshare-2.16.yaml` declares `is_amoled: "true"` (it's a CO5300
+  AMOLED, [waveshare-2.16.yaml:83-86](boards/waveshare-2.16.yaml#L83-L86)).
+- A `defaults:`/top-level substitution `is_amoled: "false"` guards boards that
+  don't override it (future-board phase will set their own).
+
+Tasks:
+- [ ] Add `is_amoled_` + `set_is_amoled` to
+      [ha_panel.h](components/ha_panel/ha_panel.h#L150) / `.cpp`; forward a board
+      `${is_amoled}` substitution from
+      [ha-amoled-panel.yaml](ha-amoled-panel.yaml#L41) `on_boot`.
+- [ ] Set `is_amoled: "true"` in
+      [waveshare-2.16.yaml](boards/waveshare-2.16.yaml) (and a `"false"` default
+      so unset boards compile).
+- [ ] In the settings Apply path, detect "no protection" + `is_amoled_` and route
+      through a `confirm_sheet_` warning (reuse the confirm overlay); Proceed →
+      run the real `apply_*`; Cancel → keep the sheet open, nothing committed.
+
+**Exit criteria:** Settings sheet lets the user edit Dim-after, Blank-after-total
+and Sleep-after seconds (0 = Never for dim/blank); values persist across reboot
+and take effect live; the Sleep-after control greys out when sleep is off. Touch
+and Motion are independently selectable as screen-reset sources (both/one/none),
+persisted, and gating them does **not** affect sleep-wake. Applying with dim +
+blank + sleep all disabled pops a burn-in warning on the AMOLED board (and only
+there); Proceed commits, Cancel doesn't. Compiles + links clean; defaults match
+today's behavior with no user edits.
+
+**Risks / unknowns:**
+- **Slider precision** on a round 480 panel for a wide seconds range — the
+  recommended slider may need coarse snapping (5 s steps) or the roller fallback.
+  Tune on-device.
+- **Reset "none" footgun.** Disabling both reset sources means a dimmed/blanked
+  screen can only be revived by the sleep-wake path (or reboot) — touch won't
+  un-dim it. Not a burn-in issue, but confusing; consider a secondary
+  caution (out of this phase's required scope) or at least document it.
+- **Blank semantics migration.** Changing `blank_timeout_g` from "additional"
+  (idle.yaml's `blank_timeout_s`) to "total" must update the interval math
+  (drop the `dim_at +` add) — a silent off-by-one here shifts every blank time.
+- **`restore_value` of a re-typed global.** New globals start fresh; verify a
+  device flashed from an older build doesn't read stale NVS into the new keys
+  (use distinct global ids, not reused ones).
+- **Validation ordering.** If the user sets blank < dim (or sleep < blank), clamp
+  on Apply rather than letting the interval skip a tier silently.
 
 ---
 
