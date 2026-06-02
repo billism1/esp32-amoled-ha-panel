@@ -866,6 +866,68 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
   return btn;
 }
 
+// UE10: idle timeout sliders work in units of 5 s (a coarse step that's usable
+// on the round panel); seconds = slider value * 5, range 0..600 s. Dim/blank can
+// be 0 ("Never"); sleep's min is 1 unit (5 s) since its master toggle disables it.
+static constexpr int kTimeoutStepS = 5;
+static constexpr int kTimeoutMaxUnits = 120;  // 600 s
+
+// UE10: render a timeout's seconds as "Never" (0) / "N s" / "N min" / "Nm Ns".
+static void fmt_timeout_(char *buf, size_t n, uint16_t secs) {
+  if (secs == 0) {
+    snprintf(buf, n, "Never");
+  } else if (secs >= 60) {
+    uint16_t m = secs / 60, r = secs % 60;
+    if (r == 0)
+      snprintf(buf, n, "%u min", (unsigned) m);
+    else
+      snprintf(buf, n, "%um %us", (unsigned) m, (unsigned) r);
+  } else {
+    snprintf(buf, n, "%u s", (unsigned) secs);
+  }
+}
+
+// UE10: build one "Label ............ value" line + a full-width slider beneath
+// it inside the settings content column. min_units = 0 lets the slider reach
+// "Never" (dim/blank); 1 keeps sleep at ≥5 s. Returns the slider + value label.
+static void add_timeout_row(lv_obj_t *parent, const char *label_text,
+                            int min_units, uint16_t secs, lv_event_cb_t cb,
+                            void *ud, lv_obj_t **out_slider, lv_obj_t **out_value) {
+  lv_obj_t *row = lv_obj_create(parent);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_width(row, LV_PCT(100));
+  lv_obj_set_height(row, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *lbl = lv_label_create(row);
+  lv_label_set_text(lbl, label_text);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+
+  lv_obj_t *val = lv_label_create(row);
+  char buf[24];
+  fmt_timeout_(buf, sizeof(buf), secs);
+  lv_label_set_text(val, buf);
+  lv_obj_set_style_text_color(val, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(val, &lv_font_montserrat_18, 0);
+
+  lv_obj_t *sl = lv_slider_create(parent);
+  lv_obj_set_width(sl, LV_PCT(100));
+  lv_obj_set_height(sl, 22);
+  lv_slider_set_range(sl, min_units, kTimeoutMaxUnits);
+  int units = (int) secs / kTimeoutStepS;
+  if (units < min_units) units = min_units;
+  if (units > kTimeoutMaxUnits) units = kTimeoutMaxUnits;
+  lv_slider_set_value(sl, units, LV_ANIM_OFF);
+  lv_obj_add_event_cb(sl, cb, LV_EVENT_VALUE_CHANGED, ud);
+
+  *out_slider = sl;
+  *out_value = val;
+}
+
 void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
   // E1: full-screen overlay sheet (built once, hidden) replacing the old
   // settings tileview tile. Same lifecycle as detail_modal_ / confirm_sheet_:
@@ -939,12 +1001,70 @@ void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
   lv_obj_set_style_text_color(pwr_title, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_style_text_font(pwr_title, &lv_font_montserrat_18, 0);
 
-  // Timeouts (read-only display — substitution-driven, no runtime edit yet).
-  lv_obj_t *to_dim = lv_label_create(content);
-  lv_label_set_text(to_dim, "Dim after 15 s\nBlank after 45 s total");
-  lv_obj_set_style_text_color(to_dim, lv_color_hex(0xAAAAAA), 0);
-  lv_obj_set_style_text_font(to_dim, &lv_font_montserrat_18, 0);
+  // ---- Screen reset sources (UE10) ----
+  // Which inputs un-dim the screen / reset the idle timer. These GATE the dim +
+  // blank timeouts below: with neither source on, a dimmed/blanked screen could
+  // never recover, so dim/blank are suppressed entirely (the screen stays awake)
+  // and their sliders grey out. NOT the sleep-wake control — a touch still wakes
+  // the panel from the deep/light sleep tier regardless of these.
+  lv_obj_t *reset_caption = lv_label_create(content);
+  lv_label_set_text(reset_caption,
+                    "What un-dims the screen (gates dim/blank).\n"
+                    "Sleep still wakes on touch.");
+  lv_obj_set_style_text_color(reset_caption, lv_color_hex(0x888888), 0);
+  lv_obj_set_style_text_font(reset_caption, &lv_font_montserrat_18, 0);
 
+  // Touch reset switch.
+  lv_obj_t *rtouch_row = lv_obj_create(content);
+  lv_obj_remove_style_all(rtouch_row);
+  lv_obj_set_width(rtouch_row, LV_PCT(100));
+  lv_obj_set_height(rtouch_row, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(rtouch_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(rtouch_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(rtouch_row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t *rtouch_lbl = lv_label_create(rtouch_row);
+  lv_label_set_text(rtouch_lbl, "Touch resets screen");
+  lv_obj_set_style_text_color(rtouch_lbl, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(rtouch_lbl, &lv_font_montserrat_18, 0);
+  this->reset_touch_switch_ = lv_switch_create(rtouch_row);
+  if (this->reset_on_touch_)
+    lv_obj_add_state(this->reset_touch_switch_, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(this->reset_touch_switch_, &HAPanel::on_reset_touch_switch_,
+                      LV_EVENT_VALUE_CHANGED, this);
+
+  // Motion reset switch.
+  lv_obj_t *rmotion_row = lv_obj_create(content);
+  lv_obj_remove_style_all(rmotion_row);
+  lv_obj_set_width(rmotion_row, LV_PCT(100));
+  lv_obj_set_height(rmotion_row, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(rmotion_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(rmotion_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(rmotion_row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t *rmotion_lbl = lv_label_create(rmotion_row);
+  lv_label_set_text(rmotion_lbl, "Motion resets screen");
+  lv_obj_set_style_text_color(rmotion_lbl, lv_color_hex(0xAAAAAA), 0);
+  lv_obj_set_style_text_font(rmotion_lbl, &lv_font_montserrat_18, 0);
+  this->reset_motion_switch_ = lv_switch_create(rmotion_row);
+  if (this->reset_on_motion_)
+    lv_obj_add_state(this->reset_motion_switch_, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(this->reset_motion_switch_, &HAPanel::on_reset_motion_switch_,
+                      LV_EVENT_VALUE_CHANGED, this);
+
+  // ---- Dim / blank timeouts (gated by the reset sources above) ----
+  // UE10: editable idle timeouts (replaces the old read-only label). Each is a
+  // 5 s-step slider 0..600 s with a live seconds label; dim/blank reach "Never".
+  // Greyed when neither reset source is on (an unrecoverable screen otherwise).
+  add_timeout_row(content, "Dim after", 0, this->dim_timeout_,
+                  &HAPanel::on_timeout_slider_, this,
+                  &this->dim_timeout_slider_, &this->dim_timeout_label_);
+  add_timeout_row(content, "Blank after (total)", 0, this->blank_timeout_,
+                  &HAPanel::on_timeout_slider_, this,
+                  &this->blank_timeout_slider_, &this->blank_timeout_label_);
+  this->update_timeouts_enabled_();
+
+  // ---- Sleep ----
   // Master toggle row: label left, lv_switch right.
   lv_obj_t *sleep_row = lv_obj_create(content);
   lv_obj_remove_style_all(sleep_row);
@@ -974,6 +1094,14 @@ void HAPanel::build_settings_sheet_(lv_obj_t *scr) {
                            this->sleep_mode_ == 1 ? 1 : 0);
   lv_obj_add_event_cb(this->sleep_mode_dropdown_, &HAPanel::on_sleep_mode_dropdown_,
                       LV_EVENT_VALUE_CHANGED, this);
+
+  // UE10: Sleep-after delay (greyed with the mode dropdown when sleep is off).
+  // min_units = 1 so it can't be dragged to 0 — sleep is toggled off via the
+  // switch above, not by a zero delay.
+  add_timeout_row(content, "Sleep after", 1, this->sleep_timeout_,
+                  &HAPanel::on_timeout_slider_, this,
+                  &this->sleep_timeout_slider_, &this->sleep_timeout_label_);
+  // Greys both the mode dropdown and the sleep-after slider per the master toggle.
   this->update_sleep_mode_enabled_();
 
   // ---- Sound ----
@@ -1420,12 +1548,12 @@ void HAPanel::build_ui_() {
   // fires when the initial state already matches.
   this->update_blink_timer_();
 
-  // One-shot 7 s watchdog: if the splash stages haven't passed by then (API
+  // One-shot 10 s watchdog: if the splash stages haven't passed by then (API
   // still not connected), explain the slow stage and drop the splash so the
   // app loads while reconnection keeps running. Cancelled in set_api_connected
   // if the link comes up first.
   this->splash_timeout_timer_ =
-      lv_timer_create(&HAPanel::splash_timeout_cb_, 7000, this);
+      lv_timer_create(&HAPanel::splash_timeout_cb_, 10000, this);
   lv_timer_set_repeat_count(this->splash_timeout_timer_, 1);
 }
 
@@ -1831,15 +1959,26 @@ void HAPanel::set_sleep_settings(bool enabled, uint8_t mode) {
 }
 
 void HAPanel::update_sleep_mode_enabled_() {
-  if (this->sleep_mode_dropdown_ == nullptr)
-    return;
-  // Mode is irrelevant when the master toggle is off — disable + dim it.
-  if (this->staged_sleep_enabled_) {
-    lv_obj_remove_state(this->sleep_mode_dropdown_, LV_STATE_DISABLED);
-    lv_obj_set_style_text_opa(this->sleep_mode_dropdown_, LV_OPA_COVER, 0);
-  } else {
-    lv_obj_add_state(this->sleep_mode_dropdown_, LV_STATE_DISABLED);
-    lv_obj_set_style_text_opa(this->sleep_mode_dropdown_, LV_OPA_50, 0);
+  // Mode + sleep-after delay are irrelevant when the master toggle is off —
+  // disable + dim both. UE10 added the sleep-after slider to this gate.
+  const bool on = this->staged_sleep_enabled_;
+  if (this->sleep_mode_dropdown_ != nullptr) {
+    if (on) {
+      lv_obj_remove_state(this->sleep_mode_dropdown_, LV_STATE_DISABLED);
+      lv_obj_set_style_text_opa(this->sleep_mode_dropdown_, LV_OPA_COVER, 0);
+    } else {
+      lv_obj_add_state(this->sleep_mode_dropdown_, LV_STATE_DISABLED);
+      lv_obj_set_style_text_opa(this->sleep_mode_dropdown_, LV_OPA_50, 0);
+    }
+  }
+  if (this->sleep_timeout_slider_ != nullptr) {
+    if (on) {
+      lv_obj_remove_state(this->sleep_timeout_slider_, LV_STATE_DISABLED);
+      lv_obj_set_style_opa(this->sleep_timeout_slider_, LV_OPA_COVER, 0);
+    } else {
+      lv_obj_add_state(this->sleep_timeout_slider_, LV_STATE_DISABLED);
+      lv_obj_set_style_opa(this->sleep_timeout_slider_, LV_OPA_50, 0);
+    }
   }
 }
 
@@ -1872,6 +2011,207 @@ void HAPanel::revert_sleep_() {
   this->sleep_dirty_ = false;
   ESP_LOGI(TAG, "sleep reverted to enabled=%d mode=%u",
            (int) this->sleep_enabled_, (unsigned) this->sleep_mode_);
+}
+
+// ---------- UE10 idle timeouts + reset sources (staged like sleep) ----------
+
+void HAPanel::update_timeout_label_(uint8_t idx) {
+  lv_obj_t *lbl = nullptr;
+  uint16_t secs = 0;
+  switch (idx) {
+    case 0: lbl = this->dim_timeout_label_;   secs = this->staged_dim_timeout_;   break;
+    case 1: lbl = this->blank_timeout_label_; secs = this->staged_blank_timeout_; break;
+    case 2: lbl = this->sleep_timeout_label_; secs = this->staged_sleep_timeout_; break;
+    default: return;
+  }
+  if (lbl == nullptr)
+    return;
+  char buf[24];
+  fmt_timeout_(buf, sizeof(buf), secs);
+  lv_label_set_text(lbl, buf);
+}
+
+void HAPanel::update_timeouts_enabled_() {
+  // Dim + blank only make sense if something can un-dim the screen. With neither
+  // reset source staged on, they're suppressed at runtime (see the idle interval
+  // gate) — grey their sliders to match.
+  const bool on = this->staged_reset_on_touch_ || this->staged_reset_on_motion_;
+  lv_obj_t *sliders[2] = {this->dim_timeout_slider_, this->blank_timeout_slider_};
+  lv_obj_t *labels[2] = {this->dim_timeout_label_, this->blank_timeout_label_};
+  for (int i = 0; i < 2; i++) {
+    if (sliders[i] != nullptr) {
+      if (on) {
+        lv_obj_remove_state(sliders[i], LV_STATE_DISABLED);
+        lv_obj_set_style_opa(sliders[i], LV_OPA_COVER, 0);
+      } else {
+        lv_obj_add_state(sliders[i], LV_STATE_DISABLED);
+        lv_obj_set_style_opa(sliders[i], LV_OPA_50, 0);
+      }
+    }
+    if (labels[i] != nullptr)
+      lv_obj_set_style_text_opa(labels[i], on ? LV_OPA_COVER : LV_OPA_50, 0);
+  }
+}
+
+void HAPanel::set_timeout_settings(uint16_t dim, uint16_t blank_total, uint16_t sleep_s) {
+  this->dim_timeout_ = dim;
+  this->blank_timeout_ = blank_total;
+  this->sleep_timeout_ = sleep_s;
+  this->staged_dim_timeout_ = dim;
+  this->staged_blank_timeout_ = blank_total;
+  this->staged_sleep_timeout_ = sleep_s;
+  this->timeouts_dirty_ = false;
+  // Push the restored values into the sliders + labels (guarded: setup() may
+  // build the sheet before or after this boot seeder runs).
+  if (this->dim_timeout_slider_ != nullptr)
+    lv_slider_set_value(this->dim_timeout_slider_, dim / kTimeoutStepS, LV_ANIM_OFF);
+  if (this->blank_timeout_slider_ != nullptr)
+    lv_slider_set_value(this->blank_timeout_slider_, blank_total / kTimeoutStepS, LV_ANIM_OFF);
+  if (this->sleep_timeout_slider_ != nullptr) {
+    int u = sleep_s / kTimeoutStepS;
+    if (u < 1) u = 1;
+    lv_slider_set_value(this->sleep_timeout_slider_, u, LV_ANIM_OFF);
+  }
+  this->update_timeout_label_(0);
+  this->update_timeout_label_(1);
+  this->update_timeout_label_(2);
+}
+
+void HAPanel::apply_timeouts_() {
+  if (!this->timeouts_dirty_)
+    return;
+  uint16_t dim = this->staged_dim_timeout_;
+  uint16_t blank = this->staged_blank_timeout_;
+  uint16_t sleep = this->staged_sleep_timeout_;
+  // Clamp the dim ≤ blank ≤ sleep ordering for enabled tiers (0 = disabled for
+  // dim/blank, skipped in the comparison). Clamp rather than reject so the UI
+  // can't wedge into an impossible order.
+  if (dim != 0 && blank != 0 && blank < dim)
+    blank = dim;
+  if (blank != 0) {
+    if (sleep < blank) sleep = blank;
+  } else if (dim != 0 && sleep < dim) {
+    sleep = dim;
+  }
+  if (sleep < kTimeoutStepS)
+    sleep = kTimeoutStepS;  // sleep always has a positive delay
+  this->dim_timeout_ = dim;
+  this->blank_timeout_ = blank;
+  this->sleep_timeout_ = sleep;
+  // Reflect any clamp back into the staged values + UI so a later Cancel reverts
+  // to the committed (clamped) state, not the pre-clamp slider position.
+  this->staged_dim_timeout_ = dim;
+  this->staged_blank_timeout_ = blank;
+  this->staged_sleep_timeout_ = sleep;
+  if (this->dim_timeout_slider_ != nullptr)
+    lv_slider_set_value(this->dim_timeout_slider_, dim / kTimeoutStepS, LV_ANIM_OFF);
+  if (this->blank_timeout_slider_ != nullptr)
+    lv_slider_set_value(this->blank_timeout_slider_, blank / kTimeoutStepS, LV_ANIM_OFF);
+  if (this->sleep_timeout_slider_ != nullptr)
+    lv_slider_set_value(this->sleep_timeout_slider_, sleep / kTimeoutStepS, LV_ANIM_OFF);
+  this->update_timeout_label_(0);
+  this->update_timeout_label_(1);
+  this->update_timeout_label_(2);
+  if (this->timeouts_committer_)
+    this->timeouts_committer_(dim, blank, sleep);
+  this->timeouts_dirty_ = false;
+  ESP_LOGI(TAG, "timeouts applied: dim=%u blank=%u sleep=%u",
+           (unsigned) dim, (unsigned) blank, (unsigned) sleep);
+}
+
+void HAPanel::revert_timeouts_() {
+  if (!this->timeouts_dirty_)
+    return;
+  this->staged_dim_timeout_ = this->dim_timeout_;
+  this->staged_blank_timeout_ = this->blank_timeout_;
+  this->staged_sleep_timeout_ = this->sleep_timeout_;
+  if (this->dim_timeout_slider_ != nullptr)
+    lv_slider_set_value(this->dim_timeout_slider_, this->dim_timeout_ / kTimeoutStepS, LV_ANIM_OFF);
+  if (this->blank_timeout_slider_ != nullptr)
+    lv_slider_set_value(this->blank_timeout_slider_, this->blank_timeout_ / kTimeoutStepS, LV_ANIM_OFF);
+  if (this->sleep_timeout_slider_ != nullptr)
+    lv_slider_set_value(this->sleep_timeout_slider_, this->sleep_timeout_ / kTimeoutStepS, LV_ANIM_OFF);
+  this->update_timeout_label_(0);
+  this->update_timeout_label_(1);
+  this->update_timeout_label_(2);
+  this->timeouts_dirty_ = false;
+  ESP_LOGI(TAG, "timeouts reverted");
+}
+
+void HAPanel::set_reset_sources(bool touch, bool motion) {
+  this->reset_on_touch_ = touch;
+  this->reset_on_motion_ = motion;
+  this->staged_reset_on_touch_ = touch;
+  this->staged_reset_on_motion_ = motion;
+  this->reset_sources_dirty_ = false;
+  if (this->reset_touch_switch_ != nullptr) {
+    if (touch)
+      lv_obj_add_state(this->reset_touch_switch_, LV_STATE_CHECKED);
+    else
+      lv_obj_remove_state(this->reset_touch_switch_, LV_STATE_CHECKED);
+  }
+  if (this->reset_motion_switch_ != nullptr) {
+    if (motion)
+      lv_obj_add_state(this->reset_motion_switch_, LV_STATE_CHECKED);
+    else
+      lv_obj_remove_state(this->reset_motion_switch_, LV_STATE_CHECKED);
+  }
+  this->update_timeouts_enabled_();
+}
+
+void HAPanel::apply_reset_sources_() {
+  if (!this->reset_sources_dirty_)
+    return;
+  this->reset_on_touch_ = this->staged_reset_on_touch_;
+  this->reset_on_motion_ = this->staged_reset_on_motion_;
+  if (this->reset_sources_committer_)
+    this->reset_sources_committer_(this->reset_on_touch_, this->reset_on_motion_);
+  this->reset_sources_dirty_ = false;
+  ESP_LOGI(TAG, "reset sources applied: touch=%d motion=%d",
+           (int) this->reset_on_touch_, (int) this->reset_on_motion_);
+}
+
+void HAPanel::revert_reset_sources_() {
+  if (!this->reset_sources_dirty_)
+    return;
+  this->staged_reset_on_touch_ = this->reset_on_touch_;
+  this->staged_reset_on_motion_ = this->reset_on_motion_;
+  if (this->reset_touch_switch_ != nullptr) {
+    if (this->reset_on_touch_)
+      lv_obj_add_state(this->reset_touch_switch_, LV_STATE_CHECKED);
+    else
+      lv_obj_remove_state(this->reset_touch_switch_, LV_STATE_CHECKED);
+  }
+  if (this->reset_motion_switch_ != nullptr) {
+    if (this->reset_on_motion_)
+      lv_obj_add_state(this->reset_motion_switch_, LV_STATE_CHECKED);
+    else
+      lv_obj_remove_state(this->reset_motion_switch_, LV_STATE_CHECKED);
+  }
+  this->update_timeouts_enabled_();
+  this->reset_sources_dirty_ = false;
+  ESP_LOGI(TAG, "reset sources reverted");
+}
+
+bool HAPanel::staged_protection_all_off_() const {
+  // No reset source → dim/blank are suppressed (they'd be unrecoverable), and
+  // sleep can't reach the blank tier it enters from → the screen sits at full
+  // brightness indefinitely. That's a burn-in risk regardless of the slider
+  // values, so treat it as "no protection".
+  if (!this->staged_reset_on_touch_ && !this->staged_reset_on_motion_)
+    return true;
+  // A reset source exists → protection is off only when every tier is disabled.
+  return this->staged_dim_timeout_ == 0 && this->staged_blank_timeout_ == 0 &&
+         !this->staged_sleep_enabled_;
+}
+
+void HAPanel::commit_settings_() {
+  this->apply_brightness_();
+  this->apply_sleep_();
+  this->apply_sound_();
+  this->apply_timeouts_();
+  this->apply_reset_sources_();
+  this->close_settings_();
 }
 
 void HAPanel::set_sound_on_press(bool on) {
@@ -2185,10 +2525,14 @@ void HAPanel::on_apply_clicked_(lv_event_t *e) {
   auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
   if (self == nullptr)
     return;
-  self->apply_brightness_();
-  self->apply_sleep_();
-  self->apply_sound_();
-  self->close_settings_();  // E1: Apply commits then closes the sheet.
+  // UE10: warn before committing a config that leaves the screen at full
+  // brightness forever (dim + blank + sleep all off) on a burn-in-prone AMOLED.
+  // Proceed → commit; Cancel → back to settings, nothing committed.
+  if (self->is_amoled_ && self->staged_protection_all_off_()) {
+    self->open_burnin_warning_();
+    return;
+  }
+  self->commit_settings_();  // E1: Apply commits then closes the sheet.
 }
 
 void HAPanel::on_cancel_clicked_(lv_event_t *e) {
@@ -2198,6 +2542,8 @@ void HAPanel::on_cancel_clicked_(lv_event_t *e) {
   self->revert_brightness_();
   self->revert_sleep_();
   self->revert_sound_();
+  self->revert_timeouts_();
+  self->revert_reset_sources_();
   self->close_settings_();  // E1: Cancel reverts then closes the sheet.
 }
 
@@ -2248,6 +2594,67 @@ void HAPanel::on_sleep_mode_dropdown_(lv_event_t *e) {
   self->sleep_dirty_ =
       (self->staged_sleep_enabled_ != self->sleep_enabled_) ||
       (self->staged_sleep_mode_ != self->sleep_mode_);
+}
+
+void HAPanel::on_timeout_slider_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  lv_obj_t *sl = lv_event_get_target_obj(e);
+  // seconds = slider units * 5 (coarse step). Route to the matching staged value
+  // + label by which of the three sliders fired.
+  uint16_t secs = (uint16_t)(lv_slider_get_value(sl) * kTimeoutStepS);
+  uint8_t idx;
+  if (sl == self->dim_timeout_slider_) {
+    self->staged_dim_timeout_ = secs;
+    idx = 0;
+  } else if (sl == self->blank_timeout_slider_) {
+    self->staged_blank_timeout_ = secs;
+    idx = 1;
+  } else if (sl == self->sleep_timeout_slider_) {
+    self->staged_sleep_timeout_ = secs;
+    idx = 2;
+  } else {
+    return;
+  }
+  self->update_timeout_label_(idx);
+  self->timeouts_dirty_ =
+      (self->staged_dim_timeout_ != self->dim_timeout_) ||
+      (self->staged_blank_timeout_ != self->blank_timeout_) ||
+      (self->staged_sleep_timeout_ != self->sleep_timeout_);
+}
+
+void HAPanel::on_reset_touch_switch_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->reset_touch_switch_ == nullptr)
+    return;
+  self->staged_reset_on_touch_ =
+      lv_obj_has_state(self->reset_touch_switch_, LV_STATE_CHECKED);
+  self->reset_sources_dirty_ =
+      (self->staged_reset_on_touch_ != self->reset_on_touch_) ||
+      (self->staged_reset_on_motion_ != self->reset_on_motion_);
+  self->update_timeouts_enabled_();  // both-off greys dim/blank
+}
+
+void HAPanel::on_reset_motion_switch_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr || self->reset_motion_switch_ == nullptr)
+    return;
+  self->staged_reset_on_motion_ =
+      lv_obj_has_state(self->reset_motion_switch_, LV_STATE_CHECKED);
+  self->reset_sources_dirty_ =
+      (self->staged_reset_on_touch_ != self->reset_on_touch_) ||
+      (self->staged_reset_on_motion_ != self->reset_on_motion_);
+  self->update_timeouts_enabled_();  // both-off greys dim/blank
+}
+
+void HAPanel::on_burnin_proceed_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  // User accepted the burn-in risk → close the warning and commit for real.
+  self->close_confirm_();
+  self->commit_settings_();
 }
 
 // ---------- P7d detail modal ----------
@@ -3780,6 +4187,37 @@ void HAPanel::close_confirm_() {
   lv_obj_add_flag(this->confirm_sheet_, LV_OBJ_FLAG_HIDDEN);
   this->confirm_open_ = false;
   ESP_LOGD(TAG, "confirm close");
+}
+
+void HAPanel::open_burnin_warning_() {
+  // UE10: reuse the confirm overlay for the burn-in warning — warning text + a
+  // single Proceed button. The sheet's own bottom Cancel (on_confirm_cancel_ →
+  // close_confirm_) and bg-tap return to the still-open settings sheet beneath
+  // without committing anything.
+  if (this->confirm_sheet_ == nullptr) {
+    this->commit_settings_();  // no overlay to show → don't block the user
+    return;
+  }
+  lv_label_set_text(this->confirm_title_, "Burn-in warning");
+  if (this->confirm_unavail_label_ != nullptr)
+    lv_obj_add_flag(this->confirm_unavail_label_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clean(this->confirm_body_);
+
+  lv_obj_t *msg = add_section_label(
+      this->confirm_body_,
+      "Dim, blank and sleep are all\noff. The screen will stay at\nfull "
+      "brightness and can\npermanently burn in. Continue?",
+      0xDDAA33);
+  lv_obj_set_width(msg, 384);
+  lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
+
+  add_confirm_button(this->confirm_body_, "Proceed anyway", 0x553A2A, 0xFFFFFF,
+                     &HAPanel::on_burnin_proceed_, this, true);
+
+  lv_obj_clear_flag(this->confirm_sheet_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(this->confirm_sheet_);
+  this->confirm_open_ = true;
+  ESP_LOGI(TAG, "burn-in warning shown");
 }
 
 void HAPanel::fire_confirm_service_(const char *service) {

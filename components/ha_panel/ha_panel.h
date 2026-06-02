@@ -157,6 +157,21 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   }
   // Seed the settings-tile sleep controls from the boot-restored globals.
   void set_sleep_settings(bool enabled, uint8_t mode);
+  // UE10: commit the persisted idle-timeout globals (dim / blank-total / sleep,
+  // all seconds) on Apply, and seed the settings-sheet sliders from the
+  // boot-restored globals. Same committer/seeder split as sleep.
+  void set_timeouts_committer(std::function<void(uint16_t, uint16_t, uint16_t)> committer) {
+    this->timeouts_committer_ = std::move(committer);
+  }
+  void set_timeout_settings(uint16_t dim, uint16_t blank_total, uint16_t sleep_s);
+  // UE10: commit + seed the screen-reset-source toggles (touch / motion).
+  void set_reset_sources_committer(std::function<void(bool, bool)> committer) {
+    this->reset_sources_committer_ = std::move(committer);
+  }
+  void set_reset_sources(bool touch, bool motion);
+  // UE10: per-board AMOLED flag. true → the settings sheet warns about burn-in
+  // when all screen protection is disabled. Default false (safe for LCD/IPS).
+  void set_is_amoled(bool amoled) { this->is_amoled_ = amoled; }
   void set_clock_text(const std::string &text);
   void set_api_connected(bool connected);
   // E2: Wi-Fi link state, fed by wifi on_connect/on_disconnect. ESPHome
@@ -286,7 +301,30 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void apply_sleep_();
   void revert_sleep_();
   // Grey out the mode dropdown when the master toggle is off (mode irrelevant).
+  // UE10: also greys the sleep-timeout slider (same trigger).
   void update_sleep_mode_enabled_();
+  // UE10: stage / commit / revert the three idle-timeout sliders + the two
+  // reset-source switches (same dirty-flag recipe as sleep). apply_timeouts_
+  // clamps the dim ≤ blank ≤ sleep ordering before committing.
+  void apply_timeouts_();
+  void revert_timeouts_();
+  void apply_reset_sources_();
+  void revert_reset_sources_();
+  // UE10: refresh a timeout slider's seconds label ("Never" at 0). idx selects
+  // 0=dim, 1=blank, 2=sleep.
+  void update_timeout_label_(uint8_t idx);
+  // UE10: grey the dim + blank sliders when neither reset source is staged on —
+  // dim/blank are suppressed in that case (an unrecoverable screen otherwise).
+  void update_timeouts_enabled_();
+  // UE10: true when the staged settings leave NO screen protection (dim off,
+  // blank off, sleep off) — the burn-in-warning trigger on an AMOLED board.
+  bool staged_protection_all_off_() const;
+  // UE10: run every apply_* and close the settings sheet. Called directly on
+  // Apply, or after the user accepts the burn-in warning.
+  void commit_settings_();
+  // UE10: raise the burn-in confirm overlay (reuses confirm_sheet_) before
+  // committing an all-protection-off config on an AMOLED board.
+  void open_burnin_warning_();
   // Touch click sound: stage / commit / revert the toggle (same dirty-flag
   // recipe as sleep). play_click_ pushes the precomputed PCM to the speaker.
   void apply_sound_();
@@ -406,6 +444,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // P8 sleep controls.
   static void on_sleep_switch_(lv_event_t *e);
   static void on_sleep_mode_dropdown_(lv_event_t *e);
+  // UE10 settings controls.
+  static void on_timeout_slider_(lv_event_t *e);
+  static void on_reset_touch_switch_(lv_event_t *e);
+  static void on_reset_motion_switch_(lv_event_t *e);
+  static void on_burnin_proceed_(lv_event_t *e);
   // Touch click sound toggle.
   static void on_sound_switch_(lv_event_t *e);
   static void on_detail_apply_clicked_(lv_event_t *e);
@@ -489,6 +532,16 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // P8 settings-tile sleep controls.
   lv_obj_t *sleep_switch_{nullptr};
   lv_obj_t *sleep_mode_dropdown_{nullptr};
+  // UE10 settings-sheet idle-timeout sliders + their live seconds labels.
+  lv_obj_t *dim_timeout_slider_{nullptr};
+  lv_obj_t *dim_timeout_label_{nullptr};
+  lv_obj_t *blank_timeout_slider_{nullptr};
+  lv_obj_t *blank_timeout_label_{nullptr};
+  lv_obj_t *sleep_timeout_slider_{nullptr};
+  lv_obj_t *sleep_timeout_label_{nullptr};
+  // UE10 reset-source switches.
+  lv_obj_t *reset_touch_switch_{nullptr};
+  lv_obj_t *reset_motion_switch_{nullptr};
   std::vector<lv_obj_t *> tile_objs_;            // [page_idx]
   // P7c: per-entity right-side widget — lv_switch for binaries, lv_label
   // for everything else. Renamed from badges_by_entity_ since it's no longer
@@ -523,6 +576,28 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   bool staged_sleep_enabled_{true};
   uint8_t staged_sleep_mode_{0};
   bool sleep_dirty_{false};
+  // UE10 idle timeouts (seconds). *_committed mirror the persisted globals;
+  // staged_* track the live sliders; timeouts_dirty_ flips on edit. blank is
+  // stored as TOTAL no-input time (not additive on dim). Defaults match the
+  // YAML substitution seeds so a fresh boot is unchanged until the user edits.
+  std::function<void(uint16_t, uint16_t, uint16_t)> timeouts_committer_;
+  uint16_t dim_timeout_{15};
+  uint16_t blank_timeout_{45};
+  uint16_t sleep_timeout_{60};
+  uint16_t staged_dim_timeout_{15};
+  uint16_t staged_blank_timeout_{45};
+  uint16_t staged_sleep_timeout_{60};
+  bool timeouts_dirty_{false};
+  // UE10 screen-reset sources (touch / motion), persisted + staged like sleep.
+  std::function<void(bool, bool)> reset_sources_committer_;
+  bool reset_on_touch_{true};
+  bool reset_on_motion_{true};
+  bool staged_reset_on_touch_{true};
+  bool staged_reset_on_motion_{true};
+  bool reset_sources_dirty_{false};
+  // UE10 per-board AMOLED flag (set from the board's ${is_amoled} substitution).
+  // Gates the burn-in warning. Default false = no warning (safe for LCD/IPS).
+  bool is_amoled_{false};
   // Touch click sound. sound_on_press_ mirrors the persisted global;
   // staged_* tracks the switch; sound_dirty_ flips on edit, cleared on
   // Apply / revert. Default off.

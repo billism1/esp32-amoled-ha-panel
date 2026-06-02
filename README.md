@@ -66,6 +66,16 @@ behaviour live in shared, board-agnostic packages.
 - QMI8658 IMU for motion-based wake (pick-up detection).
 - Idle state machine: `active → dim → blank → sleep`, with wake on touch / IMU
   motion (from dim/blank) or touch / button (from sleep).
+- **User-editable idle timeouts** — dim-after, blank-after (total), and
+  sleep-after are sliders in the settings sheet (persisted across reboot; "Never"
+  disables dim/blank). No reflash needed to retune how aggressively the panel
+  saves power.
+- **Selectable reset sources** — choose whether touch, motion, both, or neither
+  un-dims the screen (idle-timer reset only; a touch still wakes the panel from
+  full sleep regardless). Turning both off **disables dim/blank** (the screen
+  stays awake) so it can never strand itself with no way to recover.
+- **AMOLED burn-in warning** — turning off all screen protection (dim + blank +
+  sleep) prompts a confirmation before applying, on AMOLED boards only.
 - Power-saving sleep (battery-critical): **light sleep** (Wi-Fi off, RAM kept,
   instant UI resume, the default) or **deep sleep** (max battery, cold-boot wake),
   selectable in settings, or off entirely for always-connected use.

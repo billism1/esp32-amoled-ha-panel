@@ -663,7 +663,16 @@ without the flag are unchanged. Compiles + links clean.
 
 ## UE10 — User-editable idle timeouts + reset-source selection + burn-in guard
 
-**Status:** ⬜ not started · target tag: `ue10-screen-protection`
+**Status:** 🧪 code complete — compile + on-device validation pending · target tag:
+`ue10-screen-protection`
+
+**Decisions taken:** slider control (5 s steps, 0–600 s; 0 = "Never" for dim/blank;
+sleep min 5 s). `is_amoled` is declared **board-only** (`waveshare-2.16.yaml` =
+`"true"`); the main YAML references `${is_amoled}` and the C++ default is `false`,
+so a future board that forgets the substitution gets the safe no-warning path
+(top-level default omitted on purpose — ESPHome main-file substitutions override
+package ones, which would have inverted the board's value). Sleep stays gated on
+the blank tier (enter from `s == 2`), preserving P8 exactly.
 
 **Why:** The dim / blank / sleep timings are baked into compile-time
 substitutions ([packages/idle.yaml:22-29](packages/idle.yaml#L22-L29)) and the
@@ -736,16 +745,18 @@ sleep`. Clamp rather than reject so the UI never wedges. Document the chosen
 min/max range (suggest 5–600 s; 0 = Never for dim/blank).
 
 Tasks:
-- [ ] Add the three globals to [idle.yaml](packages/idle.yaml#L43) (`restore_value:
+- [x] Add the three globals to [idle.yaml](packages/idle.yaml#L43) (`restore_value:
       yes`, seeded from the existing substitutions; keep the substitutions as the
       `initial_value` source so the default literally *is* today's value).
-- [ ] Rewrite the interval lambda
+      `blank_timeout_g` seeded `${dim_timeout_s} + ${blank_timeout_s}` = 45 total.
+- [x] Rewrite the interval lambda
       ([idle.yaml:169-190](packages/idle.yaml#L169-L190)) to read the globals and
-      honor the `0 = disabled` guards.
-- [ ] Add `set_timeouts_committer(std::function<void(uint16_t dim, uint16_t
+      honor the `0 = disabled` guards; evaluated deepest-first so a disabled dim
+      jumps active→blank.
+- [x] Add `set_timeouts_committer(std::function<void(uint16_t dim, uint16_t
       blankTotal, uint16_t sleepSec)>)` + `set_timeout_settings(dim, blankTotal,
       sleepSec)` seeder on `HAPanel` (template: the sleep committer/setter).
-- [ ] Wire both in [ha-amoled-panel.yaml](ha-amoled-panel.yaml#L47) `on_boot`:
+- [x] Wire both in [ha-amoled-panel.yaml](ha-amoled-panel.yaml#L47) `on_boot`:
       committer writes the three globals; seeder pushes the restored globals into
       the settings controls (mirror the `set_sleep_*` block).
 
@@ -769,15 +780,15 @@ Recommend the slider for parity; revisit if fingertip precision on the 480-round
 panel proves fiddly on-device.
 
 Tasks:
-- [ ] Three labeled rows: "Dim after", "Blank after (total)", "Sleep after",
-      each with the chosen control + a live seconds label (0 renders as
-      "Never" for dim/blank).
-- [ ] Grey/disable the **Sleep after** control when the existing "Sleep when
+- [x] Three labeled rows: "Dim after", "Blank after (total)", "Sleep after",
+      each with a 5 s-step slider + a live seconds label (0 renders as
+      "Never" for dim/blank; sleep min 5 s).
+- [x] Grey/disable the **Sleep after** control when the existing "Sleep when
       idle" switch is off — reuse `update_sleep_mode_enabled_`'s
-      disable+`LV_OPA_50` treatment
-      ([ha_panel.cpp:1833-1844](components/ha_panel/ha_panel.cpp#L1833-L1844)).
-- [ ] Stage edits + add `apply_timeouts_` / `revert_timeouts_` and hook them into
+      disable+`LV_OPA_50` treatment (extended to the sleep-after slider).
+- [x] Stage edits + add `apply_timeouts_` / `revert_timeouts_` and hook them into
       the settings Apply / Cancel handlers alongside `apply_sleep_` etc.
+      `apply_timeouts_` clamps `dim ≤ blank ≤ sleep` on commit.
 
 ### Part C — choose what resets the screen (touch / motion / both / none)
 
@@ -805,14 +816,15 @@ the wake from sleep option"). Call this out in the UI copy / DEVELOPMENT.md so
 it doesn't read as a bug.
 
 Tasks:
-- [ ] Add the two globals to [idle.yaml](packages/idle.yaml#L43)
+- [x] Add the two globals to [idle.yaml](packages/idle.yaml#L43)
       (`restore_value: yes`, default true).
-- [ ] Gate the touch + IMU call sites in
+- [x] Gate the touch + IMU call sites in
       [waveshare-2.16.yaml](boards/waveshare-2.16.yaml#L136) on the respective
-      global.
-- [ ] UI: two switches ("Touch wakes screen", "Motion wakes screen") in the
-      settings sheet — staged + committed via a new `set_reset_sources_committer`
-      / `set_reset_sources` pair (sleep-committer template).
+      global (wrapped each `script.execute: notify_input` in an `if:` lambda).
+- [x] UI: two switches ("Touch resets screen", "Motion resets screen") + a
+      caption ("Sleep still wakes on touch") in the settings sheet — staged +
+      committed via a new `set_reset_sources_committer` / `set_reset_sources`
+      pair (sleep-committer template).
 
 ### Part D — AMOLED burn-in warning when all protection is off
 
@@ -835,16 +847,19 @@ choice (no warning) for any future board that forgets to set it.
   don't override it (future-board phase will set their own).
 
 Tasks:
-- [ ] Add `is_amoled_` + `set_is_amoled` to
-      [ha_panel.h](components/ha_panel/ha_panel.h#L150) / `.cpp`; forward a board
+- [x] Add `is_amoled_` + `set_is_amoled` to
+      [ha_panel.h](components/ha_panel/ha_panel.h#L150) / `.cpp`; forward the board
       `${is_amoled}` substitution from
       [ha-amoled-panel.yaml](ha-amoled-panel.yaml#L41) `on_boot`.
-- [ ] Set `is_amoled: "true"` in
-      [waveshare-2.16.yaml](boards/waveshare-2.16.yaml) (and a `"false"` default
-      so unset boards compile).
-- [ ] In the settings Apply path, detect "no protection" + `is_amoled_` and route
-      through a `confirm_sheet_` warning (reuse the confirm overlay); Proceed →
-      run the real `apply_*`; Cancel → keep the sheet open, nothing committed.
+- [x] Set `is_amoled: "true"` in
+      [waveshare-2.16.yaml](boards/waveshare-2.16.yaml). Declared **board-only**
+      (no top-level default) so it resolves unambiguously; the C++ `false` default
+      covers a future board that omits it (a top-level default would override the
+      board because main-file substitutions win in ESPHome).
+- [x] In the settings Apply path, detect "no protection" + `is_amoled_` and route
+      through the `confirm_sheet_` warning (`open_burnin_warning_`); Proceed
+      (`on_burnin_proceed_`) → `commit_settings_`; Cancel / bg-tap → back to the
+      settings sheet, nothing committed.
 
 **Exit criteria:** Settings sheet lets the user edit Dim-after, Blank-after-total
 and Sleep-after seconds (0 = Never for dim/blank); values persist across reboot

@@ -69,6 +69,41 @@ globals:
     type: uint8_t
     restore_value: yes
     initial_value: "0"
+  # UE10: user-editable idle timeouts (seconds), persisted. Seeded from the
+  # existing substitutions so a fresh flash behaves exactly as before. The
+  # settings sheet edits these via the ha_panel timeouts committer; the interval
+  # lambda below reads them instead of the compile-time ${...} values.
+  #   dim_timeout_g   — no-input seconds before dimming. 0 = never dim.
+  #   blank_timeout_g — TOTAL no-input seconds before fully blanking (NOT additive
+  #                     on top of dim, unlike the old ${blank_timeout_s}). Seed =
+  #                     dim + blank = today's effective 45 s. 0 = never blank.
+  #   sleep_timeout_g — no-input seconds before the sleep tier (gated by
+  #                     sleep_enabled_g). Always > 0; the master toggle disables it.
+  - id: dim_timeout_g
+    type: uint16_t
+    restore_value: yes
+    initial_value: ${dim_timeout_s}
+  - id: blank_timeout_g
+    type: uint16_t
+    restore_value: yes
+    initial_value: "${dim_timeout_s} + ${blank_timeout_s}"
+  - id: sleep_timeout_g
+    type: uint16_t
+    restore_value: yes
+    initial_value: ${sleep_timeout_s}
+  # UE10: which inputs un-dim/un-blank the screen (the idle timer reset), each
+  # persisted + independently selectable. NOTE: these gate ONLY notify_input (the
+  # dim/blank idle timer) — they do NOT affect waking from the deeper *sleep*
+  # tier, which is hardware (touch INT / deep-sleep wake pin). So turning "touch
+  # resets screen" off still lets a touch wake the panel from sleep, by design.
+  - id: reset_on_touch_g
+    type: bool
+    restore_value: yes
+    initial_value: "true"
+  - id: reset_on_motion_g
+    type: bool
+    restore_value: yes
+    initial_value: "true"
   # Touch click sound: play a short low click on a registered tap (not a swipe).
   # Edited via the settings sheet (ha_panel sound committer); read at boot to
   # seed the toggle. Default off.
@@ -170,21 +205,40 @@ interval:
           const uint32_t now = millis();
           const uint32_t since = now - id(idle_last_input_ms);
           const int s = id(idle_state);
-          const uint32_t dim_at   = (uint32_t) ${dim_timeout_s} * 1000UL;
-          const uint32_t blank_at = dim_at + (uint32_t) ${blank_timeout_s} * 1000UL;
-          // P8: sleep_at is measured from last input (not from blank). Must be
-          // after blank_at for the tiers to make sense; 60 s > 45 s by default.
-          const uint32_t sleep_at = (uint32_t) ${sleep_timeout_s} * 1000UL;
+          // UE10: timeouts are runtime globals now (seconds). blank_timeout_g is
+          // the TOTAL no-input time before blank (not additive on dim), so it's
+          // used directly. 0 = that tier disabled.
+          const uint16_t dim_g   = id(dim_timeout_g);
+          const uint16_t blank_g = id(blank_timeout_g);
+          const uint32_t dim_at   = (uint32_t) dim_g   * 1000UL;
+          const uint32_t blank_at = (uint32_t) blank_g * 1000UL;
+          // P8: sleep_at is measured from last input. Sleep only fires once the
+          // screen has blanked (s == 2), so it stays after blank by construction.
+          const uint32_t sleep_at = (uint32_t) id(sleep_timeout_g) * 1000UL;
           // Arm sleep once API has connected and we're past the OTA window.
           if (!id(sleep_armed) && id(idle_api_connected) &&
               now >= (uint32_t) ${sleep_arm_uptime_s} * 1000UL) {
             id(sleep_armed) = true;
           }
-          if (s == 0 && since >= dim_at) {
-            id(enter_dim).execute();
-          } else if (s == 1 && since >= blank_at) {
+          // UE10: dim/blank only apply if SOMETHING can un-dim the screen. With
+          // neither reset source on, a dimmed/blanked screen could never recover
+          // (notify_input is gated off at both call sites), so suppress the whole
+          // idle machine and keep the screen active — and force it back to active
+          // if a prior state left it dimmed/blanked. (Sleep is unreachable then
+          // too, since it enters only from the blank tier; the settings burn-in
+          // warning covers the resulting always-on screen on AMOLED.)
+          if (!(id(reset_on_touch_g) || id(reset_on_motion_g))) {
+            if (s != 0)
+              id(enter_active).execute();
+            return;
+          }
+          // Tiers evaluated deepest-first so a disabled earlier tier is skipped:
+          // e.g. dim off + blank 45 jumps active→blank straight at 45 s.
+          if (s == 2) {
+            if (since >= sleep_at && id(sleep_enabled_g) && id(sleep_armed))
+              id(enter_sleep).execute();
+          } else if (blank_g != 0 && since >= blank_at) {
             id(enter_blank).execute();
-          } else if (s == 2 && since >= sleep_at &&
-                     id(sleep_enabled_g) && id(sleep_armed)) {
-            id(enter_sleep).execute();
+          } else if (s == 0 && dim_g != 0 && since >= dim_at) {
+            id(enter_dim).execute();
           }

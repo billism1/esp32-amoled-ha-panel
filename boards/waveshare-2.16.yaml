@@ -20,6 +20,12 @@ substitutions:
   # controller garbage (pink) showing through at the edges.
   disp_width: "480"
   disp_height: "480"
+  # UE10: this board is a CO5300 AMOLED, so it is burn-in prone — the settings
+  # sheet shows a burn-in warning when all screen protection is turned off.
+  # Future LCD/IPS boards set "false" (their own package) so the warning is
+  # skipped. Defined here (board-only) so ${is_amoled} resolves unambiguously;
+  # the C++ default is false, the safe choice for any board that forgets it.
+  is_amoled: "true"
 
 esphome:
   platformio_options:
@@ -135,7 +141,14 @@ qmi8658:
     internal: true
     on_press:
       then:
-        - script.execute: notify_input
+        # UE10: motion resets the idle timer only when the user enabled it as a
+        # reset source. (Does not affect sleep-wake — motion can't wake sleep on
+        # this board anyway; the IMU INT isn't routed.)
+        - if:
+            condition:
+              lambda: "return id(reset_on_motion_g);"
+            then:
+              - script.execute: notify_input
 
 # --- PMU: AXP2101 (P7b — header battery icon) ---
 # Read-only VBAT via the averaged 14-bit voltage register. Sensor is internal
@@ -195,7 +208,14 @@ touchscreen:
           // Click-sound gesture tracking: mark the press start. ha_panel decides
           // tap-vs-swipe on release and plays the click only for a tap.
           id(ha_panel_id).touch_pressed(touch.x, touch.y);
-      - script.execute: notify_input
+      # UE10: touch resets the idle timer only when enabled as a reset source.
+      # (Independent of sleep-wake: a touch still wakes the panel from the sleep
+      # tier via the GPIO11 INT / deep-sleep wake pin even when this is off.)
+      - if:
+          condition:
+            lambda: "return id(reset_on_touch_g);"
+          then:
+            - script.execute: notify_input
     on_update:
       - lambda: |-
           if (!touches.empty())

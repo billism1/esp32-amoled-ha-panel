@@ -2860,6 +2860,98 @@ many entities with **no reboot**; the real `lv_spinner` turns during the fetch;
 
 ---
 
+### Phase UE10 — User-editable idle timeouts + reset sources + burn-in guard
+
+**Status:** code complete; compile + on-device validation pending.
+
+**Outcome:** the dim / blank / sleep idle timings, baked into compile-time
+substitutions before, are now **runtime-editable + persisted** from the settings
+sheet, the user can pick which inputs (touch / motion) reset the idle timer, and
+an AMOLED-only **burn-in warning** fires on Apply when all screen protection is
+turned off. Config/infra, like UE6 — no widget swap, no HA-side change.
+
+**Part A — timeouts as globals.** Three `restore_value: yes` `uint16_t` globals
+(`dim_timeout_g` / `blank_timeout_g` / `sleep_timeout_g`, seconds) replace the
+`${dim/blank/sleep_timeout_s}` reads in the idle interval lambda. Each
+`initial_value` is seeded from the old substitution so a fresh flash is
+byte-identical to before; `blank_timeout_g` is seeded `${dim_timeout_s} +
+${blank_timeout_s}` = 45 and now stores the **TOTAL** no-input time to blank (the
+old additive `blank_at = dim_at + …` is gone), so editing dim no longer shifts
+blank. `0` disables a tier (dim/blank). The tick evaluates tiers **deepest-first**
+(`s==2`→sleep, else blank, else dim) so a disabled dim jumps active→blank cleanly.
+Sleep still enters only from the blank tier (`s==2`), preserving P8 exactly.
+
+**Part B — editable controls.** The old read-only "Dim after 15 s / Blank after
+45 s total" label is replaced by three labeled **5 s-step sliders** (0–600 s) with
+live seconds labels ("Never" at 0 for dim/blank; sleep min 5 s). Sliders work in
+units of 5 s (`value * 5 = seconds`) — a coarse step that's usable on the round
+panel. Staged like brightness/sleep (`staged_*` + `timeouts_dirty_` +
+`apply_timeouts_`/`revert_timeouts_`), wired into the existing settings
+Apply/Cancel. `apply_timeouts_` **clamps** `dim ≤ blank ≤ sleep` on commit
+(skipping disabled tiers) and reflects the clamp back into the sliders so Cancel
+reverts to the committed state. The "Sleep after" slider greys with the mode
+dropdown when "Sleep when idle" is off (`update_sleep_mode_enabled_` extended).
+
+**Part C — reset sources.** Two persisted bool globals (`reset_on_touch_g` /
+`reset_on_motion_g`, default true) gate the two `notify_input` call sites (touch
+`on_touch`, IMU `on_press`) by wrapping each `script.execute` in an `if:` lambda.
+Two settings switches ("Touch resets screen" / "Motion resets screen") + a caption
+edit them via `set_reset_sources_committer` / `set_reset_sources`. The switches are
+grouped *before* the dim/blank sliders because they **gate** them (see below).
+**Scope boundary:** this gates only the dim/blank idle timer, NOT sleep-wake — a
+touch still wakes the panel from the sleep tier via the GPIO11 INT / deep-sleep
+wake pin even with "Touch resets screen" off. Called out in the UI caption + the
+YAML comments so it doesn't read as a bug. (Note: the touch click-sound gesture
+tracking still runs unconditionally — only the idle reset is gated.)
+
+**Reset sources gate dim/blank (stuck-screen fix).** A dimmed/blanked screen can
+only recover via `notify_input` (or sleep-wake). With *both* reset sources off,
+`notify_input` never fires — so a config that still dimmed/blanked would strand
+the screen black until reboot. Fix: dim/blank now **only apply when ≥1 reset
+source is on**. The idle interval early-returns when neither is set, forcing the
+screen back to active (`enter_active`) if a prior state left it dimmed/blanked and
+suppressing all tiers. In the UI, `update_timeouts_enabled_` greys the dim + blank
+sliders whenever neither reset switch is staged on, and the burn-in trigger
+(`staged_protection_all_off_`) now returns true for "both resets off" too — since
+the screen then sits at full brightness forever (sleep is unreachable without the
+blank tier). So the previously-possible stuck-black screen is gone, and the
+always-on screen it's replaced with is caught by the AMOLED warning.
+
+**Part D — burn-in guard.** New `is_amoled_` flag + `set_is_amoled`, fed from a
+board `${is_amoled}` substitution (waveshare = `"true"`). On Apply, if the screen
+would sit at full brightness forever — (dim==0 && blank==0 && sleep off) **or**
+both reset sources off — **and** `is_amoled_`, `open_burnin_warning_` raises the
+existing `confirm_sheet_` with a
+warning + a "Proceed anyway" button (`on_burnin_proceed_` → `commit_settings_`);
+the sheet's own Cancel / bg-tap returns to the still-open settings sheet,
+uncommitted. Non-AMOLED boards skip it (LCD/IPS don't burn in). `commit_settings_`
+centralizes the full apply sequence so both the direct-Apply and post-warning
+paths commit identically.
+
+**`is_amoled` precedence decision.** Declared **board-only** (no top-level
+default). ESPHome main-file substitutions override package ones, so a top-level
+`is_amoled: "false"` default would have *inverted* the board's `"true"` — the
+plan's suggested top-level default was dropped. `${is_amoled}` thus resolves
+unambiguously from the board; a future board that forgets it gets a clean codegen
+error, and the C++ `is_amoled_{false}` default is the ultimate safe fallback.
+
+**Known corner (documented, not fixed):** with sleep gated on the blank tier, a
+config of dim=0 + blank=0 + sleep *enabled* never reaches blank, so it never
+sleeps despite sleep being on. Not a regression (timeouts weren't editable
+before) and not a burn-in case (the warning only fires when sleep is also off).
+Keeping blank ≥ 5 s avoids it.
+
+**Verification (pending on-device):** edit each slider and confirm the timing
+takes effect live + survives reboot; toggle touch/motion reset independently and
+confirm a dimmed screen un-dims only from the enabled source while a touch still
+wakes it from sleep; turn **both** reset sources off and confirm the dim/blank
+sliders grey out, the screen no longer dims (stays active), and the burn-in
+warning pops on the AMOLED; disable all three tiers and confirm the warning pops,
+Proceed commits, Cancel doesn't; confirm defaults match today's behavior with no
+edits.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks

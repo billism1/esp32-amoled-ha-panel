@@ -53,6 +53,29 @@ esphome:
             });
             id(ha_panel_id).set_sleep_settings(id(sleep_enabled_g),
                                                id(power_saver_mode_g));
+            // UE10: idle timeouts — committer writes the three persisted globals
+            // on Apply; set_timeout_settings seeds the settings-sheet sliders
+            // from the restored values at boot. blank is stored TOTAL.
+            id(ha_panel_id).set_timeouts_committer(
+                [](uint16_t dim, uint16_t blank_total, uint16_t sleep_s) {
+                  id(dim_timeout_g) = dim;
+                  id(blank_timeout_g) = blank_total;
+                  id(sleep_timeout_g) = sleep_s;
+                });
+            id(ha_panel_id).set_timeout_settings(id(dim_timeout_g),
+                                                 id(blank_timeout_g),
+                                                 id(sleep_timeout_g));
+            // UE10: screen-reset sources (touch / motion) — same commit/seed pair.
+            id(ha_panel_id).set_reset_sources_committer([](bool touch, bool motion) {
+              id(reset_on_touch_g) = touch;
+              id(reset_on_motion_g) = motion;
+            });
+            id(ha_panel_id).set_reset_sources(id(reset_on_touch_g),
+                                              id(reset_on_motion_g));
+            // UE10: per-board AMOLED flag — gates the burn-in warning. The board
+            // package declares ${is_amoled}; default-false in C++ for any board
+            // that forgets to.
+            id(ha_panel_id).set_is_amoled(${is_amoled});
             // Touch click sound: hand ha_panel the speaker, the commit hook for
             // the persisted global, and the boot-restored toggle value.
             id(ha_panel_id).set_speaker(id(click_speaker));
