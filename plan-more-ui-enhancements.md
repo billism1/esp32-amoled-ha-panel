@@ -43,6 +43,21 @@ Sequenced easy → hard so each lands as an independent, shippable commit:
     (touch / motion) selection in Settings, with an AMOLED burn-in warning on
     Apply when all screen protection is disabled. Config/infra like UE6 — not a
     widget swap. Needs a per-board `is_amoled` flag (groundwork for more boards).
+11. **UE11** — page-picker badges: each page declares one `picker_badge:` (lights
+    on, devices on, open doors, unlocked, offline, motion, low battery, room
+    temp/humidity/power, alarm/severity dot, …) shown as icon+value right of the
+    page name in the picker. Computed fresh on `open_picker_()` (no live wiring).
+    No new widget, no new HA data for the config-free types. Per-page config
+    resolves the one-slot question; shares its count/aggregate helper with UE12,
+    and the device_class types depend on UE7.
+12. **UE12** — report rows: a synthetic "entity" that renders a *computed
+    aggregate* over the panel's other entities (lights on / off, totals per
+    domain, min / max / avg of a sensor group, open-door / low-battery / offline
+    summaries, panel self-diagnostics) instead of one HA state. Rides the
+    existing entity-row pipeline (new `RenderClass`, recomputed from `on_state_`),
+    so it reuses `make_entity_row` + `rebuild_entity_row_` + `size:`. Aggregating
+    only over panel-known entities keeps it inside the "no new HA data" rule; an
+    all-HA count is a flagged follow-up.
 
 ---
 
@@ -886,6 +901,411 @@ today's behavior with no user edits.
   (use distinct global ids, not reused ones).
 - **Validation ordering.** If the user sets blank < dim (or sleep < blank), clamp
   on Apply rather than letting the interval skip a tier silently.
+
+---
+
+## UE11 — Page-picker count badges
+
+**Status:** ⬜ not started · target tag: `ue11-picker-badges`
+
+**Why:** The page picker
+([build_ui_:1484-1502](components/ha_panel/ha_panel.cpp#L1484-L1502)) lists page
+names only — to know "is anything on over there" the user has to open each page.
+A small count + icon to the right of each page name ("🔆 3" = three lights on)
+turns the picker into an at-a-glance house overview. Cheapest item in this plan:
+no new widget (so no UE1 build-config work), no new HA data, and — because the
+picker is a transient modal — no live update path.
+
+**Cheap because the picker is built-once and shown on demand.** The picker is a
+hidden overlay (`picker_`) built once in `build_ui_`; tapping the header calls
+[open_picker_()](components/ha_panel/ha_panel.cpp#L1560), which just clears the
+HIDDEN flag and raises it. That open call is the **only** recompute point needed
+— counts are computed fresh each time the picker is shown, so there's no
+`on_state_` wiring and no per-frame cost. Entity states are already current at
+open time (API subscriptions stay live whether or not the picker is visible), so
+no fetch is required.
+
+**Config/UI polish, no HA-side change** — badges aggregate only over panel-known
+entities, the same v1 scope as UE12-A.
+
+**Design: per-page config — the page declares its badge.** Each page picks **one**
+badge via a new page-level `picker_badge:` key (default omitted = no badge, so
+existing configs render unchanged — same opt-in convention as `size` / `confirm`
+/ `realtime`). Per-page selection sidesteps the "one slot, which metric wins"
+problem entirely: a Living-Room page shows lights-on, a security page shows
+open-doors, a server page shows offline-count — each page's most useful glance.
+
+`picker_badge:` accepts either a bare **type name** or a block when a type takes
+parameters:
+
+```yaml
+pages:
+  - name: "Living Room"
+    picker_badge: lights_on            # bare form
+    entities: [ ... ]
+  - name: "Climate"
+    picker_badge: { type: temperature, agg: avg }   # block form (params)
+    entities: [ ... ]
+  - name: "Batteries"
+    picker_badge: { type: low_battery, threshold: 20 }
+    entities: [ ... ]
+```
+
+### Badge-type menu (the selectable values)
+
+Grouped by data requirement, because that sets which ship in v1. Each renders as
+**icon + short value**, hidden when the value is 0 / empty (configurable per type).
+
+**Config-free — domain + state only (v1):**
+- `lights_on` — `light` in `on` → 🔆 N
+- `devices_on` — switch / fan / input_boolean (rest of `BINARY_SWITCH`) in `on` → 🔌 N
+- `unlocked` — `lock` not `locked` → 🔓 N
+- `open_covers` — `cover` not `closed` → ▤ N
+- `media_playing` — `media_player` == `playing` → ▶ N
+- `climate_active` — `climate` state ≠ `off` → 🔥 N
+- `running` — `script` / `automation` `on`, active `timer` → ⏱ N
+- `offline` — matched entity `unavailable` / `unknown` → ⚠ N
+- `entities` — total entities on the page (no state filter) → N
+
+**Needs `device_class` (depends on UE7's connect-time attr subscription — flag it;
+leaves the strict no-new-data line exactly as UE12's device_class types do):**
+- `open_doors` — binary_sensor `door` / `window` / `garage_door` = `on` → 🚪 N
+- `motion` — binary_sensor `motion` / `occupancy` / `presence` = `on` → 👣 N
+- `low_battery` — `battery` device_class below `threshold:` (default 20) → 🔋 N
+- `alarm` — `smoke` / `moisture` / `co` / `gas` / `problem` / `safety` = `on` →
+  🔴 (red **presence dot**, no number)
+
+**Numeric aggregate — env value (needs numeric parse; `device_class` to pick the
+right sensor):**
+- `temperature` — `agg:` avg | min | max of temp sensors → 🌡 22°
+- `humidity` — avg humidity → 💧 45%
+- `power` — sum of power sensors → ⚡ 1.2kW (`unit:` override)
+- `co2` / `aqi` — value, or over-`threshold:` flag
+
+**Composite (collapse many signals to one glyph):**
+- `severity` — OR(`alarm`, `open_doors`, `offline`) → red / amber / none dot, no
+  number. The "anything wrong over there?" badge.
+- `idle` — ✓ when nothing on / open (calm-state indicator)
+
+v1 ships the **config-free** group + the schema for the rest; `device_class` and
+numeric types light up once UE7's `device_class` subscription / UE12's
+filter+aggregation helper land (sequencing note below). An unknown
+`picker_badge:` value is a **compile-time error** (strict `cv.one_of`, like
+`size`), so a typo can't silently no-op.
+
+**Pairs with / reuses (existing):**
+- Picker row build loop
+  ([:1484-1502](components/ha_panel/ha_panel.cpp#L1484-L1502)) — each row already
+  stores its page index in `user_data` and maps to `pages_[pi].entity_indices`.
+- [open_picker_()](components/ha_panel/ha_panel.cpp#L1560) — the recompute hook.
+- `Entity::domain` + `Entity::state` for the predicate; the `BINARY_SWITCH`
+  domain group (light/switch/fan/input_boolean); `state_to_value_` for numeric agg.
+- MDI glyph font (`mdi_lv_font`) + `resolve_icon_` domain defaults for the badge
+  icon — bulb/lock/etc are already in the baked subset (new glyphs may need
+  `tools/build-mdi-glyphs.py`).
+- **UE12's `{domains, device_class, match_state}` filter + aggregation helper** —
+  badge types are the same computation as UE12 reports over a different surface.
+  Whichever phase lands first owns the helper; the other calls it (don't fork two
+  count paths).
+- **UE7's `device_class` subscription** — prerequisite for the device_class group.
+
+**Change:** Add a page-level `picker_badge:` config → a `PickerBadge` spec on
+`Page` (type enum + optional agg/threshold/unit). In the picker row loop add a
+right-aligned badge `lv_label` per row (store handles in a `picker_badges_`
+vector). Add `update_picker_badges_()` that, for each page, evaluates its badge
+spec over `pages_[pi].entity_indices`, sets the icon+value text (or hides it),
+and call it from the top of `open_picker_()`.
+
+Tasks:
+- [ ] **Config plumbing.** Add `CONF_PICKER_BADGE` + a `PICKER_BADGE_SCHEMA`
+      (`cv.Any(cv.one_of(*BADGE_TYPES), block{type, agg, threshold, unit})`) to
+      [__init__.py](components/ha_panel/__init__.py), at **page** level in
+      `PAGE_SCHEMA` (not entity level). Emit `set_page_badge(pi, spec)` /
+      extend `add_page`. Mirror the `CONF_SIZE` enum + doc-comment style; the
+      `BADGE_TYPES` list here is the validation source of truth.
+- [ ] **Model.** `enum class BadgeType` + a small `PickerBadge` struct on the
+      `Page` struct ([ha_panel.h](components/ha_panel/ha_panel.h#L105-L108)).
+- [ ] **Badge widget.** In the picker row loop create the badge `lv_label`
+      right-aligned (`LV_ALIGN_RIGHT_MID`, ~-12 x), store in
+      `std::vector<lv_obj_t*> picker_badges_`. Give the page-name label a right
+      margin / ellipsize so a long name can't overlap the badge.
+- [ ] **Evaluator.** `update_picker_badges_()`: per page, dispatch on `BadgeType`
+      over `entity_indices` (count / numeric-agg / severity), format `icon + value`,
+      colour per type (neutral counts; amber active; red alarm/severity; green
+      `idle`), hide on 0/empty. Reuse the UE12 helper if present, else a local
+      switch (refactor when UE12 lands — note the divergence in DEVELOPMENT.md).
+- [ ] **Hook.** Call `update_picker_badges_()` at the top of `open_picker_()`
+      before the unhide, so every open reflects current state.
+- [ ] **Docs (enumerate the selectable types where users look — see Docs below).**
+
+**Docs to update (so the available badge types are discoverable):**
+- [ ] **`packages/ha-entities.example.yaml`** — the canonical schema doc. Add a
+      `# Page picker badges (UE11): ...` block in the top comment listing **every**
+      `picker_badge:` value + the bare-vs-block forms + params (agg / threshold /
+      unit) + the default (omitted = none), and add a live `picker_badge:` line to
+      one of the example pages. This is where README already points users for "the
+      full schema and inline docs."
+- [ ] **`README.md`** — (1) a **Navigation & UI** Features bullet
+      ([README.md:84-95](README.md#L84-L95)) noting per-page picker badges; (2) the
+      **Defining your pages** inline YAML example
+      ([README.md:241-255](README.md#L241-L255)) gains a page-level `picker_badge:`
+      line with a one-line comment; keep the exhaustive list in the example file
+      (README points there at [:257-258](README.md#L257-L258)).
+- [ ] **`components/ha_panel/__init__.py`** — the `BADGE_TYPES` enum + a
+      doc-comment above `CONF_PICKER_BADGE` listing the types (developer-facing;
+      doubles as the compile-time validation that rejects unknown values).
+- [ ] **`DEVELOPMENT.md`** — phase log entry with the badge-type table + the
+      per-page-config decision + the UE7/UE12 helper-sharing note (per the
+      cross-cutting "update DEVELOPMENT.md as each item ships" rule).
+
+**Exit criteria:** A page can declare `picker_badge: <type>`; opening the picker
+shows that page's icon+value to the right of its name, computed live (correct on
+every open), hidden when zero/empty, and not overlapping long names. All
+config-free types work in v1; device_class / numeric types either work (if UE7 /
+UE12 helpers are in) or are clearly gated. An unknown `picker_badge:` value fails
+at compile time. Pages with no `picker_badge:` show no badge and render exactly as
+today. Every selectable type is documented in `ha-entities.example.yaml` (+ the
+README pointer). Compiles + links clean.
+
+**Risks / unknowns:**
+- **Row width on the 480-round panel.** Page name (left) + badge (right) on a
+  460 px row; long names collide. Right-align the badge, ellipsize / margin the
+  name. One badge per page (the per-page-config model already enforces this).
+- **Colour semantics.** Counts are informational, not alarms — keep `*_on` /
+  `entities` / env neutral; reserve red for `alarm` / `severity` / `offline`,
+  green for `idle` (same trap flagged in UE4 / UE7 / UE12).
+- **device_class / numeric types are gated on UE7 + UE12.** Don't promise the full
+  menu in the first commit — ship config-free types, schema-validate the rest, and
+  enable them as the shared helpers land. Document which are live.
+- **Stale if shown indefinitely.** Badges refresh on open only; fine for a
+  transient modal. If a persistent picker is ever wanted, drive
+  `update_picker_badges_()` from `on_state_` guarded on `!picker hidden`.
+- **Helper drift vs UE12.** Shipping before UE12 with a local evaluator risks two
+  count paths — make the later refactor actually collapse them.
+- **Glyph coverage.** Some badge icons (door, motion, battery, leak) may not be in
+  the current baked MDI subset; add them via `tools/build-mdi-glyphs.py` or fall
+  back to a generic glyph.
+
+---
+
+## UE12 — Report rows (computed aggregates as a row type)
+
+**Status:** ⬜ not started · target tag: `ue12-report-rows`
+
+**Why:** Every row today maps to exactly one HA entity
+([build_ui_ row loop](components/ha_panel/ha_panel.cpp#L1373-L1404) walks
+`pages_[pi].entity_indices` → one `make_entity_row` per entity). There is no way
+to show a *summary* of many entities at once — "how many lights are on", "is
+anything still open", "what's the warmest room". Those are exactly the
+glance-value lines a wall panel wants at the top of a page. UE12 adds a **report
+row**: a row whose text is computed locally by scanning the entities the panel
+already subscribes to, with no extra HA state and no new widget — it reuses the
+read-only text row verbatim.
+
+**This is config + a render class, not a widget swap.** It introduces no new
+LVGL widget type (so no UE1-style build-config work); it adds a new
+`RenderClass` and a small aggregation pass. Like the other items it stays inside
+the **"no HA-side changes"** rule for v1 (see the data-universe DECIDE below).
+
+---
+
+### Step 1 — DECIDE the data universe (do this first)
+
+A report can only aggregate over states the panel actually has. Pick the scope:
+
+- **A — panel-known entities only (LEAN / recommended, config-free).** Aggregate
+  over `entities_` — everything already listed under any page's `entities:`. No
+  new subscription, no new HA data, fits the cross-cutting rule exactly. "Lights
+  on" = lights *you put on the panel*, which for a wall panel is usually the
+  intended set anyway. **Pick this for v1.** Limitation: it can't count lights
+  you never added as rows.
+- **A′ — A + track-only entities (small extension).** Let a report declare its
+  own `entities:` / `filter:` that get **subscribed but not rendered as rows**
+  (added to `entities_`, never pushed to a page's `entity_indices`). Bridges A's
+  gap — count things you don't want as visible rows — still no HA-side change,
+  just more `subscribe_homeassistant_state` calls. **Watch the connect-time TX
+  burst** (the P7d/P7e saturation lesson); keep the track-only set small.
+- **B — all HA entities of a domain (out of v1).** True "count *every* light in
+  HA" needs a new data source: an HA template sensor exposing the counts, or a
+  REST `/api/states` scan on the UE6 worker. This **leaves the no-new-HA-data
+  scope** (same boundary UE7/UE10 flagged). Defer; note it as the follow-up.
+
+**Decision:** ship **A** (optionally A′ if a real need appears); B is a separate,
+flagged phase.
+
+### Step 2 — DECIDE the row model
+
+A report is **not** an HA entity, but it should look and lay out like a row.
+Cleanest path that reuses the most code:
+
+- **Synthetic entity (recommended).** Represent a report as an `Entity` with a
+  reserved `domain == "report"` and a new `RenderClass::REPORT_TEXT`. Its
+  `state` field holds the *computed* string; it has no HA subscription. It slots
+  straight into `entity_indices` → the `build_ui_` loop → `make_entity_row`, so
+  it inherits row geometry, `size:`, the icon column, press/no-press styling for
+  free — mirroring how UE5's LED and UE8's sparkline rode existing row plumbing.
+  `rebuild_entity_row_`'s text/colour path renders it; a new
+  `recompute_reports_()` fills `state` before the rebuild.
+- *Rejected:* a separate `reports:` list / separate widget — more plumbing,
+  loses row reuse, and the user asked for these to live "on rows on a page".
+
+### Step 3 — the report-type menu (what a report can compute)
+
+This is the menu of `type:`s. **v1** = the user's core ask (counts) plus the
+cheap high-value status/aggregate ones; the rest are flagged as follow-ups so the
+schema is designed once to fit them.
+
+**Counts & status** (over filtered entities):
+- `count` *(v1)* — N entities matching `{domains[], device_class, match_state[]}`.
+  Covers the whole original ask: **lights on** (`domains:[light]
+  match_state:[on]`), **lights off**, **total entities** (no filter), **total
+  light entities** (`domains:[light]`), **total X-type** (any domain/class).
+  Optional `show_total: true` renders **"3 / 5"** (matched / in-scope).
+- `bool` *(v1)* — collapses a count to a glance flag with colour: **"All lights
+  off ✓"** (green) vs **"2 on"** (accent), **"All closed"** vs **"1 open"**
+  (amber). This is where colour belongs (see the colour-semantics risk).
+- `offline` *(v1, high value)* — count of matched entities whose state is
+  `unavailable`/`unknown`. Surfaces a dead Zigbee/Wi-Fi device or a broken
+  integration at a glance. Pure config-free win.
+- `security` *(follow-up)* — composite "house secure": doors/windows
+  (binary_sensor `door`/`window`/`garage_door` = on), locks unlocked, covers
+  open → one red/green line. Leans on the UE7 `device_class` classifier.
+- `active` *(follow-up)* — motion/occupancy/presence currently detecting.
+
+**Numeric aggregates** (over numeric `sensor`s in the filter):
+- `sum` *(v1)* — e.g. **total power draw (W)** across power sensors, **energy
+  today (kWh)**. Carries a `unit:`; skips non-numeric / unavailable samples.
+- `avg` / `min` / `max` *(v1 for `min`/`max`/`avg`)* — **average indoor temp**;
+  **warmest / coldest room**. `show_source: true` appends the extreme entity's
+  name ("Warmest: Office 24°") — uses `friendly_name`, already stored.
+- `low_battery` *(follow-up)* — lowest battery % + count below a `threshold:`
+  ("2 low ≤20%"). Great maintenance glance; needs `device_class: battery`.
+
+**Activity / time** (slightly out of strict no-new-data, flag each):
+- `last_changed` *(follow-up)* — most-recently-changed matched entity + ago
+  ("Last: Front door 2m"). Needs a `last_changed` timestamp the panel doesn't
+  track today; flag like UE7's `device_class`.
+
+**Panel self-diagnostics** (zero HA dependency — the panel's *own* state):
+- `diagnostic` *(follow-up, neat)* — uptime, Wi-Fi RSSI, free heap, HA-link
+  status, current brightness. Fed by ESPHome's own sensors / `WiFi` / `App` via
+  setters (like the history-http/time setters), **not** from HA. Genuinely
+  useful on a wall panel and fully config-free.
+
+**Action (deliberately deferred):** a report row whose tap acts on its matched
+set ("Lights: 3 on" → tap = `light.turn_off` all). Powerful, but it's an action
+surface that collides with **UE9 `readonly`** + the confirm sheet; keep reports
+**view-only in v1** and revisit as its own phase.
+
+---
+
+### Pairs with / reuses (existing)
+
+- Entity/page pipeline: [add_page](components/ha_panel/ha_panel.cpp#L30) /
+  [add_entity](components/ha_panel/ha_panel.cpp#L36), the per-page
+  [row build loop](components/ha_panel/ha_panel.cpp#L1373-L1404), and
+  [make_entity_row](components/ha_panel/ha_panel.cpp#L744) — a synthetic entity
+  rides all of it unchanged.
+- [rebuild_entity_row_](components/ha_panel/ha_panel.cpp#L491) read-only
+  text/colour path renders the computed string (new `REPORT_TEXT` arm).
+- [on_state_](components/ha_panel/ha_panel.cpp#L449) is the recompute trigger —
+  any subscribed entity changing re-runs the aggregation.
+- `EntitySize` / [row_metrics_for](components/ha_panel/ha_panel.cpp#L732) so
+  reports honour `size: small|medium|large` like every other row.
+- `Entity::domain` (already split on `.`) + `Entity::state` drive the filter and
+  the count/min/max math; numeric reads reuse `state_to_value_`.
+- Config-plumbing precedent: `CONF_CONFIRM` / `CONF_SIZE` and the
+  `ENTITY_SCHEMA` / `PAGE_SCHEMA` shape in
+  [__init__.py](components/ha_panel/__init__.py#L75-L99).
+- The UE7 `device_class` classifier (if/when it lands) powers `device_class`
+  filters and the `security` / `low_battery` types.
+- **UE11 page-picker badges** are the same count over a different surface — the
+  `{domains, match_state}` filter routine should be shared (whichever lands first
+  owns it; the other calls it).
+
+### Change
+
+Add a `report:` block as an alternative to `entity_id:` in a page's `entities:`
+list (validate **exactly one** of the two per row). At codegen emit an
+`add_report(...)` that pushes a synthetic `Entity` (`domain="report"`,
+`render_class=REPORT_TEXT`, holding the parsed spec). At runtime a
+`recompute_reports_()` scans `entities_`, computes each report's string + colour
+into its `state`, and `rebuild_entity_row_` paints it.
+
+Illustrative YAML (final shape per Step 2/3 DECIDE):
+
+```yaml
+pages:
+  - name: Home
+    entities:
+      - report: { type: count, title: "Lights on",
+                  domains: [light], match_state: [on], show_total: true }
+        size: medium
+      - report: { type: offline, title: "Offline" }
+      - report: { type: min, title: "Coldest", domains: [sensor],
+                  device_class: temperature, show_source: true, unit: "°" }
+      - entity_id: light.living_room      # normal rows unchanged
+```
+
+Tasks:
+- [ ] **Config plumbing.** Add `CONF_REPORT` + a `REPORT_SCHEMA`
+      (`type` enum, `title`, optional `domains`/`device_class`/`match_state`/
+      `unit`/`threshold`/`show_total`/`show_source`) in
+      [__init__.py](components/ha_panel/__init__.py); make `ENTITY_SCHEMA` accept
+      **exactly one** of `entity_id` | `report`
+      (`cv.has_exactly_one_key`). Emit `add_report(...)` for report rows.
+- [ ] **Model.** Add `RenderClass::REPORT_TEXT` to
+      [ha_panel.h](components/ha_panel/ha_panel.h#L43-L50) and a small `Report`
+      spec (type enum + filter + format flags) on/beside `Entity`. `add_report`
+      builds a synthetic `Entity` (`domain="report"`) and appends it to
+      `entities_` + the current page's `entity_indices` exactly like a normal row.
+- [ ] **Aggregation engine.** `recompute_reports_()` iterates report entities,
+      and for each scans `entities_` applying the filter, then computes per
+      `type` (count / bool / offline / sum / avg / min / max). Skip the report
+      entities themselves and skip `unavailable`/non-numeric samples in numeric
+      types; guard empty match sets (render "—", no div-by-zero).
+- [ ] **Render.** New `REPORT_TEXT` arm in `rebuild_entity_row_`: draw the
+      computed string; colour only for `bool`/threshold types (green = all-clear,
+      amber/accent = active, red = alarm/offline). `count`/numeric default
+      **neutral** (see colour risk). Title from the spec, value right-aligned
+      like other read-only rows.
+- [ ] **Recompute hook.** Call `recompute_reports_()` from `on_state_` after a
+      normal entity updates, and once after the build loop
+      ([:1404](components/ha_panel/ha_panel.cpp#L1404)) for the initial paint.
+      v1: recompute **all** report rows on any state change (bounded — tens of
+      entities). If it bites, index reports by the domains they watch and
+      recompute only affected ones.
+- [ ] **No-tap.** Report rows are view-only in v1: don't register the click /
+      long-press service dispatch (skip the `on_entity_row_clicked_` action path
+      for `domain=="report"`), so a tap is inert. Pressed-bg highlight off.
+- [ ] **Docs.** README Features + DEVELOPMENT.md log; document the v1 universe
+      (panel-known entities) and the deferred `type:`s.
+
+**Exit criteria:** A page can carry report rows that show, live and correct: "N
+lights on" (with optional "N / M"), total entities, total of a given domain, an
+"all off / X on" boolean with colour, an offline-entity count, and min/max/avg
+of a numeric sensor group (with the extreme entity's name when asked). Reports
+recompute when any underlying entity changes, honour `size:`, never fire a
+service on tap, and pages with no report rows render byte-for-byte as today.
+Compiles + links clean; no heap regression.
+
+**Risks / unknowns:**
+- **Universe is the configured set, not all of HA.** Set expectations in docs;
+  "lights on" counts panel lights. A′ (track-only) or B (template sensor) are the
+  escape hatches — don't silently imply a whole-home count.
+- **Colour semantics trap (same as UE4 gauge / UE7 LED).** "3 lights on" isn't
+  *bad* — don't auto-red counts. Reserve colour for `bool`/threshold/`offline`
+  where good/bad is well-defined; keep `count`/numeric neutral, with an optional
+  `alert_when:` if a user wants a count to alarm.
+- **Recompute cost.** O(reports × entities) on every state change — fine for
+  tens, watch it if a config grows large or has a 1 Hz `realtime` sensor; the
+  domain-index optimisation is the lever.
+- **Numeric hygiene.** Mixed units (W vs kW) silently sum wrong; skip
+  non-numeric/unavailable; empty match set must render "—" not NaN/0-div.
+- **A′ connect-time TX.** Track-only subscriptions re-introduce the connect
+  burst (P7d iter-1 `Buffer full`); scope strictly and stagger if needed.
+- **Schema union validation.** `entity_id` xor `report` must be a clean
+  compile-time error, not a confusing runtime no-op.
 
 ---
 
