@@ -67,6 +67,43 @@
 # entities — is in README.md → "Defining your pages" → "Report rows".
 # (Quote on/off states as ["on"], not [on] — YAML reads bare on/off as booleans.)
 #
+# Page picker badges (UE11): add a page-level `picker_badge:` to show a small
+# icon+value to the RIGHT of the page name in the page picker — an at-a-glance
+# "is anything on over there". A page may declare ONE badge or a LIST of badges
+# (stacked horizontally, right-aligned; the page name stays left). Each badge is
+# computed fresh every time the picker opens, scoped to THAT PAGE'S entities
+# only. A badge hides itself when its value is 0 / empty. Default omitted = none.
+#
+#   picker_badge: lights_on                       # bare type name (sugar)
+#   picker_badge: [lights_on, open_covers]        # a list, stacked right
+#   picker_badge: { type: temperature, agg: avg } # block form (carries params)
+#   picker_badge: { type: low_battery, threshold: 20 }
+#
+# Selectable `type:` values (unknown value = compile error):
+#   Config-free (work today, domain + state only):
+#     lights_on       light == on                          → bulb + N
+#     devices_on      switch / fan / input_boolean == on   → plug + N
+#     unlocked        lock != locked                       → open-lock + N
+#     open_covers     cover != closed                      → open-shutter + N
+#     media_playing   media_player == playing              → play + N
+#     climate_active  climate != off                       → thermostat + N
+#     running         script/automation on, timer active   → cog + N
+#     offline         unavailable / unknown                → red alert + N
+#     entities        total entities on the page           → N
+#     idle            green check when nothing on / open
+#   Needs device_class (parses now, lights up once UE7 ships — hidden until then):
+#     open_doors      binary_sensor door/window/garage on  → door + N (amber)
+#     motion          binary_sensor motion/occupancy on    → motion + N (amber)
+#     low_battery     battery device_class <= threshold:   → battery + N (red)
+#     alarm           smoke/moisture/co/gas/problem/safety → red dot, no number
+#     temperature     agg: avg|min|max of temp sensors     → thermometer + value
+#     humidity        avg of humidity sensors              → drop + value
+#     power           sum of power sensors                 → power + value
+#     co2 / aqi        avg of co2 / aqi sensors            → gauge + value
+#     severity        composite: alarm→red, doors→amber, offline→amber dot
+# Block params: `agg:` (avg|min|max|sum, numeric badges) · `threshold:` (int,
+# low_battery percent, default 20) · `unit:` (suffix override for numeric badges).
+#
 # Icons: value is `mdi:<name>` from https://pictogrammers.com/library/mdi/ — but
 # ONLY glyphs in this panel's baked subset render; anything else falls back to a
 # generic glyph (and logs once at boot). Add new ones to the EXTRA_ICONS list in
@@ -96,6 +133,9 @@ ha_panel:
   #   token: !secret ha_history_token
   pages:
     - name: "Living Room"
+      # UE11: a LIST of picker badges — bulb count + active-climate count,
+      # stacked right of the page name. Each hides when its value is 0.
+      picker_badge: [lights_on, climate_active]
       entities:
         # UE12: computed-aggregate rows (no entity_id). View-only.
         - report:
@@ -132,6 +172,7 @@ ha_panel:
           realtime: true          # UE7: high-rate, unrecorded → live ring-buffer plot
 
     - name: "Kitchen"
+      picker_badge: devices_on       # UE11: bare single badge (plug + count)
       entities:
         - entity_id: light.kitchen_ceiling
           friendly_name: "Ceiling"
@@ -139,6 +180,7 @@ ha_panel:
           friendly_name: "Dishwasher"
 
     - name: "Bedroom"
+      picker_badge: { type: open_covers }   # UE11: block single (open-shutter + N)
       entities:
         - entity_id: light.bedside_lamp
           friendly_name: "Bedside"
@@ -149,6 +191,7 @@ ha_panel:
           confirm: true            # short-tap → Open/Stop/Close confirm sheet
 
     - name: "Office"
+      picker_badge: [running, offline]   # UE11: jobs running + any dead devices
       entities:
         - entity_id: script.start_focus_lighting
           friendly_name: "Focus mode"

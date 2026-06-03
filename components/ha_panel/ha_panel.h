@@ -153,9 +153,52 @@ struct Entity {
   ReportSpec report;
 };
 
+// UE11: a page-picker count badge. Each page declares at most one, shown as
+// icon+value to the right of the page name in the picker. Computed fresh on
+// open over the page's OWN entities only (page-scoped). Mirrors BADGE_TYPES /
+// BADGE_AGGS in __init__.py. The config-free types (lights_on … entities) ship
+// in v1; the device_class / numeric types (open_doors … aqi) parse + evaluate
+// but stay empty until UE7 subscribes device_class (gated, documented).
+enum class BadgeType : uint8_t {
+  NONE,            // no badge (default)
+  LIGHTS_ON,       // light == on
+  DEVICES_ON,      // switch / fan / input_boolean == on
+  UNLOCKED,        // lock != locked
+  OPEN_COVERS,     // cover != closed
+  MEDIA_PLAYING,   // media_player == playing
+  CLIMATE_ACTIVE,  // climate != off
+  RUNNING,         // script / automation == on, timer == active
+  OFFLINE,         // unavailable / unknown
+  ENTITIES,        // total entities on the page (no state filter)
+  OPEN_DOORS,      // binary_sensor door/window/garage_door == on  (needs UE7)
+  MOTION,          // binary_sensor motion/occupancy/presence == on (needs UE7)
+  LOW_BATTERY,     // battery device_class <= threshold (needs UE7)
+  ALARM,           // smoke/moisture/co/gas/problem/safety == on → red dot (UE7)
+  TEMPERATURE,     // agg of temperature sensors (needs UE7 device_class)
+  HUMIDITY,        // avg of humidity sensors (needs UE7)
+  POWER,           // sum of power sensors (needs UE7)
+  CO2,             // avg of carbon_dioxide sensors (needs UE7)
+  AQI,             // avg of aqi sensors (needs UE7)
+  SEVERITY,        // composite: alarm → red, open_doors → amber, offline → amber
+  IDLE,            // green check when nothing on / open
+};
+
+// UE11: numeric-aggregate selector for the temperature / co2 / aqi badge types.
+enum class BadgeAgg : uint8_t { AVG, MIN, MAX, SUM };
+
+struct PickerBadge {
+  BadgeType type{BadgeType::NONE};
+  BadgeAgg agg{BadgeAgg::AVG};
+  int threshold{20};  // LOW_BATTERY: percent at/below which a battery counts
+  std::string unit;   // numeric types: suffix override ("°", "%", "W", …)
+};
+
 struct Page {
   std::string name;
   std::vector<size_t> entity_indices;  // indexes into HAPanel::entities_
+  // UE11: zero or more page-picker badges, shown stacked horizontally to the
+  // right of the page name (name stays left-aligned). Empty = no badge.
+  std::vector<PickerBadge> badges;
 };
 
 class HAPanel : public Component, public api::CustomAPIDevice {
@@ -181,6 +224,12 @@ class HAPanel : public Component, public api::CustomAPIDevice {
                   const std::string &device_class, const std::string &unit,
                   bool show_total, bool show_source, const std::string &scope,
                   const std::string &icon, EntitySize size, uint8_t name_style = 0);
+  // UE11: append a picker badge to the most-recently-added page (call once per
+  // badge in the page's `picker_badge:` list). `type` / `agg` are the validated
+  // enum strings; threshold is for LOW_BATTERY; unit overrides a numeric badge's
+  // suffix. Type "none" is ignored.
+  void add_page_badge(const std::string &type, const std::string &agg,
+                      int threshold, const std::string &unit);
   // P7e: MDI glyph font for the per-entity icon column. nullptr → icons off,
   // rows fall back to the pre-P7e name-at-left layout.
   void set_mdi_font(font::Font *f) { this->mdi_font_ = f; }
@@ -341,6 +390,15 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // (page scope); null scans every entity (all-pages scope).
   void compute_report_(const ReportSpec &spec, const std::vector<size_t> *scope_indices,
                        std::string *out_text, uint32_t *out_color);
+  // UE11: recompute every page's picker badge from current state and repaint
+  // (icon + value + colour, hidden on 0/empty). Called from open_picker_ — the
+  // picker is a transient modal, so there's no per-frame / on_state_ wiring.
+  void update_picker_badges_();
+  // UE11: evaluate one badge spec over a page's OWN entities (page-scoped).
+  // Returns false → hide the badge; otherwise fills the mdi icon name (empty =
+  // value only), the value string (empty = icon-only dot), and the text colour.
+  bool eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
+                          std::string *icon, std::string *value, uint32_t *color);
   void open_picker_();
   void close_picker_();
   void update_status_dot_();
@@ -585,6 +643,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   lv_obj_t *battery_icon_{nullptr};
   lv_obj_t *tileview_{nullptr};
   lv_obj_t *picker_{nullptr};
+  // UE11: per-page picker badge groups [page_idx][badge_idx]. Each group is a
+  // flex row holding an mdi icon label (child 0) + a montserrat value label
+  // (child 1); a group hides itself when its value is 0/empty (and collapses out
+  // of the right-aligned bar's flex layout). Repainted by update_picker_badges_.
+  std::vector<std::vector<lv_obj_t *>> picker_badges_;
   lv_obj_t *splash_{nullptr};
   // E5: splash shows one row per init stage (Wi-Fi, then HA API). Each row is a
   // phrase label with a status indicator to its right (after the "..."): an

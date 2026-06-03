@@ -69,6 +69,30 @@ TEXT_STYLES = {"bold": 1, "italic": 2, "underline": 4}
 CONF_STYLE_FONTS = "style_fonts"
 CONF_BOLD = "bold"
 CONF_ITALIC = "italic"
+# UE11: per-page picker badge(s). A page declares one badge or a list of badges,
+# shown as icon+value stacked horizontally to the right of the page name in the
+# picker, computed fresh on open over THAT page's entities only (page-scoped).
+CONF_PICKER_BADGE = "picker_badge"
+CONF_AGG = "agg"
+CONF_THRESHOLD = "threshold"
+# UE11: selectable badge `type:` values — source of truth for this compile-time
+# validation and the C++ BadgeType enum (badge_type_from_). Config-free group
+# (domain + state only) ships in v1; the device_class / numeric group parses +
+# evaluates but stays empty until UE7 subscribes device_class (gated).
+#   config-free: lights_on, devices_on, unlocked, open_covers, media_playing,
+#                climate_active, running, offline, entities
+#   needs UE7  : open_doors, motion, low_battery, alarm, temperature, humidity,
+#                power, co2, aqi, severity (alarm/door portions)
+#   composite  : severity, idle
+BADGE_TYPES = [
+    "lights_on", "devices_on", "unlocked", "open_covers", "media_playing",
+    "climate_active", "running", "offline", "entities",
+    "open_doors", "motion", "low_battery", "alarm",
+    "temperature", "humidity", "power", "co2", "aqi",
+    "severity", "idle",
+]
+# UE11: numeric-aggregate selector for temperature / co2 / aqi badges.
+BADGE_AGGS = ["avg", "min", "max", "sum"]
 
 
 def _style_flags(values):
@@ -182,10 +206,39 @@ ENTITY_SCHEMA = cv.All(
     cv.has_exactly_one_key(CONF_ENTITY_ID, CONF_REPORT),
 )
 
+# UE11: one picker badge. `type` is a strict enum (unknown value = compile
+# error). The block form carries optional params; a bare type name is sugar for
+# `{type: <name>}` (normalised by _picker_badge).
+PICKER_BADGE_BLOCK_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_TYPE): cv.one_of(*BADGE_TYPES, lower=True),
+        # numeric badges (temperature / co2 / aqi): which aggregate to show.
+        cv.Optional(CONF_AGG, default="avg"): cv.one_of(*BADGE_AGGS, lower=True),
+        # low_battery: percent at/below which a battery counts as low.
+        cv.Optional(CONF_THRESHOLD, default=20): cv.int_,
+        # numeric badges: suffix override ("°", "%", "W", …); empty = built-in.
+        cv.Optional(CONF_UNIT, default=""): cv.string,
+    }
+)
+
+
+def _picker_badge(value):
+    # Accept a bare type name ("lights_on") or a block ({type: …, agg: …}).
+    if isinstance(value, str):
+        return PICKER_BADGE_BLOCK_SCHEMA({CONF_TYPE: value})
+    return PICKER_BADGE_BLOCK_SCHEMA(value)
+
+
+# A page's `picker_badge:` accepts one badge or a list of them (ensure_list
+# wraps a single into a list); each item is bare-name-or-block.
+PICKER_BADGE_SCHEMA = cv.ensure_list(_picker_badge)
+
 PAGE_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_NAME): cv.string,
         cv.Required(CONF_ENTITIES): cv.ensure_list(ENTITY_SCHEMA),
+        # UE11: zero or more page-picker badges (default omitted = none).
+        cv.Optional(CONF_PICKER_BADGE, default=[]): PICKER_BADGE_SCHEMA,
     }
 )
 
@@ -257,6 +310,16 @@ async def to_code(config):
                     )
     for page in config[CONF_PAGES]:
         cg.add(var.add_page(page[CONF_NAME]))
+        # UE11: append each declared picker badge to the page just added.
+        for badge in page[CONF_PICKER_BADGE]:
+            cg.add(
+                var.add_page_badge(
+                    badge[CONF_TYPE],
+                    badge[CONF_AGG],
+                    badge[CONF_THRESHOLD],
+                    badge[CONF_UNIT],
+                )
+            )
         for ent in page[CONF_ENTITIES]:
             # UE12: a report row — emit add_report and skip the entity path.
             if CONF_REPORT in ent:

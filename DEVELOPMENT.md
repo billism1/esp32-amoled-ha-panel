@@ -2954,8 +2954,9 @@ edits.
 
 ### Phase UE12 — Report rows (computed aggregates as a row type)
 
-**Status:** code complete; compiles + links clean (RAM 16.6%, Flash 19.6%);
-on-device validation pending.
+**Status:** ✅ done — validated on-device (count / bool / offline / sum / avg /
+min / max render live + recompute on state change; page + all scope; honour
+`size:`; inert on tap). Compiles + links clean (RAM 16.6%, Flash 19.6%).
 
 **Outcome:** a page row can now be a `report:` block instead of an `entity_id:`,
 rendering a **computed aggregate** over the panel's other entities — "N lights
@@ -3042,8 +3043,9 @@ icon column.
 
 ### Phase UE13 — Per-row text styles (bold / italic / underline)
 
-**Status:** code complete; compiles + links clean (firmware ~+100 KB for the
-baked fonts); on-device validation pending.
+**Status:** ✅ done — validated on-device (bold / italic / underline + combos
+render on the row title at small/medium/large; unstyled rows unchanged).
+Compiles + links clean (firmware ~+100 KB for the baked fonts).
 
 **Outcome:** any row (entity or report) can style its **name/title** label via
 `style: [bold, italic, underline]`. Applies to the left-hand name label only,
@@ -3087,6 +3089,71 @@ unused, dropping the `style_fonts:` package include reclaims it.
 `[underline]`, and `[bold, underline]` at small/medium/large; confirm the title
 renders in the right weight/slant/decoration and that unstyled rows are
 unchanged.
+
+---
+
+### Phase UE11 — Page-picker count badges
+
+**Status:** code complete; compiles + links clean (RAM 16.8%, Flash 20.9%);
+on-device validation pending.
+
+**Outcome:** a page can declare a `picker_badge:` — a small **icon + count**
+shown to the right of the page name in the page picker (e.g. `🔆 3` = three lights
+on). A page may carry **one badge or a list** of them, stacked horizontally and
+right-aligned; the page name keeps its left alignment + ellipsizes so it can't run
+under the badges. Each badge **hides when its value is 0/empty** and is recomputed
+on every picker open over **that page's own entities only** (page-scoped).
+
+**Cheap by construction.** The picker is a built-once hidden overlay.
+`update_picker_badges_()` runs on `open_picker_()` (clears HIDDEN + raises) and
+again from `on_state_` **only while the picker is visible** (a `!HIDDEN` guard)
+so open badges track state live; a closed picker is zero-cost and refreshes on
+next open. Entity states are already live (subscriptions don't pause), no fetch.
+
+**Config.** Page-level `picker_badge:` accepts a bare type name (`lights_on`), a
+block (`{type, agg, threshold, unit}`), or a **list** of either
+(`cv.ensure_list(_picker_badge)`). `BADGE_TYPES` / `BADGE_AGGS` in `__init__.py`
+are the validation source of truth — an unknown type is a compile error
+(`cv.one_of`). Codegen emits `add_page_badge(...)` once per badge, appending to
+the page just added (mirrors `add_entity`'s `pages_.back()`).
+
+**Model.** `enum class BadgeType` (NONE + 20 types) + `BadgeAgg` +
+`PickerBadge{type, agg, threshold, unit}`; `std::vector<PickerBadge> badges` on
+`Page`. Widget handles in `std::vector<std::vector<lv_obj_t*>> picker_badges_`
+([page][badge] → an [icon][value] flex group); hidden groups collapse out of the
+right-aligned flex **bar**'s layout, so visible badges stay packed against the
+right edge.
+
+**Types.** Config-free group works today (domain + state only): `lights_on`,
+`devices_on`, `unlocked`, `open_covers`, `media_playing`, `climate_active`,
+`running`, `offline`, `entities`, `idle`. The `device_class` / numeric group
+(`open_doors`, `motion`, `low_battery`, `alarm`, `temperature`, `humidity`,
+`power`, `co2`, `aqi`, `severity`) parses + evaluates but stays **hidden until
+UE7** subscribes `device_class` (the predicates read `attrs["device_class"]`,
+empty today → 0 → hidden). Colours: neutral counts, amber active (doors/motion),
+red alarm/severity/offline/low-battery, green `idle`.
+
+**Local evaluator, not UE12's `compute_report_`.** Badge predicates are mostly
+**negative** — `unlocked` = *not* `locked`, `open_covers` = *not* `closed`,
+`climate_active` ≠ `off` — which UE12's `{domains, match_state}` filter (positive
+match only) can't express. So UE11 ships a dedicated `eval_picker_badge_()`
+switch. The UE11/UE12 "share the count helper" idea is parked; if a future pass
+generalises the report filter to negative/predicate matching, both can collapse
+onto it. Noted here per the cross-cutting rule.
+
+**Icons.** Reuse the baked MDI subset (`mdi_codepoint_` + `utf8_encode_`,
+`MDI_FALLBACK_CP` on a miss) drawn in `mdi_font_`; the value text is
+`montserrat_18`. Mixing the two needs two labels per badge (the MDI font has no
+ASCII digits), hence the [icon][value] group. All badge glyphs
+(`lightbulb-on`, `power-plug`, `lock-open`, `window-shutter-open`, `play`,
+`thermostat`, `cog`, `alert`, `door-open`, `motion-sensor`, `battery`,
+`alert-circle`, `thermometer`, `water-percent`, `power`, `gauge`,
+`checkbox-marked-circle-outline`) are already in the baked set.
+
+**Verification (pending on-device):** put `picker_badge: [lights_on,
+open_covers]` on a page, turn a light on, open the picker → badge shows `🔆 1`,
+hides when 0; long page names ellipsize without overlapping; a list stacks
+right-aligned; bare / block / list forms all render.
 
 ---
 

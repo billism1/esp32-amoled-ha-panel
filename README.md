@@ -84,6 +84,10 @@ behaviour live in shared, board-agnostic packages.
 **Navigation & UI**
 - Horizontal swipe **or** a persistent bottom bar (`◀ 🏠 ⚙ ▶`) to move between
   pages; top dropdown picker jumps straight to any page.
+- Per-page **picker badges** (`picker_badge:`) — an at-a-glance icon+count to the
+  right of each page name in the picker ("🔆 3" = three lights on, plug count,
+  open covers, offline, …). One badge or a list, computed live on open over that
+  page's own entities.
 - Vertical scroll through the entities on a page.
 - Header status bar: clock, page name, Wi-Fi / battery / connection-status
   icons. Wi-Fi + HA indicators blink amber while reconnecting (e.g. on
@@ -250,6 +254,7 @@ ha_panel:
   id: ha_panel_id
   pages:
     - name: "Living Room"
+      picker_badge: [lights_on, open_covers]  # optional: badge(s) in the picker
       entities:
         - entity_id: light.couch_lamp
           friendly_name: "Couch lamp"   # optional; falls back to entity_id
@@ -277,6 +282,7 @@ left-to-right in the carousel in declared order.
 |-----|----------|--------------|
 | `name` | yes | Page title, shown in the header and the page picker. |
 | `entities` | yes | Ordered list of rows. Each row is **either** an entity (`entity_id:` + the options below) **or** a [report](#report-rows) (`report:`). |
+| `picker_badge` | no | One [picker badge](#page-picker-badges), or a list of them, shown right of the page name in the picker. |
 
 **Entity row options**
 
@@ -461,6 +467,64 @@ Common `device_class` values (for when UE7 lands): `sensor` →
 > **Quote `on`/`off`** (`["on"]`, not `[on]`) — YAML reads bare `on`/`off` as
 > booleans. The panel maps them back, but quoting is clearer and avoids surprises
 > with other truthy words (`yes`/`no`).
+
+---
+
+### Page picker badges
+
+A page can carry a `picker_badge:` — a small **icon + count** shown to the right
+of the page name in the **page picker** (the dropdown you open from the header),
+so you can tell "is anything on over there" without opening each page. Declare
+**one** badge or a **list** of them (stacked horizontally, right-aligned; the
+page name stays left). A badge **hides itself when its value is 0/empty**, and is
+recomputed every time the picker opens — over **that page's own entities only**.
+
+```yaml
+pages:
+  - name: "Living Room"
+    picker_badge: lights_on                  # one badge (bare type name)
+    entities: [ ... ]
+  - name: "Whole House"
+    picker_badge: [lights_on, open_covers, offline]   # a list, stacked right
+    entities: [ ... ]
+  - name: "Climate"
+    picker_badge: { type: temperature, agg: avg }     # block form (params)
+    entities: [ ... ]
+```
+
+A bare type name (`picker_badge: lights_on`) is shorthand for `{ type: lights_on }`.
+The **block form** carries params: `agg:` (`avg`/`min`/`max`/`sum`, for the
+numeric badges), `threshold:` (int, `low_battery` percent, default `20`), and
+`unit:` (suffix override for numeric badges).
+
+**`type:` is a closed list** (a typo is a compile error):
+
+| `type` | Shows | Notes |
+|--------|-------|-------|
+| `lights_on` | `light` entities that are `on` | |
+| `devices_on` | `switch` / `fan` / `input_boolean` that are `on` | |
+| `unlocked` | `lock` not `locked` | |
+| `open_covers` | `cover` not `closed` | |
+| `media_playing` | `media_player` that are `playing` | |
+| `climate_active` | `climate` not `off` | |
+| `running` | `script` / `automation` `on`, `timer` `active` | |
+| `offline` | `unavailable` / `unknown` entities (red) | |
+| `entities` | total entities on the page | no state filter |
+| `idle` | a green ✓ when nothing is on / open | calm-state indicator |
+| `open_doors` | `binary_sensor` `door`/`window`/`garage_door` `on` (amber) | needs `device_class` ⚠ |
+| `motion` | `binary_sensor` `motion`/`occupancy`/`presence` `on` (amber) | needs `device_class` ⚠ |
+| `low_battery` | batteries at/below `threshold:` (red) | needs `device_class` ⚠ |
+| `alarm` | a red dot when smoke/leak/gas/CO/problem/safety is `on` | needs `device_class` ⚠ |
+| `temperature` | `agg:` of temperature sensors | needs `device_class` ⚠ |
+| `humidity` | average humidity | needs `device_class` ⚠ |
+| `power` | sum of power sensors | needs `device_class` ⚠ |
+| `co2` / `aqi` | average CO₂ / AQI | needs `device_class` ⚠ |
+| `severity` | composite dot — `alarm` → red, doors → amber, offline → amber | partly needs `device_class` ⚠ |
+
+> ⚠️ The **`device_class`-dependent** types parse and validate today but stay
+> **hidden** until the attribute subscription lands (UE7) — the panel doesn't
+> know an entity's `device_class` yet, so they match nothing. The config-free
+> types above them work now. (`severity`/`offline` still show the offline signal.)
 
 ---
 

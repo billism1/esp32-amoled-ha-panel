@@ -911,7 +911,19 @@ today's behavior with no user edits.
 
 ## UE11 — Page-picker count badges
 
-**Status:** ⬜ not started · target tag: `ue11-picker-badges`
+**Status:** 🧪 code complete — compiles + links clean (RAM 16.8%, Flash 20.9%);
+on-device validation pending · target tag: `ue11-picker-badges`
+
+**Scope note (delivered):** a page may declare **one badge OR a list** of badges
+(`picker_badge: [lights_on, climate_active]`), shown stacked horizontally and
+right-aligned; the page name keeps its left alignment + ellipsizes. Each badge
+hides itself (and collapses out of the flex bar) when its value is 0/empty. The
+config-free types ship live; the `device_class` / numeric types parse + evaluate
+but stay hidden until UE7 subscribes `device_class`. A **local evaluator**
+(`eval_picker_badge_`) is used rather than UE12's `compute_report_` — the badge
+predicates are mostly *negative* (`unlocked` = not locked, `open_covers` = not
+closed, `climate_active` ≠ off) which the report `{domains, match_state}` filter
+can't express; the divergence is noted for a future shared-helper pass.
 
 **Why:** The page picker
 ([build_ui_:1484-1502](components/ha_panel/ha_panel.cpp#L1484-L1502)) lists page
@@ -1022,46 +1034,47 @@ spec over `pages_[pi].entity_indices`, sets the icon+value text (or hides it),
 and call it from the top of `open_picker_()`.
 
 Tasks:
-- [ ] **Config plumbing.** Add `CONF_PICKER_BADGE` + a `PICKER_BADGE_SCHEMA`
-      (`cv.Any(cv.one_of(*BADGE_TYPES), block{type, agg, threshold, unit})`) to
+- [x] **Config plumbing.** Added `CONF_PICKER_BADGE` + `PICKER_BADGE_SCHEMA`
+      (`cv.ensure_list(_picker_badge)` — bare type name *or* `{type, agg,
+      threshold, unit}` block, single *or* list) to
       [__init__.py](components/ha_panel/__init__.py), at **page** level in
-      `PAGE_SCHEMA` (not entity level). Emit `set_page_badge(pi, spec)` /
-      extend `add_page`. Mirror the `CONF_SIZE` enum + doc-comment style; the
-      `BADGE_TYPES` list here is the validation source of truth.
-- [ ] **Model.** `enum class BadgeType` + a small `PickerBadge` struct on the
-      `Page` struct ([ha_panel.h](components/ha_panel/ha_panel.h#L105-L108)).
-- [ ] **Badge widget.** In the picker row loop create the badge `lv_label`
-      right-aligned (`LV_ALIGN_RIGHT_MID`, ~-12 x), store in
-      `std::vector<lv_obj_t*> picker_badges_`. Give the page-name label a right
-      margin / ellipsize so a long name can't overlap the badge.
-- [ ] **Evaluator.** `update_picker_badges_()`: per page, dispatch on `BadgeType`
-      over `entity_indices` (count / numeric-agg / severity), format `icon + value`,
-      colour per type (neutral counts; amber active; red alarm/severity; green
-      `idle`), hide on 0/empty. Reuse the UE12 helper if present, else a local
-      switch (refactor when UE12 lands — note the divergence in DEVELOPMENT.md).
-- [ ] **Hook.** Call `update_picker_badges_()` at the top of `open_picker_()`
+      `PAGE_SCHEMA`. Emits `add_page_badge(...)` per badge (append to the page
+      just added). `BADGE_TYPES` / `BADGE_AGGS` are the validation source of
+      truth; an unknown type is a compile error (`cv.one_of`).
+- [x] **Model.** `enum class BadgeType` + `BadgeAgg` + `PickerBadge` struct;
+      `std::vector<PickerBadge> badges` on the `Page` struct
+      ([ha_panel.h](components/ha_panel/ha_panel.h)).
+- [x] **Badge widget.** Per picker row, a right-aligned flex **bar**
+      (`LV_ALIGN_RIGHT_MID`, -12 x) holds one [icon][value] **group** per badge;
+      handles in `std::vector<std::vector<lv_obj_t*>> picker_badges_`. The
+      page-name label is capped (`max_width 300`) + `LONG_DOT` so it can't run
+      under the bar; hidden groups collapse out of the flex layout.
+- [x] **Evaluator.** `eval_picker_badge_()` dispatches on `BadgeType` over the
+      page's own `entity_indices` (count / numeric-agg / severity / idle),
+      returns icon name + value + colour or "hide"; `update_picker_badges_()`
+      paints each group. Colours: neutral counts, amber active (doors/motion),
+      red alarm/severity/offline/low-battery, green `idle`. Local evaluator (not
+      UE12's helper) — negative predicates don't fit `match_state` (noted above
+      + in DEVELOPMENT.md).
+- [x] **Hook.** `update_picker_badges_()` called at the top of `open_picker_()`
       before the unhide, so every open reflects current state.
-- [ ] **Docs (enumerate the selectable types where users look — see Docs below).**
+- [x] **Docs** (see below).
 
 **Docs to update (so the available badge types are discoverable):**
-- [ ] **`packages/ha-entities.example.yaml`** — the canonical schema doc. Add a
-      `# Page picker badges (UE11): ...` block in the top comment listing **every**
-      `picker_badge:` value + the bare-vs-block forms + params (agg / threshold /
-      unit) + the default (omitted = none), and add a live `picker_badge:` line to
-      one of the example pages. This is where README already points users for "the
-      full schema and inline docs."
-- [ ] **`README.md`** — (1) a **Navigation & UI** Features bullet
-      ([README.md:84-95](README.md#L84-L95)) noting per-page picker badges; (2) the
-      **Defining your pages** inline YAML example
-      ([README.md:241-255](README.md#L241-L255)) gains a page-level `picker_badge:`
-      line with a one-line comment; keep the exhaustive list in the example file
-      (README points there at [:257-258](README.md#L257-L258)).
-- [ ] **`components/ha_panel/__init__.py`** — the `BADGE_TYPES` enum + a
-      doc-comment above `CONF_PICKER_BADGE` listing the types (developer-facing;
-      doubles as the compile-time validation that rejects unknown values).
-- [ ] **`DEVELOPMENT.md`** — phase log entry with the badge-type table + the
-      per-page-config decision + the UE7/UE12 helper-sharing note (per the
-      cross-cutting "update DEVELOPMENT.md as each item ships" rule).
+- [x] **`packages/ha-entities.example.yaml`** — added a `# Page picker badges
+      (UE11): ...` block listing **every** type + the bare/list/block forms +
+      params (agg / threshold / unit) + the default (omitted = none), and live
+      `picker_badge:` lines on four example pages (bare single, block single, and
+      two list forms).
+- [x] **`README.md`** — (1) a **Navigation & UI** Features bullet; (2) the
+      **Defining your pages** inline YAML example gains a `picker_badge:` line +
+      a page-keys-table row; (3) a full **Page picker badges** reference section
+      (every type, bare/list/block forms, the device_class-gated note).
+- [x] **`components/ha_panel/__init__.py`** — `BADGE_TYPES` / `BADGE_AGGS` lists
+      + a doc-comment above `CONF_PICKER_BADGE` (developer-facing; doubles as the
+      compile-time validation that rejects unknown values).
+- [x] **`DEVELOPMENT.md`** — phase log entry (badge-type table + per-page-config
+      + list-of-badges + local-evaluator/UE12-divergence note).
 
 **Exit criteria:** A page can declare `picker_badge: <type>`; opening the picker
 shows that page's icon+value to the right of its name, computed live (correct on
@@ -1082,9 +1095,9 @@ README pointer). Compiles + links clean.
 - **device_class / numeric types are gated on UE7 + UE12.** Don't promise the full
   menu in the first commit — ship config-free types, schema-validate the rest, and
   enable them as the shared helpers land. Document which are live.
-- **Stale if shown indefinitely.** Badges refresh on open only; fine for a
-  transient modal. If a persistent picker is ever wanted, drive
-  `update_picker_badges_()` from `on_state_` guarded on `!picker hidden`.
+- **Stale if shown indefinitely.** ~~Badges refresh on open only~~ — **resolved:**
+  `update_picker_badges_()` runs on open AND from `on_state_` while the picker is
+  visible (`!HIDDEN` guard), so an open picker tracks state live; closed = zero-cost.
 - **Helper drift vs UE12.** Shipping before UE12 with a local evaluator risks two
   count paths — make the later refactor actually collapse them.
 - **Glyph coverage.** Some badge icons (door, motion, battery, leak) may not be in
@@ -1095,8 +1108,10 @@ README pointer). Compiles + links clean.
 
 ## UE12 — Report rows (computed aggregates as a row type)
 
-**Status:** 🧪 code complete — compiles + links clean (RAM 16.6%, Flash 19.6%);
-on-device validation pending · target tag: `ue12-report-rows`
+**Status:** ✅ done — validated on-device (count / bool / offline / sum / avg /
+min / max report rows render live + recompute on state change; page + all
+scope; honour `size:`; inert on tap). Compiles + links clean (RAM 16.6%, Flash
+19.6%). · target tag: `ue12-report-rows`
 
 **Why:** Every row today maps to exactly one HA entity
 ([build_ui_ row loop](components/ha_panel/ha_panel.cpp#L1373-L1404) walks
@@ -1316,8 +1331,10 @@ Compiles + links clean; no heap regression.
 
 ## UE13 — Per-row text styles (bold / italic / underline)
 
-**Status:** 🧪 code complete — compiles + links clean (firmware ~+100 KB for the
-baked fonts); on-device validation pending · target tag: `ue13-row-text-styles`
+**Status:** ✅ done — validated on-device (bold / italic / underline + combos
+render on the row title at small/medium/large; unstyled rows unchanged).
+Compiles + links clean (firmware ~+100 KB for the baked fonts). · target tag:
+`ue13-row-text-styles`
 
 **Why:** Rows had one fixed weight. A `style:` per row lets a title stand out
 (bold a report total, italicise a caption, underline a header-ish row). Applies
