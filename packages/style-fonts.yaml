@@ -1,0 +1,47 @@
+# UE13: baked Montserrat bold + italic at the three row sizes (18 / 24 / 32)
+# that the per-row `style:` option draws from. LVGL has no built-in bold/italic
+# and no synthetic weighting, so each variant must be a real baked font; these
+# are pulled from Google Fonts at build via ESPHome's gfonts:// support
+# (network needed at compile, like the MDI webfont). Underline is NOT here — it's
+# a runtime LVGL text_decor, no font required.
+#
+# The fonts are anchored into LVGL by hidden labels in packages/lvgl-ui.yaml
+# (same trick as the MDI fonts) and wired to the ha_panel component below — its
+# config merges with the `ha_panel:` block in your ha-entities.yaml, so a row
+# only needs `style: [bold]`. Keep the glyph set default (ASCII) — row titles
+# are plain text.
+
+font:
+  - file: { type: gfonts, family: Montserrat, weight: bold }
+    id: montserrat_bold_18
+    size: 18
+    bpp: 4
+  - file: { type: gfonts, family: Montserrat, weight: bold }
+    id: montserrat_bold_24
+    size: 24
+    bpp: 4
+  - file: { type: gfonts, family: Montserrat, weight: bold }
+    id: montserrat_bold_32
+    size: 32
+    bpp: 4
+  - file: { type: gfonts, family: Montserrat, weight: regular, italic: true }
+    id: montserrat_italic_18
+    size: 18
+    bpp: 4
+  - file: { type: gfonts, family: Montserrat, weight: regular, italic: true }
+    id: montserrat_italic_24
+    size: 24
+    bpp: 4
+  - file: { type: gfonts, family: Montserrat, weight: regular, italic: true }
+    id: montserrat_italic_32
+    size: 32
+    bpp: 4
+
+# Merged into the ha_panel component (same id as ha-entities.yaml). Lists are
+# [small(18), medium(24), large(32)] — order matters; the component indexes them
+# by row size.
+ha_panel:
+  id: ha_panel_id
+  style_fonts:
+    bold: [montserrat_bold_18, montserrat_bold_24, montserrat_bold_32]
+    italic: [montserrat_italic_18, montserrat_italic_24, montserrat_italic_32]

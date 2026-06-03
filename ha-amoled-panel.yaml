@@ -124,4 +124,7 @@ packages:
   # P7e: baked MDI glyph subset (GENERATED — tools/build-mdi-glyphs.py). Must
   # load before lvgl-ui so the mdi_icons font id exists for the anchor label.
   mdi_font: !include packages/mdi-font.yaml
+  # UE13: baked Montserrat bold/italic for per-row `style:`. Before lvgl-ui so
+  # the font ids exist for the anchor labels.
+  style_fonts: !include packages/style-fonts.yaml
   lvgl_ui: !include packages/lvgl-ui.yaml

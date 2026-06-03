@@ -93,6 +93,8 @@ behaviour live in shared, board-agnostic packages.
   resolution chain.
 - Per-entity size (`small` / `medium` / `large`) to make important rows
   glanceable from across the room.
+- Per-row text styles (`style: [bold, italic, underline]`) for the row's
+  name/title — bold/italic via baked Montserrat variants, underline at runtime.
 
 **Entity control**
 - Tap to control: `light`, `switch`, `fan`, `input_boolean`, `cover`, `lock`,
@@ -289,6 +291,7 @@ that.
 | `friendly_name` | the `entity_id` | any | The row label. |
 | `icon` | domain default | any | MDI glyph override, `mdi:floor-lamp` (or bare `floor-lamp`). Must be in the baked glyph subset — unknown names log once and fall back to a generic glyph. Add glyphs with `tools/build-mdi-glyphs.py`. |
 | `size` | `small` | any | Row scale: `small` / `medium` / `large`. Scales height, name font, icon and the right-side widget together. Mixed sizes on a page are fine. |
+| `style` | none | any | Text style(s) for the row's name/title, as a list of any of `bold`, `italic`, `underline` — e.g. `style: [bold, underline]`. See [Row text styles](#row-text-styles) below. |
 | `confirm` | `false` | controllable domains | Short-tap opens a confirm sheet / detail modal instead of firing immediately — a guard against accidental brushes. Meaningful on `light` `switch` `fan` `input_boolean` `scene` `script` `automation` `button` `lock` `cover` `climate` `media_player` `number` `select`; ignored (with a compile warning) on read-only domains. |
 | `realtime` | `false` | numeric `sensor` / `binary_sensor` | Skips the REST history backfill and plots the history sheet purely from the in-device ring buffer + live stream, on a short "Live" window. For high-rate feeds HA doesn't record (e.g. 1 Hz MQTT). Leave off for entities HA records normally. |
 
@@ -309,6 +312,39 @@ actions above.)
 For copy-paste starting points covering each of these, see the worked examples in
 [packages/ha-entities.example.yaml](packages/ha-entities.example.yaml).
 
+### Row text styles
+
+`style:` sets the typeface of a row's **name/title** label (works on both entity
+and report rows). It takes a list of any of:
+
+| Style | Effect | How |
+|-------|--------|-----|
+| `bold` | **bold** name | baked Montserrat-Bold (per row size) |
+| `italic` | *italic* name | baked Montserrat-Italic (per row size) |
+| `underline` | underlined name | runtime LVGL decoration |
+
+```yaml
+- entity_id: light.kitchen
+  style: [bold]
+- report:
+    type: count
+    title: "Lights on"
+    style: [bold, underline]      # combine freely
+```
+
+Notes:
+- **Combine** any of the three in the list. `bold` + `italic` together currently
+  renders as **bold** (no bold-italic font is baked).
+- Bold and italic need real font data — LVGL has no synthetic weighting — so the
+  panel bakes Montserrat **Bold** and **Italic** at the three row sizes. That's
+  already wired (`packages/style-fonts.yaml`, pulled from Google Fonts at build
+  and merged into the component); you only write `style:` on a row. Underline
+  needs no font.
+- Adds ~tens of KB of flash for the baked variants and a build-time font
+  download (like the MDI webfont). If you never use `style:`, the fonts still
+  bake — drop the `style_fonts:` package from `ha-amoled-panel.yaml` to reclaim
+  the space.
+
 ### Report rows
 
 A row with a `report:` block (instead of `entity_id:`) shows a **computed
@@ -328,6 +364,7 @@ row; `size:` still applies.
     show_source: false          # min/max: prepend the extreme entity's name
     scope: all                  # all (default) = whole panel; page = this page
     icon: mdi:lightbulb-multiple # optional — MDI glyph; omit = no icon column
+    style: [bold]               # optional — bold / italic / underline (list)
   size: medium
 ```
 

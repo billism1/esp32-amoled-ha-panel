@@ -58,6 +58,24 @@ CONF_SCOPE = "scope"
 # UE12: report aggregation scope. "all" (default) = every entity on the panel
 # across all pages; "page" = only entities on the same page as the report row.
 REPORT_SCOPES = ["all", "page"]
+# UE13: per-row name/title text styles. Values map to the STYLE_* bitmask in
+# ha_panel.h. bold/italic need baked font variants (wired via `style_fonts:`
+# below); underline is a runtime LVGL decor (no font). Mutually combinable.
+CONF_STYLE = "style"
+TEXT_STYLES = {"bold": 1, "italic": 2, "underline": 4}
+# UE13: the baked Montserrat bold/italic fonts at the three row sizes, supplied
+# by packages/style-fonts.yaml and merged into this component's config. Each is
+# a list of exactly 3 font ids [small(18), medium(24), large(32)].
+CONF_STYLE_FONTS = "style_fonts"
+CONF_BOLD = "bold"
+CONF_ITALIC = "italic"
+
+
+def _style_flags(values):
+    flags = 0
+    for s in values:
+        flags |= TEXT_STYLES[s]
+    return flags
 # UE12: selectable report `type:` values. Source of truth for both the
 # compile-time validation here and the C++ ReportType enum (report_type_from_).
 #   count    — N entities matching {domains, match_state}; show_total → "N / M"
@@ -127,6 +145,10 @@ REPORT_SCHEMA = cv.Schema(
         cv.Optional(CONF_SCOPE, default="all"): cv.one_of(*REPORT_SCOPES, lower=True),
         # optional MDI icon for the row ("mdi:foo"); omit = no icon column.
         cv.Optional(CONF_ICON, default=""): cv.string,
+        # UE13: title text styles, any of bold / italic / underline.
+        cv.Optional(CONF_STYLE, default=[]): cv.ensure_list(
+            cv.one_of(*TEXT_STYLES, lower=True)
+        ),
     }
 )
 
@@ -149,6 +171,10 @@ ENTITY_SCHEMA = cv.All(
             ),
             # UE7: bypass REST backfill, plot live from the ring buffer.
             cv.Optional(CONF_REALTIME, default=False): cv.boolean,
+            # UE13: name text styles, any of bold / italic / underline.
+            cv.Optional(CONF_STYLE, default=[]): cv.ensure_list(
+                cv.one_of(*TEXT_STYLES, lower=True)
+            ),
             # UE12: computed-aggregate row (mutually exclusive with entity_id).
             cv.Optional(CONF_REPORT): REPORT_SCHEMA,
         }
@@ -160,6 +186,20 @@ PAGE_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_NAME): cv.string,
         cv.Required(CONF_ENTITIES): cv.ensure_list(ENTITY_SCHEMA),
+    }
+)
+
+# UE13: baked bold / italic name-label fonts, one per row size (small 18,
+# medium 24, large 32) — exactly 3 ids each. Supplied + merged by
+# packages/style-fonts.yaml; users don't write this by hand.
+STYLE_FONTS_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_BOLD): cv.All(
+            cv.ensure_list(cv.use_id(font.Font)), cv.Length(min=3, max=3)
+        ),
+        cv.Optional(CONF_ITALIC): cv.All(
+            cv.ensure_list(cv.use_id(font.Font)), cv.Length(min=3, max=3)
+        ),
     }
 )
 
@@ -183,6 +223,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_MDI_FONT_MEDIUM): cv.use_id(font.Font),
         cv.Optional(CONF_MDI_FONT_LARGE): cv.use_id(font.Font),
         cv.Optional(CONF_HISTORY): HISTORY_SCHEMA,
+        cv.Optional(CONF_STYLE_FONTS): STYLE_FONTS_SCHEMA,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -202,6 +243,18 @@ async def to_code(config):
         cg.add(var.set_history_time(await cg.get_variable(h[CONF_TIME_ID])))
         cg.add(var.set_history_base_url(h[CONF_BASE_URL]))
         cg.add(var.set_history_token(h[CONF_TOKEN]))
+    # UE13: wire the baked bold/italic name fonts. variant 0 = bold, 1 = italic;
+    # each list is [small, medium, large].
+    if CONF_STYLE_FONTS in config:
+        sf = config[CONF_STYLE_FONTS]
+        for variant_idx, key in ((0, CONF_BOLD), (1, CONF_ITALIC)):
+            if key in sf:
+                for size_idx, fid in enumerate(sf[key]):
+                    cg.add(
+                        var.set_style_font(
+                            size_idx, variant_idx, await cg.get_variable(fid)
+                        )
+                    )
     for page in config[CONF_PAGES]:
         cg.add(var.add_page(page[CONF_NAME]))
         for ent in page[CONF_ENTITIES]:
@@ -221,6 +274,7 @@ async def to_code(config):
                         r[CONF_SCOPE],
                         r[CONF_ICON],
                         ENTITY_SIZES[ent[CONF_SIZE]],
+                        _style_flags(r[CONF_STYLE]),
                     )
                 )
                 continue
@@ -243,5 +297,6 @@ async def to_code(config):
                     confirm,
                     ENTITY_SIZES[ent[CONF_SIZE]],
                     ent[CONF_REALTIME],
+                    _style_flags(ent[CONF_STYLE]),
                 )
             )

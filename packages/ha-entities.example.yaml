@@ -50,6 +50,13 @@
 #   medium/large you can drop the mdi_font_medium/large keys below — those rows
 #   then upscale the 24 px icon (still works, just softer).
 #
+# Text styles (UE13): add `style:` to a row (entity OR report) to style its
+# name/title — a list of any of bold / italic / underline, e.g. style: [bold] or
+# style: [bold, underline]. Bold/italic use baked Montserrat variants (already
+# wired via packages/style-fonts.yaml — pulled from Google Fonts at build, ~tens
+# of KB flash); underline is free. bold+italic together renders as bold (no
+# bold-italic font baked). Full reference in README.md → "Row text styles".
+#
 # Report rows (UE12): instead of an `entity_id:`, a row can carry a `report:`
 # block that shows a COMPUTED AGGREGATE over your other entities (lights on,
 # totals, offline count, min/max/avg of a sensor group). `scope: page` limits it
@@ -99,6 +106,7 @@ ha_panel:
             show_total: true       # "2 / 5"
             scope: page            # only this page's lights (omit/all = whole panel)
             icon: mdi:lightbulb-multiple   # baked glyph — see icon list above
+            style: [bold]          # bold title — also italic / underline (list)
           size: medium
         - report:
             type: offline

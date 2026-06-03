@@ -58,6 +58,11 @@ Sequenced easy → hard so each lands as an independent, shippable commit:
     so it reuses `make_entity_row` + `rebuild_entity_row_` + `size:`. Aggregating
     only over panel-known entities keeps it inside the "no new HA data" rule; an
     all-HA count is a flagged follow-up.
+13. **UE13** — per-row text styles: `style: [bold, italic, underline]` on any row
+    (entity or report) styles its name/title label. Underline is a runtime LVGL
+    `text_decor`; bold/italic need baked Montserrat variants (LVGL has no
+    synthetic weighting), auto-wired via a merged `style-fonts` package so the
+    user only writes `style:`. Reuses `make_entity_row`; styles set at build time.
 
 ---
 
@@ -1306,6 +1311,63 @@ Compiles + links clean; no heap regression.
   burst (P7d iter-1 `Buffer full`); scope strictly and stagger if needed.
 - **Schema union validation.** `entity_id` xor `report` must be a clean
   compile-time error, not a confusing runtime no-op.
+
+---
+
+## UE13 — Per-row text styles (bold / italic / underline)
+
+**Status:** 🧪 code complete — compiles + links clean (firmware ~+100 KB for the
+baked fonts); on-device validation pending · target tag: `ue13-row-text-styles`
+
+**Why:** Rows had one fixed weight. A `style:` per row lets a title stand out
+(bold a report total, italicise a caption, underline a header-ish row). Applies
+to the row's **name/title** label (entity rows + report rows alike).
+
+**Key constraint — LVGL has no runtime bold/italic.** Weight/slant in LVGL is a
+*font swap*, and the built-in `lv_font_montserrat_*` are regular-only, so
+bold/italic need **baked font data**; only **underline** is a runtime
+`lv_text_decor`. So the feature spans two layers: a free LVGL decor (underline)
++ ESPHome-baked Montserrat Bold/Italic at the three row sizes (bold/italic).
+
+**Change:** `style: [bold, italic, underline]` (list, any combination) on a row.
+- `Entity::name_style` uint8 bitmask (`STYLE_BOLD/ITALIC/UNDERLINE`).
+- `make_entity_row` takes `name_font_override` + `name_underline`; the build loop
+  computes them via `resolve_name_font_(e)` (style bits + size → baked
+  `font::Font*`, or nullptr = regular) + the underline bit.
+- Baked fonts: new `packages/style-fonts.yaml` bakes Montserrat Bold + Italic at
+  18/24/32 from `gfonts://` (build-time download, like the MDI webfont), anchored
+  in `lvgl-ui.yaml`, and **package-merged** into the `ha_panel:` config
+  (`style_fonts: {bold:[…], italic:[…]}`) so the user only writes `style:`.
+- `bold|italic` with no bold-italic font baked → bold (documented).
+
+Tasks:
+- [x] `STYLE_*` flags + `Entity::name_style`; `add_entity`/`add_report` gain a
+      `name_style` arg; codegen maps the `style:` list → flags (`_style_flags`).
+- [x] `style_fonts:` config (`STYLE_FONTS_SCHEMA`) + `set_style_font` setter +
+      `style_fonts_[3][2]` slots; `resolve_name_font_` lookup.
+- [x] `make_entity_row` applies the override font + `LV_TEXT_DECOR_UNDERLINE`;
+      build loop passes per-row style; styles set at build time (name is static).
+- [x] `packages/style-fonts.yaml` (6 gfonts + merged `ha_panel:` wiring); 6
+      hidden anchors in `lvgl-ui.yaml`; include before `lvgl_ui` in the main yaml.
+- [x] Docs: README "Row text styles" + options-table row + report block;
+      `ha-entities.example.yaml` (bold report title + comment); this plan +
+      DEVELOPMENT.md.
+
+**Exit criteria:** `style: [bold]` / `[italic]` / `[underline]` / `[bold,
+underline]` render the row title in the right weight / slant / decoration at
+small/medium/large; combos work (bold+italic → bold); unstyled rows are
+byte-for-byte unchanged. Compiles + links clean.
+
+**Risks / unknowns:**
+- **Flash + build-time download.** 6 baked fonts (~+100 KB) + a gfonts fetch at
+  compile. Dropping the `style_fonts:` include reclaims it if unused.
+- **bold-italic gap.** No bold-italic font baked → that combo degrades to bold;
+  bake a third variant + extend `style_fonts_[3][3]` if it's wanted.
+- **Glyph coverage.** Baked variants use the default ASCII glyph set; a title with
+  non-ASCII (°, accents) in bold/italic would miss those glyphs. Add a `glyphs:`
+  set to `style-fonts.yaml` if needed.
+- **Package merge.** Relies on ESPHome deep-merging two `ha_panel:` blocks (same
+  id) — verified via `esphome config`; keep the ids in sync.
 
 ---
 

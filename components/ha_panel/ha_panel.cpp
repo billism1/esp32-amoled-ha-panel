@@ -35,7 +35,7 @@ void HAPanel::add_page(const std::string &name) {
 
 void HAPanel::add_entity(const std::string &entity_id, const std::string &friendly_name,
                          const std::string &icon_override, bool confirm,
-                         EntitySize size, bool realtime) {
+                         EntitySize size, bool realtime, uint8_t name_style) {
   if (this->pages_.empty()) {
     ESP_LOGE(TAG, "add_entity called before any page — codegen bug");
     return;
@@ -49,6 +49,7 @@ void HAPanel::add_entity(const std::string &entity_id, const std::string &friend
   e.confirm = confirm;
   e.size = size;
   e.realtime = realtime;
+  e.name_style = name_style;
   size_t idx = this->entities_.size();
   this->entities_.push_back(std::move(e));
   this->pages_.back().entity_indices.push_back(idx);
@@ -75,7 +76,7 @@ void HAPanel::add_report(const std::string &title, const std::string &type,
                          const std::string &domains_csv, const std::string &match_state_csv,
                          const std::string &device_class, const std::string &unit,
                          bool show_total, bool show_source, const std::string &scope,
-                         const std::string &icon, EntitySize size) {
+                         const std::string &icon, EntitySize size, uint8_t name_style) {
   if (this->pages_.empty()) {
     ESP_LOGE(TAG, "add_report called before any page — codegen bug");
     return;
@@ -98,6 +99,7 @@ void HAPanel::add_report(const std::string &title, const std::string &type,
   e.report.unit = unit;
   e.report.show_total = show_total;
   e.report.show_source = show_source;
+  e.name_style = name_style;
   size_t idx = this->entities_.size();
   this->entities_.push_back(std::move(e));
   this->pages_.back().entity_indices.push_back(idx);
@@ -308,6 +310,25 @@ const std::string &HAPanel::resolve_icon_(const Entity &e) const {
   }
   e.icon_resolved_ = HAPanel::utf8_encode_(cp);
   return e.icon_resolved_;
+}
+
+const lv_font_t *HAPanel::resolve_name_font_(const Entity &e) const {
+  // UE13: only bold / italic need a baked font; underline is decor, plain uses
+  // the RowMetrics built-in. Returns nullptr to mean "keep the regular font".
+  const bool bold = e.name_style & STYLE_BOLD;
+  const bool italic = e.name_style & STYLE_ITALIC;
+  if (!bold && !italic)
+    return nullptr;
+  uint8_t si = e.size == EntitySize::MEDIUM ? 1 : e.size == EntitySize::LARGE ? 2 : 0;
+  // variant 0 = bold, 1 = italic. bold (or bold+italic) prefers the bold font;
+  // italic-only uses the italic font; bold+italic falls back to bold if that's
+  // the only one wired.
+  font::Font *f = nullptr;
+  if (bold)
+    f = this->style_fonts_[si][0];
+  if (f == nullptr && italic)
+    f = this->style_fonts_[si][1];
+  return f != nullptr ? f->get_lv_font() : nullptr;
 }
 
 // ---------- setup / dump ----------
@@ -998,7 +1019,9 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
                                  const lv_font_t *mdi_lv_font,
                                  lv_obj_t **out_icon,
                                  lv_obj_t **out_led,
-                                 const RowMetrics &m) {
+                                 const RowMetrics &m,
+                                 const lv_font_t *name_font_override,
+                                 bool name_underline) {
   *out_unavail_label = nullptr;
   *out_icon = nullptr;
   *out_led = nullptr;
@@ -1037,7 +1060,11 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
   lv_obj_t *name = lv_label_create(btn);
   lv_label_set_text(name, e.friendly_name.c_str());
   lv_obj_set_style_text_color(name, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_text_font(name, m.name_font, 0);
+  // UE13: bold/italic swap to a baked variant of the row's size; underline is a
+  // runtime decor on top of whichever font. Fall back to the regular built-in.
+  lv_obj_set_style_text_font(name, name_font_override != nullptr ? name_font_override : m.name_font, 0);
+  if (name_underline)
+    lv_obj_set_style_text_decor(name, LV_TEXT_DECOR_UNDERLINE, 0);
   // With an icon: shift name right and trim width so the ellipsis still lands
   // before the right-side widget. Without: name flush-left, full width.
   lv_obj_align(name, LV_ALIGN_LEFT_MID, have_icon ? m.name_x_icon : m.name_x_noicon, 0);
@@ -1639,9 +1666,13 @@ void HAPanel::build_ui_() {
       else if (e.size == EntitySize::LARGE)
         row_mdi_font = mdi_lv_font_lg;
       const RowMetrics metrics = row_metrics_for(e.size);
+      // UE13: per-row name-label styling — bold/italic baked font + underline.
+      const lv_font_t *name_font_ovr = this->resolve_name_font_(e);
+      const bool name_underline = e.name_style & STYLE_UNDERLINE;
       lv_obj_t *btn = make_entity_row(list, e, this, &HAPanel::on_entity_row_clicked_,
                                       (uintptr_t) ei, &widget, &unavail,
-                                      glyph.c_str(), row_mdi_font, &icon, &led, metrics);
+                                      glyph.c_str(), row_mdi_font, &icon, &led, metrics,
+                                      name_font_ovr, name_underline);
       // P7d: long-press → detail modal, only for domains that have one.
       // P7f: also register long-press for confirm-flagged action-only entities
       // (no detail modal) so a long-press opens the same confirm sheet as a

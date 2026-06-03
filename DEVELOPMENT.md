@@ -3040,6 +3040,56 @@ icon column.
 
 ---
 
+### Phase UE13 — Per-row text styles (bold / italic / underline)
+
+**Status:** code complete; compiles + links clean (firmware ~+100 KB for the
+baked fonts); on-device validation pending.
+
+**Outcome:** any row (entity or report) can style its **name/title** label via
+`style: [bold, italic, underline]`. Applies to the left-hand name label only,
+across all row sizes.
+
+**Why ESPHome fonts, not an LVGL flag.** LVGL has no synthetic bold/italic and no
+runtime weight — styled text is purely a *font swap*, and the built-in
+`lv_font_montserrat_*` are regular-only. So bold/italic need **real baked font
+data**; underline is the one style LVGL does at runtime (`lv_text_decor`).
+
+- **Underline** → `lv_obj_set_style_text_decor(name, LV_TEXT_DECOR_UNDERLINE, 0)`
+  in `make_entity_row`. No font, no flash.
+- **Bold / italic** → baked Montserrat Bold + Italic at the three row sizes
+  (18/24/32) in a new `packages/style-fonts.yaml`, pulled from Google Fonts via
+  ESPHome's `gfonts://` at build (network at compile, like the MDI webfont).
+  `resolve_name_font_(e)` maps the row's `STYLE_*` bits + size → the baked
+  `font::Font*` (via `get_lv_font()`), or nullptr to keep the regular built-in.
+  `bold|italic` with no bold-italic font baked → bold (documented).
+
+**Auto-wired, zero user config.** The 6 fonts are anchored in `lvgl-ui.yaml`
+(hidden labels, same trick as the MDI fonts) and `style-fonts.yaml` carries an
+`ha_panel:` block (same id) that **package-merges** with the user's
+`ha-entities.yaml` — so `style_fonts: {bold: [...], italic: [...]}` lands on the
+component without the user touching their config. They only write `style:` on a
+row. Verified the merge: `esphome config` shows `pages` + `style_fonts` under one
+`ha_panel:`.
+
+**Plumbing.** `Entity::name_style` (uint8 bitmask, `STYLE_BOLD/ITALIC/UNDERLINE`
+in ha_panel.h); `add_entity`/`add_report` gain a `name_style` arg; codegen maps
+the YAML `style:` list → flags (`_style_flags`). Fonts wired via
+`set_style_font(size_idx, variant_idx, font)` from a `style_fonts:` config block
+(`STYLE_FONTS_SCHEMA`, each variant a list of exactly 3 ids). `make_entity_row`
+takes `name_font_override` + `name_underline` and applies them to the name label;
+the build loop computes them per row from `resolve_name_font_` + the underline
+bit. Styles are set at build time (name text is static) — no rebuild path needed.
+
+**Cost.** 6 baked fonts (~+100 KB flash) + a build-time gfonts download. If
+unused, dropping the `style_fonts:` package include reclaims it.
+
+**Verification (pending on-device):** style a row `[bold]`, `[italic]`,
+`[underline]`, and `[bold, underline]` at small/medium/large; confirm the title
+renders in the right weight/slant/decoration and that unstyled rows are
+unchanged.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks

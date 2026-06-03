@@ -58,3 +58,36 @@ lvgl:
             text: " "
             text_font: montserrat_32
             hidden: true
+        # UE13: anchor the baked bold/italic name-label fonts (style-fonts.yaml)
+        # so their glyph data links; ha_panel draws styled row titles via
+        # set_style_font() → get_lv_font(). Hidden, 0-impact.
+        - label:
+            id: montserrat_bold_18_anchor
+            text: " "
+            text_font: montserrat_bold_18
+            hidden: true
+        - label:
+            id: montserrat_bold_24_anchor
+            text: " "
+            text_font: montserrat_bold_24
+            hidden: true
+        - label:
+            id: montserrat_bold_32_anchor
+            text: " "
+            text_font: montserrat_bold_32
+            hidden: true
+        - label:
+            id: montserrat_italic_18_anchor
+            text: " "
+            text_font: montserrat_italic_18
+            hidden: true
+        - label:
+            id: montserrat_italic_24_anchor
+            text: " "
+            text_font: montserrat_italic_24
+            hidden: true
+        - label:
+            id: montserrat_italic_32_anchor
+            text: " "
+            text_font: montserrat_italic_32
+            hidden: true

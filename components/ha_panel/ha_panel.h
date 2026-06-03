@@ -97,6 +97,14 @@ struct HistorySample {
   float value;
 };
 
+// UE13: per-row text-style bit flags (Entity::name_style), applied to the row's
+// name/title label. Bold + italic swap to a baked Montserrat variant (LVGL has
+// no built-in bold/italic + no synthetic weighting); underline is a runtime
+// lv_text_decor (no font needed). bold|italic with no bold-italic font → bold.
+static constexpr uint8_t STYLE_BOLD = 1 << 0;
+static constexpr uint8_t STYLE_ITALIC = 1 << 1;
+static constexpr uint8_t STYLE_UNDERLINE = 1 << 2;
+
 struct Entity {
   std::string entity_id;
   std::string friendly_name;
@@ -126,6 +134,8 @@ struct Entity {
   // short "Live" window. For high-rate (e.g. 1 Hz MQTT) sensors that HA does not
   // record, where a REST fetch is wasted and the live stream is the data source.
   bool realtime{false};
+  // UE13: STYLE_* bit flags for the row's name/title label. 0 = plain.
+  uint8_t name_style{0};
   // E9: in-device history ring buffer. Only populated for chartable read-only
   // entities (numeric sensor / binary_sensor); empty for everything else. Fed
   // from on_state_ since boot, capped at HISTORY_CAP, wiped on reboot / sleep
@@ -161,7 +171,8 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void add_page(const std::string &name);
   void add_entity(const std::string &entity_id, const std::string &friendly_name,
                   const std::string &icon_override = "", bool confirm = false,
-                  EntitySize size = EntitySize::SMALL, bool realtime = false);
+                  EntitySize size = EntitySize::SMALL, bool realtime = false,
+                  uint8_t name_style = 0);
   // UE12: append a synthetic report row to the current page. `domains_csv` and
   // `match_state_csv` are comma-joined lists (split with parse_ha_list_); the
   // codegen passes them flat to avoid emitting std::vector initializers.
@@ -169,7 +180,7 @@ class HAPanel : public Component, public api::CustomAPIDevice {
                   const std::string &domains_csv, const std::string &match_state_csv,
                   const std::string &device_class, const std::string &unit,
                   bool show_total, bool show_source, const std::string &scope,
-                  const std::string &icon, EntitySize size);
+                  const std::string &icon, EntitySize size, uint8_t name_style = 0);
   // P7e: MDI glyph font for the per-entity icon column. nullptr → icons off,
   // rows fall back to the pre-P7e name-at-left layout.
   void set_mdi_font(font::Font *f) { this->mdi_font_ = f; }
@@ -177,6 +188,13 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // back to the base 24 px font (icon just looks relatively smaller).
   void set_mdi_font_medium(font::Font *f) { this->mdi_font_med_ = f; }
   void set_mdi_font_large(font::Font *f) { this->mdi_font_lg_ = f; }
+  // UE13: baked name-label font variants. size_idx 0/1/2 = small/medium/large;
+  // variant_idx 0 = bold, 1 = italic. nullptr (unwired) → that style falls back
+  // to the regular built-in montserrat for the size.
+  void set_style_font(uint8_t size_idx, uint8_t variant_idx, font::Font *f) {
+    if (size_idx < 3 && variant_idx < 2)
+      this->style_fonts_[size_idx][variant_idx] = f;
+  }
   // E9: REST history backfill wiring. All four must be set for backfill to run;
   // otherwise the chart falls back to the in-device ring buffer.
   void set_history_http(http_request::HttpRequestComponent *c) { this->history_http_ = c; }
@@ -311,6 +329,10 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void go_to_page_(size_t page_idx);
   // P7c: dispatches on Entity::render_class to update the right child widget.
   void rebuild_entity_row_(size_t entity_idx);
+  // UE13: resolve the bold/italic baked font for a row's name label given its
+  // style flags + size; returns nullptr to use the regular built-in (the
+  // RowMetrics name_font). bold+italic with no bold-italic font → bold.
+  const lv_font_t *resolve_name_font_(const Entity &e) const;
   // UE12: recompute every REPORT_TEXT row's value+colour and repaint its label.
   // Called once after build_ui_ and again from on_state_ on any state change.
   void recompute_reports_();
@@ -621,6 +643,10 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // fall back to mdi_font_ for that size.
   font::Font *mdi_font_med_{nullptr};
   font::Font *mdi_font_lg_{nullptr};
+  // UE13: baked name-label style fonts, [size_idx][variant_idx] where size is
+  // 0/1/2 = small/medium/large and variant is 0 = bold, 1 = italic. nullptr =
+  // unwired → fall back to the regular built-in for that size.
+  font::Font *style_fonts_[3][2]{};
 
   std::function<void(uint8_t)> brightness_setter_;
   std::function<void(uint8_t)> brightness_committer_;
