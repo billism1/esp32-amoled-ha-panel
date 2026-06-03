@@ -41,6 +41,31 @@ CONF_SIZE = "size"
 # from the in-device ring buffer + live-tail, defaulting to the short "Live"
 # window. For high-rate (1 Hz) sensors HA does not record (e.g. MQTT test feeds).
 CONF_REALTIME = "realtime"
+# UE12: a "report" row is a computed aggregate over the OTHER entities (lights
+# on, totals, min/max/avg, …) instead of one HA entity. `report:` is mutually
+# exclusive with `entity_id:` on a row (validated below). The fields mirror the
+# C++ ReportSpec.
+CONF_REPORT = "report"
+CONF_TYPE = "type"
+CONF_TITLE = "title"
+CONF_DOMAINS = "domains"
+CONF_MATCH_STATE = "match_state"
+CONF_DEVICE_CLASS = "device_class"
+CONF_UNIT = "unit"
+CONF_SHOW_TOTAL = "show_total"
+CONF_SHOW_SOURCE = "show_source"
+CONF_SCOPE = "scope"
+# UE12: report aggregation scope. "all" (default) = every entity on the panel
+# across all pages; "page" = only entities on the same page as the report row.
+REPORT_SCOPES = ["all", "page"]
+# UE12: selectable report `type:` values. Source of truth for both the
+# compile-time validation here and the C++ ReportType enum (report_type_from_).
+#   count    — N entities matching {domains, match_state}; show_total → "N / M"
+#   bool     — count collapsed to a flag: 0 → green check, else amber "N"
+#   offline  — N matched entities that are unavailable / unknown
+#   sum/avg  — total / mean of the matched numeric states (carries `unit:`)
+#   min/max  — smallest / largest numeric state; show_source → prepend its name
+REPORT_TYPES = ["count", "bool", "offline", "sum", "avg", "min", "max"]
 # E9: optional REST history backfill. When this block is present the history
 # chart sheet fetches GET /api/history/period/... over http_request; when it's
 # absent the chart uses only the in-device ring buffer (since-boot samples).
@@ -72,23 +97,63 @@ ENTITY_SIZES = {
     "large": EntitySize.LARGE,
 }
 
-ENTITY_SCHEMA = cv.Schema(
+def _match_state_value(value):
+    # YAML 1.1 parses bare on/off/yes/no as booleans, so `match_state: [on]`
+    # arrives as `True`. Map booleans back to the on/off HA states users meant
+    # (so both `[on]` and `["on"]` work). Quote any other non-on/off state.
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    return cv.string(value)
+
+
+# UE12: the `report:` block. `type` is a strict enum (unknown value = compile
+# error). `domains` / `match_state` are optional lists (empty = any). The two
+# lists are passed to C++ comma-joined and re-split there, so codegen needn't
+# emit std::vector initializers.
+REPORT_SCHEMA = cv.Schema(
     {
-        cv.Required(CONF_ENTITY_ID): cv.entity_id,
-        cv.Optional(CONF_FRIENDLY_NAME, default=""): cv.string,
-        # P7e: optional per-entity icon override ("mdi:foo"). Empty = fall
-        # through to the compile-time domain default → fallback glyph.
+        cv.Required(CONF_TYPE): cv.one_of(*REPORT_TYPES, lower=True),
+        cv.Required(CONF_TITLE): cv.string,
+        cv.Optional(CONF_DOMAINS, default=[]): cv.ensure_list(cv.string),
+        cv.Optional(CONF_MATCH_STATE, default=[]): cv.ensure_list(_match_state_value),
+        # device_class filtering needs UE7's connect-time attr subscription; it
+        # is parsed + matched today but inert until that lands (matches nothing).
+        cv.Optional(CONF_DEVICE_CLASS, default=""): cv.string,
+        cv.Optional(CONF_UNIT, default=""): cv.string,
+        cv.Optional(CONF_SHOW_TOTAL, default=False): cv.boolean,
+        cv.Optional(CONF_SHOW_SOURCE, default=False): cv.boolean,
+        # all (default) = aggregate every entity on the panel; page = only the
+        # entities on the same page as this report row.
+        cv.Optional(CONF_SCOPE, default="all"): cv.one_of(*REPORT_SCOPES, lower=True),
+        # optional MDI icon for the row ("mdi:foo"); omit = no icon column.
         cv.Optional(CONF_ICON, default=""): cv.string,
-        # P7f: short-tap opens a confirm sheet / detail modal instead of firing
-        # the action immediately. Meaningless on read-only domains (warned).
-        cv.Optional(CONF_CONFIRM, default=False): cv.boolean,
-        # E8: strict enum — an unrecognised value is a compile-time error.
-        cv.Optional(CONF_SIZE, default="small"): cv.one_of(
-            *ENTITY_SIZES, lower=True
-        ),
-        # UE7: bypass REST backfill, plot live from the ring buffer.
-        cv.Optional(CONF_REALTIME, default=False): cv.boolean,
     }
+)
+
+# A row is EITHER a normal entity (entity_id + per-entity options) OR a report
+# (report block). `size:` applies to both — report rows honour it like any row.
+ENTITY_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.Optional(CONF_ENTITY_ID): cv.entity_id,
+            cv.Optional(CONF_FRIENDLY_NAME, default=""): cv.string,
+            # P7e: optional per-entity icon override ("mdi:foo"). Empty = fall
+            # through to the compile-time domain default → fallback glyph.
+            cv.Optional(CONF_ICON, default=""): cv.string,
+            # P7f: short-tap opens a confirm sheet / detail modal instead of
+            # firing the action immediately. Meaningless on read-only domains.
+            cv.Optional(CONF_CONFIRM, default=False): cv.boolean,
+            # E8: strict enum — an unrecognised value is a compile-time error.
+            cv.Optional(CONF_SIZE, default="small"): cv.one_of(
+                *ENTITY_SIZES, lower=True
+            ),
+            # UE7: bypass REST backfill, plot live from the ring buffer.
+            cv.Optional(CONF_REALTIME, default=False): cv.boolean,
+            # UE12: computed-aggregate row (mutually exclusive with entity_id).
+            cv.Optional(CONF_REPORT): REPORT_SCHEMA,
+        }
+    ),
+    cv.has_exactly_one_key(CONF_ENTITY_ID, CONF_REPORT),
 )
 
 PAGE_SCHEMA = cv.Schema(
@@ -140,6 +205,25 @@ async def to_code(config):
     for page in config[CONF_PAGES]:
         cg.add(var.add_page(page[CONF_NAME]))
         for ent in page[CONF_ENTITIES]:
+            # UE12: a report row — emit add_report and skip the entity path.
+            if CONF_REPORT in ent:
+                r = ent[CONF_REPORT]
+                cg.add(
+                    var.add_report(
+                        r[CONF_TITLE],
+                        r[CONF_TYPE],
+                        ",".join(r[CONF_DOMAINS]),
+                        ",".join(r[CONF_MATCH_STATE]),
+                        r[CONF_DEVICE_CLASS],
+                        r[CONF_UNIT],
+                        r[CONF_SHOW_TOTAL],
+                        r[CONF_SHOW_SOURCE],
+                        r[CONF_SCOPE],
+                        r[CONF_ICON],
+                        ENTITY_SIZES[ent[CONF_SIZE]],
+                    )
+                )
+                continue
             confirm = ent[CONF_CONFIRM]
             if confirm:
                 domain = ent[CONF_ENTITY_ID].split(".", 1)[0]

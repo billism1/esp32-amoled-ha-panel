@@ -47,6 +47,44 @@ enum class RenderClass : uint8_t {
   COVER_TEXT,       // cover → chevron + Open/Closed text
   SUMMARY_TEXT,     // climate/media_player/number/select → state summary (P7d adds modal)
   READ_ONLY_TEXT,   // sensor/binary_sensor/everything else → text badge
+  // UE12: a synthetic "report" row whose right-side label holds a computed
+  // aggregate (count / min / max / …) over the OTHER entities, not one HA
+  // state. No HA subscription; painted by recompute_reports_, inert on tap.
+  REPORT_TEXT,
+};
+
+// UE12: which aggregate a REPORT_TEXT row computes over the filtered entities.
+// Mirrors the `type:` enum validated in __init__.py (REPORT_TYPES).
+enum class ReportType : uint8_t {
+  COUNT,    // N entities matching {domains, match_state}; show_total → "N / M"
+  BOOLEAN,  // count collapsed to a flag: 0 → green check, else amber "N"
+  OFFLINE,  // N matched entities that are unavailable / unknown
+  SUM,      // sum of numeric states
+  AVG,      // mean of numeric states
+  MIN,      // smallest numeric state (show_source → prepend its friendly_name)
+  MAX,      // largest numeric state
+};
+
+// UE12: which entities a report aggregates over. Mirrors REPORT_SCOPES in
+// __init__.py.
+enum class ReportScope : uint8_t {
+  ALL,   // every entity on the panel, across all pages (default)
+  PAGE,  // only entities on the same page as the report row
+};
+
+// UE12: the parsed `report:` spec carried by a synthetic report Entity. Empty
+// `domains` = any domain; empty `match_state` = any state. `device_class` is
+// matched against the entity's subscribed attrs — inert until UE7 subscribes
+// it, so v1 reports filter on domains + match_state.
+struct ReportSpec {
+  ReportType type{ReportType::COUNT};
+  ReportScope scope{ReportScope::ALL};
+  std::vector<std::string> domains;
+  std::vector<std::string> match_state;
+  std::string device_class;
+  std::string unit;          // suffix appended to numeric results ("°", "W", …)
+  bool show_total{false};    // COUNT: render "matched / in-scope"
+  bool show_source{false};   // MIN/MAX: prepend the extreme entity's name
 };
 
 // E9: one captured value in a read-only entity's history series. t_s is a
@@ -100,6 +138,9 @@ struct Entity {
   // this when live icons land.
   mutable std::string icon_resolved_;
   mutable bool icon_cached_{false};
+  // UE12: only meaningful when render_class == REPORT_TEXT. Empty/default on
+  // every real entity (small fixed overhead — two empty vectors + strings).
+  ReportSpec report;
 };
 
 struct Page {
@@ -121,6 +162,14 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void add_entity(const std::string &entity_id, const std::string &friendly_name,
                   const std::string &icon_override = "", bool confirm = false,
                   EntitySize size = EntitySize::SMALL, bool realtime = false);
+  // UE12: append a synthetic report row to the current page. `domains_csv` and
+  // `match_state_csv` are comma-joined lists (split with parse_ha_list_); the
+  // codegen passes them flat to avoid emitting std::vector initializers.
+  void add_report(const std::string &title, const std::string &type,
+                  const std::string &domains_csv, const std::string &match_state_csv,
+                  const std::string &device_class, const std::string &unit,
+                  bool show_total, bool show_source, const std::string &scope,
+                  const std::string &icon, EntitySize size);
   // P7e: MDI glyph font for the per-entity icon column. nullptr → icons off,
   // rows fall back to the pre-P7e name-at-left layout.
   void set_mdi_font(font::Font *f) { this->mdi_font_ = f; }
@@ -262,6 +311,14 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void go_to_page_(size_t page_idx);
   // P7c: dispatches on Entity::render_class to update the right child widget.
   void rebuild_entity_row_(size_t entity_idx);
+  // UE12: recompute every REPORT_TEXT row's value+colour and repaint its label.
+  // Called once after build_ui_ and again from on_state_ on any state change.
+  void recompute_reports_();
+  // UE12: evaluate one report spec → display string + text colour. When
+  // scope_indices is non-null the scan is limited to those entity indices
+  // (page scope); null scans every entity (all-pages scope).
+  void compute_report_(const ReportSpec &spec, const std::vector<size_t> *scope_indices,
+                       std::string *out_text, uint32_t *out_color);
   void open_picker_();
   void close_picker_();
   void update_status_dot_();

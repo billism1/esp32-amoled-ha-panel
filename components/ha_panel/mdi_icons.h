@@ -32,6 +32,7 @@ static const MdiGlyph MDI_GLYPHS[] = {
     {"checkbox-marked-circle-outline", 0xF0134},
     {"lightbulb-multiple", 0xF1255},
     {"lightbulb-on", 0xF06E8},
+    {"lightbulb-group", 0xF1253},
     {"lamp", 0xF06B5},
     {"desk-lamp", 0xF095F},
     {"ceiling-light", 0xF0769},
@@ -88,7 +89,7 @@ static const MdiGlyph MDI_GLYPHS[] = {
     {"checkbox-blank-circle-outline", 0xF0130},
     {"help-circle", 0xF02D7},
 };
-static const int MDI_GLYPH_COUNT = 72;
+static const int MDI_GLYPH_COUNT = 73;
 
 // Fallback glyph when a resolved name is not in the baked set above.
 static const uint32_t MDI_FALLBACK_CP = 0xF02D7;  // mdi:help-circle

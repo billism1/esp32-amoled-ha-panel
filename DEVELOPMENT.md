@@ -2952,6 +2952,94 @@ edits.
 
 ---
 
+### Phase UE12 — Report rows (computed aggregates as a row type)
+
+**Status:** code complete; compiles + links clean (RAM 16.6%, Flash 19.6%);
+on-device validation pending.
+
+**Outcome:** a page row can now be a `report:` block instead of an `entity_id:`,
+rendering a **computed aggregate** over the panel's other entities — "N lights
+on", totals, an offline count, or min/max/avg of a sensor group — with **no extra
+HA data**. Refreshed live as states arrive; view-only (a tap fires nothing).
+
+**Data universe = panel-known entities (plan decision A).** A report scans
+`entities_` (everything listed under any page), not all of HA. Config-free, stays
+inside the "no HA-side changes" rule. Counting entities you never added isn't
+possible without A′ (track-only subs) / B (HA template sensor) — both deferred.
+
+**Row model = synthetic entity (plan decision, Step 2).** A report is an `Entity`
+with `domain == "report"` + a new `RenderClass::REPORT_TEXT`, carrying a
+`ReportSpec` (type enum + `domains` / `match_state` / `device_class` / `unit` +
+`show_total` / `show_source`). It rides the *existing* row pipeline unchanged:
+`add_report` appends it like `add_entity`; `make_entity_row` builds the same
+right-aligned label (REPORT_TEXT folded into the LOCK/COVER/SUMMARY/READ_ONLY
+label arm); `size:` works for free. The synthetic entity is **skipped in the
+state-subscription loop** (no entity_id) and **excluded from its own scan**.
+Report rows get **no icon** (no "report" glyph; a fallback "?" would look broken)
+and their **pressed-bg flash is disabled** so they don't read as tappable.
+
+**Aggregation.** `recompute_reports_()` walks the report rows; `compute_report_()`
+filters `entities_` by `{domains, device_class}` then computes per `type`:
+- `count` / `bool` — matches over `{match_state}`; `bool` collapses to green ✓
+  (0) / amber "N"; `count` optionally "matched / in-scope" via `show_total`.
+- `offline` — matched entities that are `unavailable`/`unknown` (red when > 0).
+- `sum` / `avg` / `min` / `max` — numeric via the existing `state_to_value_`
+  (skips non-numeric/unavailable); empty match set renders an em-dash, no
+  div-by-zero. `min`/`max` track the extreme entity for `show_source`. Integer
+  results print without a decimal, else one place; `unit:` is suffixed.
+Colour follows the UE4/UE7 trap rule: counts/numeric stay **neutral**; only
+`bool`/`offline` colour (green/amber/red). Recompute runs once after the
+`build_ui_` row loop (initial paint; states may read 0/"—" pre-connect) and again
+from `on_state_` on **any** state change (bounded — tens of entities; per-domain
+indexing is the lever if it ever bites).
+
+**Tap = inert.** `REPORT_TEXT` is added to the `tap_entity_` switch returning
+false; `on_entity_row_clicked_`'s confirm / chartable / summary branches don't
+match `domain=="report"`, so a tap reaches the no-op. No long-press cb is
+registered (report has no detail modal / confirm).
+
+**Config plumbing.** `report:` is mutually exclusive with `entity_id:` per row,
+enforced by `cv.has_exactly_one_key(CONF_ENTITY_ID, CONF_REPORT)`. `type` is a
+strict `cv.one_of` (unknown value = compile error). `domains` / `match_state` are
+lists passed to C++ **comma-joined** and re-split with `parse_ha_list_`, so
+codegen emits no `std::vector` initializers — mirrors the flat `add_entity` call.
+
+**YAML on/off gotcha (fixed).** YAML 1.1 parses bare `on`/`off` as booleans, so
+`match_state: [on]` arrived as `True`. The `match_state` item validator maps
+booleans back (`True`→"on", `False`→"off"), so both `[on]` and `["on"]` work; docs
+recommend quoting other states.
+
+**device_class is parsed but inert** until UE7 subscribes the attribute — a
+`device_class:` filter matches nothing today (documented). v1 reports filter on
+`domains` + `match_state`, which fully covers the counts ask; numeric reports over
+`domains:[sensor]` mix units unless the matched set is homogeneous (call-out in
+the example file).
+
+**Scope (follow-up).** Reports defaulted to aggregating **all** entities across
+every page, which surprised on a per-room page. Added `scope:` — `all` (default,
+unchanged behavior) or `page` (only the report row's own page). `compute_report_`
+gained a `scope_indices` param + a `for_each` candidate iterator that walks either
+the passed page index list or all of `entities_`; `recompute_reports_` finds the
+page holding each report row (each index lives in exactly one page) and passes its
+`entity_indices` for `page` scope, `nullptr` for `all`. Under `page` scope
+`show_total`'s "in-scope" denominator is naturally that page's matching entities.
+
+**Icon (follow-up).** Added optional `icon: mdi:foo` on a report row, plumbed to
+`Entity::icon_override`. `resolve_icon_` already short-circuits a report with an
+empty override to "no icon"; a set override resolves through the normal
+chain, so a report row now shows an icon exactly like an entity row.
+
+**Verification (pending on-device):** add `count` (with/without `show_total`),
+`bool`, `offline`, and `min`/`max` (with `show_source`/`unit`) rows; confirm each
+shows the right value, updates live when an underlying entity changes, honours
+`size:`, never fires a service on tap, and that pages with no report rows are
+unchanged. Also: put the same `count` block with `scope: page` on two different
+pages and confirm each shows its own page's total, and that `scope: all` (or
+omitted) matches the whole-panel total; confirm a report `icon:` renders in the
+icon column.
+
+---
+
 ## Open decisions
 
 - None outstanding. (Resolved: arrows wrap around; connecting state blinks

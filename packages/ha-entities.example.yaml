@@ -49,6 +49,28 @@
 #   small glyph subset and fit comfortably on the 16 MB board. If you never use
 #   medium/large you can drop the mdi_font_medium/large keys below — those rows
 #   then upscale the 24 px icon (still works, just softer).
+#
+# Report rows (UE12): instead of an `entity_id:`, a row can carry a `report:`
+# block that shows a COMPUTED AGGREGATE over your other entities (lights on,
+# totals, offline count, min/max/avg of a sensor group). `scope: page` limits it
+# to the page it's on; `scope: all` (default) spans the whole panel. Optional
+# `icon: mdi:foo` shows an icon like any other row. See the worked examples on
+# the "Living Room" page below. FULL reference — every `type:` value and how to
+# find valid `domains` / `match_state` / `device_class` values for your own
+# entities — is in README.md → "Defining your pages" → "Report rows".
+# (Quote on/off states as ["on"], not [on] — YAML reads bare on/off as booleans.)
+#
+# Icons: value is `mdi:<name>` from https://pictogrammers.com/library/mdi/ — but
+# ONLY glyphs in this panel's baked subset render; anything else falls back to a
+# generic glyph (and logs once at boot). Add new ones to the EXTRA_ICONS list in
+# tools/build-mdi-glyphs.py, rerun it, then reflash. Common baked picks for reports:
+#   lights      mdi:lightbulb-multiple  mdi:lightbulb-on  mdi:lightbulb
+#   plugs/power mdi:power-plug  mdi:power
+#   count/total mdi:gauge  mdi:format-list-bulleted  mdi:numeric
+#   climate     mdi:thermometer  mdi:water-percent
+#   security    mdi:door-open  mdi:window-open  mdi:lock  mdi:motion-sensor
+#   alerts      mdi:leak  mdi:smoke-detector  mdi:alert-circle  mdi:battery
+#   misc        mdi:home  mdi:checkbox-marked-circle-outline
 
 ha_panel:
   id: ha_panel_id      # referenced by id(ha_panel_id) in lambdas (clock, api triggers, brightness setter)
@@ -68,6 +90,26 @@ ha_panel:
   pages:
     - name: "Living Room"
       entities:
+        # UE12: computed-aggregate rows (no entity_id). View-only.
+        - report:
+            type: count
+            title: "Lights on"
+            domains: [light]
+            match_state: ["on"]
+            show_total: true       # "2 / 5"
+            scope: page            # only this page's lights (omit/all = whole panel)
+            icon: mdi:lightbulb-multiple   # baked glyph — see icon list above
+          size: medium
+        - report:
+            type: offline
+            title: "Offline devices"   # red count when anything is unavailable
+            # scope omitted → all pages
+        - report:
+            type: max                  # also: min / avg / sum
+            title: "Warmest room"
+            domains: [sensor]
+            show_source: true          # "Office 24°"
+            unit: "°"
         - entity_id: light.living_room_lamp
           friendly_name: "Couch lamp"
           icon: mdi:floor-lamp   # optional per-entity override

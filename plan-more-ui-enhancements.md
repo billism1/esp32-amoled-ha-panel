@@ -1090,7 +1090,8 @@ README pointer). Compiles + links clean.
 
 ## UE12 — Report rows (computed aggregates as a row type)
 
-**Status:** ⬜ not started · target tag: `ue12-report-rows`
+**Status:** 🧪 code complete — compiles + links clean (RAM 16.6%, Flash 19.6%);
+on-device validation pending · target tag: `ue12-report-rows`
 
 **Why:** Every row today maps to exactly one HA entity
 ([build_ui_ row loop](components/ha_panel/ha_panel.cpp#L1373-L1404) walks
@@ -1248,38 +1249,37 @@ pages:
 ```
 
 Tasks:
-- [ ] **Config plumbing.** Add `CONF_REPORT` + a `REPORT_SCHEMA`
-      (`type` enum, `title`, optional `domains`/`device_class`/`match_state`/
-      `unit`/`threshold`/`show_total`/`show_source`) in
-      [__init__.py](components/ha_panel/__init__.py); make `ENTITY_SCHEMA` accept
-      **exactly one** of `entity_id` | `report`
-      (`cv.has_exactly_one_key`). Emit `add_report(...)` for report rows.
-- [ ] **Model.** Add `RenderClass::REPORT_TEXT` to
-      [ha_panel.h](components/ha_panel/ha_panel.h#L43-L50) and a small `Report`
-      spec (type enum + filter + format flags) on/beside `Entity`. `add_report`
-      builds a synthetic `Entity` (`domain="report"`) and appends it to
-      `entities_` + the current page's `entity_indices` exactly like a normal row.
-- [ ] **Aggregation engine.** `recompute_reports_()` iterates report entities,
-      and for each scans `entities_` applying the filter, then computes per
-      `type` (count / bool / offline / sum / avg / min / max). Skip the report
-      entities themselves and skip `unavailable`/non-numeric samples in numeric
-      types; guard empty match sets (render "—", no div-by-zero).
-- [ ] **Render.** New `REPORT_TEXT` arm in `rebuild_entity_row_`: draw the
-      computed string; colour only for `bool`/threshold types (green = all-clear,
-      amber/accent = active, red = alarm/offline). `count`/numeric default
-      **neutral** (see colour risk). Title from the spec, value right-aligned
-      like other read-only rows.
-- [ ] **Recompute hook.** Call `recompute_reports_()` from `on_state_` after a
-      normal entity updates, and once after the build loop
-      ([:1404](components/ha_panel/ha_panel.cpp#L1404)) for the initial paint.
-      v1: recompute **all** report rows on any state change (bounded — tens of
-      entities). If it bites, index reports by the domains they watch and
-      recompute only affected ones.
-- [ ] **No-tap.** Report rows are view-only in v1: don't register the click /
-      long-press service dispatch (skip the `on_entity_row_clicked_` action path
-      for `domain=="report"`), so a tap is inert. Pressed-bg highlight off.
-- [ ] **Docs.** README Features + DEVELOPMENT.md log; document the v1 universe
-      (panel-known entities) and the deferred `type:`s.
+- [x] **Config plumbing.** Added `CONF_REPORT` + `REPORT_SCHEMA`
+      (`type` enum, `title`, optional `domains`/`match_state`/`device_class`/
+      `unit`/`show_total`/`show_source`) in
+      [__init__.py](components/ha_panel/__init__.py); `ENTITY_SCHEMA` now wraps
+      `cv.has_exactly_one_key(CONF_ENTITY_ID, CONF_REPORT)`. Lists pass to C++
+      comma-joined (re-split with `parse_ha_list_`); a bare-`on`→bool YAML quirk
+      is mapped back in the `match_state` validator. Emits `add_report(...)`.
+- [x] **Model.** Added `RenderClass::REPORT_TEXT` + `ReportType` enum + a
+      `ReportSpec` (filter + format flags) on `Entity` in
+      [ha_panel.h](components/ha_panel/ha_panel.h). `add_report` builds a
+      synthetic `Entity` (`domain="report"`, no entity_id) and appends it like a
+      normal row; skipped in the state-subscription loop.
+- [x] **Aggregation engine.** `recompute_reports_()` + `compute_report_()` scan
+      `entities_` by `{domains, device_class}`, then compute per `type` (count /
+      bool / offline / sum / avg / min / max). Reports excluded from their own
+      scan; numeric types skip `unavailable`/non-numeric; empty set renders em-dash
+      (no div-by-zero). `min`/`max` track the extreme entity for `show_source`.
+- [x] **Render.** `REPORT_TEXT` folds into `make_entity_row`'s label arm (title
+      left, value right). `recompute_reports_` paints text + colour; counts/numeric
+      neutral, `bool`/`offline` coloured (green/amber/red). `rebuild_entity_row_`
+      REPORT_TEXT arm is a no-op (recompute owns painting).
+- [x] **Recompute hook.** Called from `on_state_` after any entity updates, and
+      once after the build loop for the initial paint. v1 recomputes **all** report
+      rows per state change (bounded); per-domain indexing left as the future lever.
+- [x] **No-tap.** `REPORT_TEXT` added to `tap_entity_` (returns false); the
+      `on_entity_row_clicked_` branches don't match `domain=="report"` → tap inert;
+      no long-press cb registered. Pressed-bg flash disabled in `make_entity_row`.
+- [x] **Docs.** README Features bullet + Defining-your-pages example;
+      `ha-entities.example.yaml` schema block + live example rows; DEVELOPMENT.md
+      Phase UE12 log. v1 universe (panel-known) + deferred `type:`s documented;
+      `device_class` parsed but inert until UE7.
 
 **Exit criteria:** A page can carry report rows that show, live and correct: "N
 lights on" (with optional "N / M"), total entities, total of a given domain, an

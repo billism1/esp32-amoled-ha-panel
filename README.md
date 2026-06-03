@@ -108,6 +108,11 @@ behaviour live in shared, board-agnostic packages.
   `climate`, `media_player`, …).
 - Tap a numeric `sensor` or `binary_sensor` → **history chart sheet**
   (1h / 6h / 24h windows). See [Entity history chart](#entity-history-chart).
+- **Report rows** (`report:` instead of `entity_id:`) show a live, computed
+  summary of your other entities — lights on, totals per domain, offline count,
+  or min / max / avg of a sensor group — with no extra HA data. View-only;
+  see [packages/ha-entities.example.yaml](packages/ha-entities.example.yaml) for
+  the `type:` values.
 - Optional low-volume **touch click sound** (ES8311 codec), off by default,
   fires on a tap but not a swipe.
 
@@ -252,10 +257,173 @@ ha_panel:
           friendly_name: "Garage door"
           confirm: true                  # optional; tap opens a confirm sheet
         - entity_id: switch.tv_power
+        - report:                        # UE12: computed summary, not an entity
+            type: count
+            title: "Lights on"
+            domains: [light]
+            match_state: ["on"]
+            show_total: true             # "2 / 5"
 ```
 
-See [packages/ha-entities.example.yaml](packages/ha-entities.example.yaml) for
-the full schema and inline docs.
+Each list under `pages:` is one page; each list under its `entities:` is one
+row, rendered top-to-bottom in the order you write them. Pages render
+left-to-right in the carousel in declared order.
+
+**Page keys**
+
+| Key | Required | What it does |
+|-----|----------|--------------|
+| `name` | yes | Page title, shown in the header and the page picker. |
+| `entities` | yes | Ordered list of rows. Each row is **either** an entity (`entity_id:` + the options below) **or** a [report](#report-rows) (`report:`). |
+
+**Entity row options**
+
+A row's `entity_id` is the only required key; everything else is optional. The
+**domain** — the part before the dot in the `entity_id` — decides how the row
+renders and what a tap does (see the table further down); you don't configure
+that.
+
+| Option | Default | Applies to | What it does |
+|--------|---------|-----------|--------------|
+| `entity_id` | — (required) | any | The Home Assistant entity to show, e.g. `light.couch_lamp`. |
+| `friendly_name` | the `entity_id` | any | The row label. |
+| `icon` | domain default | any | MDI glyph override, `mdi:floor-lamp` (or bare `floor-lamp`). Must be in the baked glyph subset — unknown names log once and fall back to a generic glyph. Add glyphs with `tools/build-mdi-glyphs.py`. |
+| `size` | `small` | any | Row scale: `small` / `medium` / `large`. Scales height, name font, icon and the right-side widget together. Mixed sizes on a page are fine. |
+| `confirm` | `false` | controllable domains | Short-tap opens a confirm sheet / detail modal instead of firing immediately — a guard against accidental brushes. Meaningful on `light` `switch` `fan` `input_boolean` `scene` `script` `automation` `button` `lock` `cover` `climate` `media_player` `number` `select`; ignored (with a compile warning) on read-only domains. |
+| `realtime` | `false` | numeric `sensor` / `binary_sensor` | Skips the REST history backfill and plots the history sheet purely from the in-device ring buffer + live stream, on a short "Live" window. For high-rate feeds HA doesn't record (e.g. 1 Hz MQTT). Leave off for entities HA records normally. |
+
+**What a tap does, by domain** (automatic — derived from the `entity_id`):
+
+| Domain | Row shows | Short tap | Long press |
+|--------|-----------|-----------|------------|
+| `light` `switch` `fan` `input_boolean` | on/off switch | toggles | detail modal (`light`/`fan` only: brightness, colour-temp, speed) |
+| `scene` `script` `automation` `button` | ▶ play glyph | fires the action | — |
+| `lock` | Locked / Unlocked | lock / unlock | — |
+| `cover` | Open / Closed | open / close | position modal |
+| `climate` `media_player` `number` `select` | state summary | opens the detail modal | detail modal |
+| `sensor` `binary_sensor` | read-only value / status LED | opens the [history chart](#entity-history-chart) (numeric / binary only) | — |
+
+(`confirm: true` inserts a confirmation step before any of the "fires"/"toggles"
+actions above.)
+
+For copy-paste starting points covering each of these, see the worked examples in
+[packages/ha-entities.example.yaml](packages/ha-entities.example.yaml).
+
+### Report rows
+
+A row with a `report:` block (instead of `entity_id:`) shows a **computed
+aggregate** over the other entities on your panel — no extra Home Assistant data,
+refreshed live, view-only. `report:` and `entity_id:` are mutually exclusive on a
+row; `size:` still applies.
+
+```yaml
+- report:
+    type: count                 # REQUIRED
+    title: "Lights on"          # REQUIRED — row label (left side)
+    domains: [light]            # optional — limit to these domains (omit = any)
+    match_state: ["on"]         # optional — only these states (omit = any)
+    device_class: ""            # optional — see note below
+    unit: "°"                   # optional — suffix on numeric results
+    show_total: false           # count: "matched / in-scope", e.g. "3 / 5"
+    show_source: false          # min/max: prepend the extreme entity's name
+    scope: all                  # all (default) = whole panel; page = this page
+    icon: mdi:lightbulb-multiple # optional — MDI glyph; omit = no icon column
+  size: medium
+```
+
+**`scope:` — which entities are aggregated.** Default `all` counts matching
+entities across **every page** of the panel (e.g. "lights on" anywhere in the
+house). `scope: page` restricts the aggregation to entities on the **same page
+as the report row**, so the identical block on different pages reports that
+page's own total. Put a `scope: page` "Lights on" row on each room page and a
+`scope: all` one on a summary page.
+
+**`icon:` — the row's glyph** (same rule as an entity row's `icon:`). The value
+is `mdi:<name>`, where `<name>` is an icon's name from the
+[Material Design Icons library](https://pictogrammers.com/library/mdi/) — search
+there, the name shown under each icon is what you type (e.g. the *Thermometer*
+icon → `mdi:thermometer`). Omit `icon:` for no icon column.
+
+> ⚠️ Only icons in the panel's **baked glyph subset** render — a name that isn't
+> baked falls back to a generic glyph and logs once at boot. To use a name that
+> isn't in the list below, add it to the `EXTRA_ICONS` list in
+> `tools/build-mdi-glyphs.py`, rerun `python tools/build-mdi-glyphs.py` (it
+> regenerates `packages/mdi-font.yaml` + `components/ha_panel/mdi_icons.h`), and
+> reflash.
+
+Common baked icons for report rows (all render as-is):
+
+| Use | `icon:` |
+|-----|---------|
+| Lights | `mdi:lightbulb-multiple`, `mdi:lightbulb-on`, `mdi:lightbulb` |
+| Switches / plugs | `mdi:power-plug`, `mdi:power` |
+| Count / total | `mdi:gauge`, `mdi:format-list-bulleted`, `mdi:numeric` |
+| Temperature / humidity | `mdi:thermometer`, `mdi:water-percent` |
+| Motion | `mdi:motion-sensor` |
+| Doors / windows | `mdi:door-open`, `mdi:window-open` |
+| Locks | `mdi:lock`, `mdi:lock-open` |
+| Water leak / smoke | `mdi:leak`, `mdi:smoke-detector` |
+| Battery | `mdi:battery` |
+| Offline / alert | `mdi:alert-circle`, `mdi:alert` |
+| All-clear | `mdi:checkbox-marked-circle-outline` |
+| House summary | `mdi:home` |
+
+**`type:` is the only closed list** (a typo here is a compile error):
+
+| `type`    | Shows |
+|-----------|-------|
+| `count`   | number of entities matching `{domains, match_state}`; `show_total` → `"3 / 5"` |
+| `bool`    | the count collapsed to a flag — `0` → green ✓, else amber `"N"` |
+| `offline` | matched entities that are `unavailable`/`unknown` (red when > 0) |
+| `sum`     | sum of matched numeric states (use `unit:`), e.g. total power draw |
+| `avg`     | mean of matched numeric states |
+| `min` / `max` | smallest / largest numeric state; `show_source` → `"Office 24°"` |
+
+**`domains`, `match_state`, and `device_class` are NOT panel-defined lists.** The
+panel matches them *literally* against Home Assistant's own values, so the valid
+set is whatever **your** entities + integrations report — there is no fixed menu
+to choose from. To see the exact values for any entity, open **Home Assistant →
+Developer Tools → States**:
+
+- the **entity_id** prefix before the dot is its **domain** — `light.kitchen` →
+  `light`, `binary_sensor.front_door` → `binary_sensor`.
+- the **State** column is what you put in **`match_state`** — `on`, `off`,
+  `closed`, `heat`, `playing`, …
+- the **Attributes** box, the `device_class:` line (if present), is the
+  **`device_class`** — `temperature`, `motion`, `door`, …
+
+> **`device_class` is parsed but inert today** — it needs the attribute
+> subscription that lands in a later phase (UE7), so a `device_class:` filter
+> currently matches nothing. Filter with `domains` + `match_state` for now.
+
+Common values, as a starting point (**not exhaustive** — Developer Tools is the
+source of truth for your install):
+
+| Domain | Typical `match_state` values |
+|--------|------------------------------|
+| `light` `switch` `fan` `input_boolean` | `on`, `off` |
+| `cover` | `open`, `closed`, `opening`, `closing` |
+| `lock` | `locked`, `unlocked`, `jammed` |
+| `climate` | `off`, `heat`, `cool`, `heat_cool`, `auto`, `dry`, `fan_only` |
+| `media_player` | `playing`, `paused`, `idle`, `off`, `standby` |
+| `binary_sensor` | `on`, `off` (meaning depends on its `device_class`) |
+| `person` `device_tracker` | `home`, `not_home` |
+| `sensor` | numeric or free text — usually filtered with `sum`/`avg`/`min`/`max`, not `match_state` |
+
+Any entity in any state can also be `unavailable` or `unknown` (what `offline`
+counts).
+
+Common `device_class` values (for when UE7 lands): `sensor` →
+`temperature`, `humidity`, `power`, `energy`, `battery`, `illuminance`,
+`pressure`, `co2`; `binary_sensor` → `motion`, `occupancy`, `presence`, `door`,
+`window`, `garage_door`, `moisture`, `smoke`, `gas`, `co`, `problem`, `battery`,
+`connectivity`. The full lists live in Home Assistant's docs
+([sensor](https://www.home-assistant.io/integrations/sensor/#device-class),
+[binary_sensor](https://www.home-assistant.io/integrations/binary_sensor/#device-class)).
+
+> **Quote `on`/`off`** (`["on"]`, not `[on]`) — YAML reads bare `on`/`off` as
+> booleans. The panel maps them back, but quoting is clearer and avoids surprises
+> with other truthy words (`yes`/`no`).
 
 ---
 

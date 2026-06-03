@@ -36,6 +36,7 @@ font:
       - "\U000F0134"  # mdi:checkbox-marked-circle-outline
       - "\U000F1255"  # mdi:lightbulb-multiple
       - "\U000F06E8"  # mdi:lightbulb-on
+      - "\U000F1253"  # mdi:lightbulb-group
       - "\U000F06B5"  # mdi:lamp
       - "\U000F095F"  # mdi:desk-lamp
       - "\U000F0769"  # mdi:ceiling-light
@@ -116,6 +117,7 @@ font:
       - "\U000F0134"  # mdi:checkbox-marked-circle-outline
       - "\U000F1255"  # mdi:lightbulb-multiple
       - "\U000F06E8"  # mdi:lightbulb-on
+      - "\U000F1253"  # mdi:lightbulb-group
       - "\U000F06B5"  # mdi:lamp
       - "\U000F095F"  # mdi:desk-lamp
       - "\U000F0769"  # mdi:ceiling-light
@@ -196,6 +198,7 @@ font:
       - "\U000F0134"  # mdi:checkbox-marked-circle-outline
       - "\U000F1255"  # mdi:lightbulb-multiple
       - "\U000F06E8"  # mdi:lightbulb-on
+      - "\U000F1253"  # mdi:lightbulb-group
       - "\U000F06B5"  # mdi:lamp
       - "\U000F095F"  # mdi:desk-lamp
       - "\U000F0769"  # mdi:ceiling-light

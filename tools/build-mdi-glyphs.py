@@ -73,8 +73,9 @@ FALLBACK_ICON = "help-circle"
 # costs ~1 KB flash.
 EXTRA_ICONS = [
     # lights
-    "lightbulb-multiple", "lightbulb-on", "lamp", "desk-lamp", "ceiling-light",
-    "floor-lamp", "string-lights", "led-strip-variant", "wall-sconce",
+    "lightbulb-multiple", "lightbulb-on", "lightbulb-group", "lamp", "desk-lamp",
+    "ceiling-light", "floor-lamp", "string-lights", "led-strip-variant",
+    "wall-sconce",
     # switches / power
     "toggle-switch-off", "power", "power-plug", "power-socket-us",
     # fans

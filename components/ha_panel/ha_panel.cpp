@@ -54,6 +54,55 @@ void HAPanel::add_entity(const std::string &entity_id, const std::string &friend
   this->pages_.back().entity_indices.push_back(idx);
 }
 
+// UE12: map the validated `type:` string to the enum (codegen guarantees one of
+// the known values; default COUNT is just a belt-and-suspenders fallback).
+static ReportType report_type_from_(const std::string &t) {
+  if (t == "bool") return ReportType::BOOLEAN;
+  if (t == "offline") return ReportType::OFFLINE;
+  if (t == "sum") return ReportType::SUM;
+  if (t == "avg") return ReportType::AVG;
+  if (t == "min") return ReportType::MIN;
+  if (t == "max") return ReportType::MAX;
+  return ReportType::COUNT;
+}
+
+// UE12: "page" → only the report row's own page; anything else → all pages.
+static ReportScope report_scope_from_(const std::string &s) {
+  return s == "page" ? ReportScope::PAGE : ReportScope::ALL;
+}
+
+void HAPanel::add_report(const std::string &title, const std::string &type,
+                         const std::string &domains_csv, const std::string &match_state_csv,
+                         const std::string &device_class, const std::string &unit,
+                         bool show_total, bool show_source, const std::string &scope,
+                         const std::string &icon, EntitySize size) {
+  if (this->pages_.empty()) {
+    ESP_LOGE(TAG, "add_report called before any page — codegen bug");
+    return;
+  }
+  Entity e;
+  // Synthetic: no entity_id (never subscribed), domain "report" routes the row
+  // through RenderClass::REPORT_TEXT for layout + inert tap.
+  e.friendly_name = title;
+  e.domain = "report";
+  e.render_class = RenderClass::REPORT_TEXT;
+  // UE12: optional icon. Empty → no icon column (resolve_icon_ short-circuits
+  // "report" + empty override); set → resolved like any other row's icon.
+  e.icon_override = icon;
+  e.size = size;
+  e.report.type = report_type_from_(type);
+  e.report.scope = report_scope_from_(scope);
+  e.report.domains = HAPanel::parse_ha_list_(domains_csv);
+  e.report.match_state = HAPanel::parse_ha_list_(match_state_csv);
+  e.report.device_class = device_class;
+  e.report.unit = unit;
+  e.report.show_total = show_total;
+  e.report.show_source = show_source;
+  size_t idx = this->entities_.size();
+  this->entities_.push_back(std::move(e));
+  this->pages_.back().entity_indices.push_back(idx);
+}
+
 std::string HAPanel::extract_domain_(const std::string &entity_id) {
   auto dot = entity_id.find('.');
   if (dot == std::string::npos)
@@ -225,6 +274,13 @@ const std::string &HAPanel::resolve_icon_(const Entity &e) const {
     return e.icon_resolved_;
   }
 
+  // UE12: report rows carry no domain icon (there's no "report" glyph and a
+  // fallback "?" would read as broken). Empty result → name flush-left layout.
+  if (e.domain == "report" && e.icon_override.empty()) {
+    e.icon_resolved_.clear();
+    return e.icon_resolved_;
+  }
+
   // Step 1: YAML override. Accept "mdi:foo" or bare "foo".
   std::string name;
   if (!e.icon_override.empty()) {
@@ -260,6 +316,9 @@ void HAPanel::setup() {
   ESP_LOGCONFIG(TAG, "Subscribing to %u entities across %u pages",
                 (unsigned) this->entities_.size(), (unsigned) this->pages_.size());
   for (const auto &e : this->entities_) {
+    // UE12: report rows are synthetic — no entity_id, no HA state to subscribe.
+    if (e.render_class == RenderClass::REPORT_TEXT)
+      continue;
     this->subscribe_homeassistant_state(&HAPanel::on_state_, e.entity_id);
   }
   // E7 Step 0 prototype: connect-time `brightness` subscription for lights
@@ -483,6 +542,9 @@ void HAPanel::on_state_(const std::string &entity_id, StringRef state) {
       }
       this->redraw_history_();
     }
+    // UE12: any state change can shift a report's aggregate — recompute all
+    // report rows. Bounded (tens of entities); see the plan's perf note.
+    this->recompute_reports_();
     return;
   }
   ESP_LOGW(TAG, "state callback for unknown entity %s", entity_id.c_str());
@@ -614,6 +676,190 @@ void HAPanel::rebuild_entity_row_(size_t entity_idx) {
       }
       return;
     }
+    case RenderClass::REPORT_TEXT: {
+      // UE12: report value + colour are computed by recompute_reports_, which
+      // runs after build_ui_ and on every state change. Nothing per-entity to
+      // refresh here (a report has no own HA state).
+      return;
+    }
+  }
+}
+
+// ---------- UE12 report aggregation ----------
+
+void HAPanel::recompute_reports_() {
+  for (size_t i = 0; i < this->entities_.size(); i++) {
+    Entity &r = this->entities_[i];
+    if (r.render_class != RenderClass::REPORT_TEXT)
+      continue;
+    // UE12: page scope → limit the scan to the page that holds this report row
+    // (each entity index lives in exactly one page). all scope → nullptr.
+    const std::vector<size_t> *scope = nullptr;
+    if (r.report.scope == ReportScope::PAGE) {
+      for (const auto &p : this->pages_) {
+        bool here = false;
+        for (size_t ei : p.entity_indices)
+          if (ei == i) { here = true; break; }
+        if (here) {
+          scope = &p.entity_indices;
+          break;
+        }
+      }
+    }
+    std::string text;
+    uint32_t col = 0xFFFFFF;
+    this->compute_report_(r.report, scope, &text, &col);
+    r.state = text;
+    r.has_state = true;
+    lv_obj_t *w = (i < this->widgets_by_entity_.size())
+                      ? this->widgets_by_entity_[i]
+                      : nullptr;
+    if (w != nullptr) {
+      lv_label_set_text(w, text.c_str());
+      lv_obj_set_style_text_color(w, lv_color_hex(col), 0);
+    }
+  }
+}
+
+void HAPanel::compute_report_(const ReportSpec &s, const std::vector<size_t> *scope_indices,
+                              std::string *out_text, uint32_t *out_color) {
+  // Shared palette with rebuild_entity_row_: white neutral, grey idle, green
+  // all-clear, amber active, red alert.
+  constexpr uint32_t NEUTRAL = 0xFFFFFF, GREY = 0x888888, GREEN = 0x66BB66,
+                     AMBER = 0xDDAA33, RED = 0xCC4444;
+  *out_color = NEUTRAL;
+
+  // UE12: visit each candidate entity — the report's own page (page scope) or
+  // every entity (all scope, scope_indices == nullptr). `fn` returning is the
+  // per-candidate body; use `return` inside it where a loop would `continue`.
+  auto for_each = [&](const std::function<void(const Entity &)> &fn) {
+    if (scope_indices != nullptr) {
+      for (size_t idx : *scope_indices)
+        if (idx < this->entities_.size())
+          fn(this->entities_[idx]);
+    } else {
+      for (const auto &e : this->entities_)
+        fn(e);
+    }
+  };
+
+  // A real (non-report) entity is "in scope" when it passes the domain +
+  // device_class filter. Empty domains = any. device_class needs UE7's attr
+  // subscription, so it matches nothing until that lands (documented).
+  auto in_scope = [&](const Entity &e) -> bool {
+    if (e.render_class == RenderClass::REPORT_TEXT)
+      return false;
+    if (!s.domains.empty()) {
+      bool ok = false;
+      for (const auto &d : s.domains)
+        if (e.domain == d) { ok = true; break; }
+      if (!ok)
+        return false;
+    }
+    if (!s.device_class.empty()) {
+      auto it = e.attrs.find("device_class");
+      if (it == e.attrs.end() || it->second != s.device_class)
+        return false;
+    }
+    return true;
+  };
+
+  switch (s.type) {
+    case ReportType::COUNT:
+    case ReportType::BOOLEAN: {
+      int total = 0, matched = 0;
+      for_each([&](const Entity &e) {
+        if (!in_scope(e))
+          return;
+        total++;
+        bool m = s.match_state.empty();
+        for (const auto &st : s.match_state)
+          if (e.state == st) { m = true; break; }
+        if (m)
+          matched++;
+      });
+      if (s.type == ReportType::BOOLEAN) {
+        if (matched == 0) {
+          *out_text = LV_SYMBOL_OK;  // all clear
+          *out_color = GREEN;
+        } else {
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%d", matched);
+          *out_text = buf;
+          *out_color = AMBER;
+        }
+      } else {
+        char buf[24];
+        if (s.show_total)
+          snprintf(buf, sizeof(buf), "%d / %d", matched, total);
+        else
+          snprintf(buf, sizeof(buf), "%d", matched);
+        *out_text = buf;
+      }
+      return;
+    }
+    case ReportType::OFFLINE: {
+      int n = 0;
+      for_each([&](const Entity &e) {
+        if (!in_scope(e))
+          return;
+        if (!e.has_state || e.state == "unavailable" || e.state == "unknown")
+          n++;
+      });
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%d", n);
+      *out_text = buf;
+      *out_color = n > 0 ? RED : GREY;
+      return;
+    }
+    default: {  // SUM / AVG / MIN / MAX
+      int cnt = 0;
+      float acc = 0.0f, best = 0.0f;
+      const Entity *best_e = nullptr;
+      for_each([&](const Entity &e) {
+        if (!in_scope(e))
+          return;
+        float v;
+        if (!HAPanel::state_to_value_(e, &v))
+          return;  // skip non-numeric / unavailable
+        cnt++;
+        acc += v;
+        if (best_e == nullptr) {
+          best = v;
+          best_e = &e;
+        } else if (s.type == ReportType::MIN && v < best) {
+          best = v;
+          best_e = &e;
+        } else if (s.type == ReportType::MAX && v > best) {
+          best = v;
+          best_e = &e;
+        }
+      });
+      if (cnt == 0) {
+        *out_text = "--";  // no numeric data (ASCII — em dash isn't baked)
+        *out_color = GREY;
+        return;
+      }
+      float result = best;
+      if (s.type == ReportType::SUM)
+        result = acc;
+      else if (s.type == ReportType::AVG)
+        result = acc / cnt;
+      char num[24];
+      if (result == floorf(result))
+        snprintf(num, sizeof(num), "%.0f", result);
+      else
+        snprintf(num, sizeof(num), "%.1f", result);
+      char buf[80];
+      bool extremum = (s.type == ReportType::MIN || s.type == ReportType::MAX);
+      if (s.show_source && extremum && best_e != nullptr)
+        snprintf(buf, sizeof(buf), "%s %s%s", best_e->friendly_name.c_str(), num,
+                 s.unit.c_str());
+      else
+        snprintf(buf, sizeof(buf), "%s%s", num, s.unit.c_str());
+      *out_text = buf;
+      return;
+    }
   }
 }
 
@@ -697,6 +943,9 @@ bool HAPanel::tap_entity_(size_t entity_idx) {
                ent.entity_id.c_str(), d.c_str());
       return false;
     }
+    case RenderClass::REPORT_TEXT:
+      // UE12: report rows are view-only — a tap fires nothing.
+      return false;
   }
   return false;
 }
@@ -841,7 +1090,8 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
     case RenderClass::LOCK_TEXT:
     case RenderClass::COVER_TEXT:
     case RenderClass::SUMMARY_TEXT:
-    case RenderClass::READ_ONLY_TEXT: {
+    case RenderClass::READ_ONLY_TEXT:
+    case RenderClass::REPORT_TEXT: {
       w = lv_label_create(btn);
       lv_label_set_text(w, e.has_state ? e.state.c_str() : "...");
       lv_obj_set_style_text_color(w, lv_color_hex(0xAAAAAA), 0);
@@ -862,6 +1112,11 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
       break;
     }
   }
+  // UE12: a report row is view-only — drop the pressed-state bg flash so it
+  // doesn't read as a tappable control.
+  if (e.render_class == RenderClass::REPORT_TEXT)
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A1A1A), LV_STATE_PRESSED);
+
   *out_widget = w;
   return btn;
 }
@@ -1403,6 +1658,9 @@ void HAPanel::build_ui_() {
       this->rebuild_entity_row_(ei);
     }
   }
+  // UE12: paint report rows now that every row widget exists. States may not
+  // have arrived yet (counts read 0 / "—"); on_state_ refreshes as they land.
+  this->recompute_reports_();
   // ---- E1: bottom navigation bar (y = 432–480, 48 px) ----
   // Persistent across all pages: ◀ page-step / 🏠 home + ⚙ settings (centered
   // pair) / ▶ page-step. E6: Home jumps to the first page; gear shifted off
