@@ -3101,8 +3101,19 @@ on-device validation pending.
 shown to the right of the page name in the page picker (e.g. `🔆 3` = three lights
 on). A page may carry **one badge or a list** of them, stacked horizontally and
 right-aligned; the page name keeps its left alignment + ellipsizes so it can't run
-under the badges. Each badge **hides when its value is 0/empty** and is recomputed
-on every picker open over **that page's own entities only** (page-scoped).
+under the badges. Recomputed on every picker open over **that page's own entities
+only** (page-scoped).
+
+**Quiet = dim, not gone.** A badge with nothing to report (0 lights on, no
+alarm) stays visible in a **DIM grey** (`0x555555`) — its presence signals
+"monitoring this", its greyness "all quiet" — and brightens to its semantic
+colour when notable. A badge **hides only when there's nothing in scope to
+monitor** (`total == 0`: e.g. `lights_on` on a page with no lights), so the panel
+never shows a dim count for a thing the page doesn't have. (Dim is a grey colour,
+not low opacity — on the black bg, fading opacity just vanishes.) The evaluator
+splits each type into a *scope* predicate (in-scope `total`) + an *active*
+predicate (notable `matched`) via a `count2` helper; `total==0`→hide,
+`matched>0`→full colour, else→DIM.
 
 **Cheap by construction.** The picker is a built-once hidden overlay.
 `update_picker_badges_()` runs on `open_picker_()` (clears HIDDEN + raises) and

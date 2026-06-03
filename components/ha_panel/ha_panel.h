@@ -395,8 +395,10 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // picker is a transient modal, so there's no per-frame / on_state_ wiring.
   void update_picker_badges_();
   // UE11: evaluate one badge spec over a page's OWN entities (page-scoped).
-  // Returns false → hide the badge; otherwise fills the mdi icon name (empty =
-  // value only), the value string (empty = icon-only dot), and the text colour.
+  // Returns false → hide (nothing in scope to monitor); otherwise fills the mdi
+  // icon name (empty = value only), the value string (empty = icon-only dot),
+  // and the text colour — a DIM grey when monitored-but-quiet (the badge stays
+  // visible to signal "watching this"), the semantic colour when notable.
   bool eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
                           std::string *icon, std::string *value, uint32_t *color);
   void open_picker_();

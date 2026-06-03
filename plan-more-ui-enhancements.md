@@ -916,10 +916,13 @@ on-device validation pending · target tag: `ue11-picker-badges`
 
 **Scope note (delivered):** a page may declare **one badge OR a list** of badges
 (`picker_badge: [lights_on, climate_active]`), shown stacked horizontally and
-right-aligned; the page name keeps its left alignment + ellipsizes. Each badge
-hides itself (and collapses out of the flex bar) when its value is 0/empty. The
-config-free types ship live; the `device_class` / numeric types parse + evaluate
-but stay hidden until UE7 subscribes `device_class`. A **local evaluator**
+right-aligned; the page name keeps its left alignment + ellipsizes. A **quiet**
+badge (0/empty) stays visible but **dimmed grey** — its presence signals "actively
+monitoring", its grey "nothing to report" — brightening to its semantic colour
+when notable; a badge **hides (and collapses out of the flex bar) only when
+nothing is in scope to monitor** (`total == 0`). The config-free types ship live;
+the `device_class` / numeric types parse + evaluate but stay hidden until UE7
+subscribes `device_class` (no in-scope entities → hidden, not dim). A **local evaluator**
 (`eval_picker_badge_`) is used rather than UE12's `compute_report_` — the badge
 predicates are mostly *negative* (`unlocked` = not locked, `open_covers` = not
 closed, `climate_active` ≠ off) which the report `{domains, match_state}` filter

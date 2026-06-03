@@ -71,8 +71,12 @@
 # icon+value to the RIGHT of the page name in the page picker — an at-a-glance
 # "is anything on over there". A page may declare ONE badge or a LIST of badges
 # (stacked horizontally, right-aligned; the page name stays left). Each badge is
-# computed fresh every time the picker opens, scoped to THAT PAGE'S entities
-# only. A badge hides itself when its value is 0 / empty. Default omitted = none.
+# computed fresh every time the picker opens (and updates live while open),
+# scoped to THAT PAGE'S entities only. Default omitted = none.
+# A QUIET badge (0 lights on, no alarm) stays visible but GREYED — its presence
+# means "monitoring this", the grey means "nothing to report"; it brightens when
+# something's notable. A badge only HIDES when the page has nothing in scope to
+# monitor (e.g. lights_on on a page with no lights).
 #
 #   picker_badge: lights_on                       # bare type name (sugar)
 #   picker_badge: [lights_on, open_covers]        # a list, stacked right
@@ -134,7 +138,7 @@ ha_panel:
   pages:
     - name: "Living Room"
       # UE11: a LIST of picker badges — bulb count + active-climate count,
-      # stacked right of the page name. Each hides when its value is 0.
+      # stacked right of the page name. Each greys out when its count is 0.
       picker_badge: [lights_on, climate_active]
       entities:
         # UE12: computed-aggregate rows (no entity_id). View-only.

@@ -986,31 +986,19 @@ void HAPanel::update_picker_badges_() {
 bool HAPanel::eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
                                  std::string *icon, std::string *value,
                                  uint32_t *color) {
-  // Shared palette with compute_report_ / rebuild_entity_row_.
+  // Shared palette with compute_report_ / rebuild_entity_row_. DIM = the
+  // "nothing to say" grey: a badge with in-scope entities but nothing notable
+  // stays VISIBLE in this colour — its presence says "monitoring this", its
+  // greyness says "all quiet". A badge HIDES only when there's nothing in scope
+  // to monitor (so we never show a dim count for a thing the page doesn't have).
+  // (Dim is a grey colour, not low opacity — opacity on the black bg vanishes.)
   constexpr uint32_t NEUTRAL = 0xFFFFFF, GREEN = 0x66BB66, AMBER = 0xDDAA33,
-                     RED = 0xCC4444;
+                     RED = 0xCC4444, DIM = 0x555555;
   *color = NEUTRAL;
   *icon = "";
   *value = "";
   const std::vector<size_t> &idxs = this->pages_[page_idx].entity_indices;
 
-  // Count the page's OWN entities matching `pred` (report rows skipped — they're
-  // synthetic, not HA state). Page-scoped by construction: idxs is this page.
-  auto count_if = [&](const std::function<bool(const Entity &)> &pred) -> int {
-    int n = 0;
-    for (size_t ei : idxs) {
-      if (ei >= this->entities_.size())
-        continue;
-      const Entity &e = this->entities_[ei];
-      if (e.render_class == RenderClass::REPORT_TEXT)
-        continue;
-      if (pred(e))
-        n++;
-    }
-    return n;
-  };
-  // device_class lookup — empty until UE7 subscribes the attr, so every
-  // device_class-gated badge naturally evaluates to 0 / hidden today.
   auto dclass = [](const Entity &e) -> const std::string & {
     static const std::string empty;
     auto it = e.attrs.find("device_class");
@@ -1019,15 +1007,55 @@ bool HAPanel::eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
   auto offline_pred = [](const Entity &e) -> bool {
     return !e.has_state || e.state == "unavailable" || e.state == "unknown";
   };
+  auto is_on = [](const Entity &e) -> bool {
+    return e.has_state && e.state == "on";
+  };
   auto set_count = [&](int n) {
     char b[16];
     snprintf(b, sizeof(b), "%d", n);
     *value = b;
   };
-  // Numeric aggregate over sensors with device_class `dc` (gated until UE7).
+  // Walk the page's OWN entities (report rows skipped). `total` = in-scope
+  // candidates (scope_pred); `matched` = those also in the notable state
+  // (active_pred). Page-scoped by construction: idxs is this page.
+  auto count2 = [&](const std::function<bool(const Entity &)> &scope_pred,
+                    const std::function<bool(const Entity &)> &active_pred,
+                    int *total, int *matched) {
+    *total = 0;
+    *matched = 0;
+    for (size_t ei : idxs) {
+      if (ei >= this->entities_.size())
+        continue;
+      const Entity &e = this->entities_[ei];
+      if (e.render_class == RenderClass::REPORT_TEXT)
+        continue;
+      if (!scope_pred(e))
+        continue;
+      (*total)++;
+      if (active_pred(e))
+        (*matched)++;
+    }
+  };
+  // count-style badge: hide when nothing in scope; else show the matched count,
+  // full `active_color` when matched > 0, else DIM grey (monitoring, quiet).
+  auto count_badge = [&](const std::function<bool(const Entity &)> &scope_pred,
+                         const std::function<bool(const Entity &)> &active_pred,
+                         const char *icon_name, uint32_t active_color) -> bool {
+    int total = 0, matched = 0;
+    count2(scope_pred, active_pred, &total, &matched);
+    if (total == 0)
+      return false;
+    *icon = icon_name;
+    set_count(matched);
+    *color = matched > 0 ? active_color : DIM;
+    return true;
+  };
+  // Numeric aggregate over sensors with device_class `dc` (gated until UE7):
+  // hide when no such sensors; DIM "--" when present but no numeric reading yet;
+  // else the aggregate value at full brightness.
   auto numeric = [&](const char *dc, BadgeAgg agg, const char *def_unit,
                      const char *icon_name) -> bool {
-    int cnt = 0;
+    int scope_total = 0, cnt = 0;
     float acc = 0.0f, best = 0.0f;
     for (size_t ei : idxs) {
       if (ei >= this->entities_.size())
@@ -1035,6 +1063,7 @@ bool HAPanel::eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
       const Entity &e = this->entities_[ei];
       if (e.render_class == RenderClass::REPORT_TEXT || dclass(e) != dc)
         continue;
+      scope_total++;
       float v;
       if (!HAPanel::state_to_value_(e, &v))
         continue;
@@ -1047,8 +1076,14 @@ bool HAPanel::eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
       acc += v;
       cnt++;
     }
-    if (cnt == 0)
+    if (scope_total == 0)
       return false;
+    *icon = icon_name;
+    if (cnt == 0) {
+      *value = "--";
+      *color = DIM;
+      return true;
+    }
     float r = best;
     if (agg == BadgeAgg::SUM)
       r = acc;
@@ -1060,12 +1095,13 @@ bool HAPanel::eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
     else
       snprintf(num, sizeof(num), "%.1f", r);
     *value = std::string(num) + (spec.unit.empty() ? def_unit : spec.unit);
-    *icon = icon_name;
+    *color = NEUTRAL;
     return true;
   };
-  // True when an "on" binary_sensor's device_class is in `classes`.
-  auto bs_class_on = [&](const Entity &e, const std::vector<std::string> &classes) -> bool {
-    if (e.domain != "binary_sensor" || !e.has_state || e.state != "on")
+  // True when a binary_sensor's device_class is in `classes` (state-agnostic —
+  // the scope test; pair with is_on for the active test).
+  auto bs_in_class = [&](const Entity &e, const std::vector<std::string> &classes) -> bool {
+    if (e.domain != "binary_sensor")
       return false;
     const std::string &dc = dclass(e);
     for (const auto &c : classes)
@@ -1081,138 +1117,97 @@ bool HAPanel::eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
                                                           "presence"};
 
   switch (spec.type) {
-    case BadgeType::LIGHTS_ON: {
-      int n = count_if([](const Entity &e) {
-        return e.domain == "light" && e.has_state && e.state == "on";
-      });
-      if (n == 0)
-        return false;
-      *icon = "lightbulb-on";
-      set_count(n);
-      return true;
-    }
-    case BadgeType::DEVICES_ON: {
-      int n = count_if([](const Entity &e) {
-        return (e.domain == "switch" || e.domain == "fan" ||
-                e.domain == "input_boolean") &&
-               e.has_state && e.state == "on";
-      });
-      if (n == 0)
-        return false;
-      *icon = "power-plug";
-      set_count(n);
-      return true;
-    }
-    case BadgeType::UNLOCKED: {
-      int n = count_if([](const Entity &e) {
-        return e.domain == "lock" && e.has_state && e.state != "locked" &&
-               e.state != "unavailable" && e.state != "unknown";
-      });
-      if (n == 0)
-        return false;
-      *icon = "lock-open";
-      set_count(n);
-      return true;
-    }
-    case BadgeType::OPEN_COVERS: {
-      int n = count_if([](const Entity &e) {
-        return e.domain == "cover" && e.has_state && e.state != "closed" &&
-               e.state != "unavailable" && e.state != "unknown";
-      });
-      if (n == 0)
-        return false;
-      *icon = "window-shutter-open";
-      set_count(n);
-      return true;
-    }
-    case BadgeType::MEDIA_PLAYING: {
-      int n = count_if([](const Entity &e) {
-        return e.domain == "media_player" && e.has_state && e.state == "playing";
-      });
-      if (n == 0)
-        return false;
-      *icon = "play";
-      set_count(n);
-      return true;
-    }
-    case BadgeType::CLIMATE_ACTIVE: {
-      int n = count_if([](const Entity &e) {
-        return e.domain == "climate" && e.has_state && e.state != "off" &&
-               e.state != "unavailable" && e.state != "unknown";
-      });
-      if (n == 0)
-        return false;
-      *icon = "thermostat";
-      set_count(n);
-      return true;
-    }
-    case BadgeType::RUNNING: {
-      int n = count_if([](const Entity &e) {
-        if ((e.domain == "script" || e.domain == "automation") && e.has_state &&
-            e.state == "on")
-          return true;
-        return e.domain == "timer" && e.state == "active";
-      });
-      if (n == 0)
-        return false;
-      *icon = "cog";
-      set_count(n);
-      return true;
-    }
-    case BadgeType::OFFLINE: {
-      int n = count_if(offline_pred);
-      if (n == 0)
-        return false;
-      *icon = "alert";
-      set_count(n);
-      *color = RED;
-      return true;
-    }
+    case BadgeType::LIGHTS_ON:
+      return count_badge([](const Entity &e) { return e.domain == "light"; },
+                         is_on, "lightbulb-on", NEUTRAL);
+    case BadgeType::DEVICES_ON:
+      return count_badge(
+          [](const Entity &e) {
+            return e.domain == "switch" || e.domain == "fan" ||
+                   e.domain == "input_boolean";
+          },
+          is_on, "power-plug", NEUTRAL);
+    case BadgeType::UNLOCKED:
+      return count_badge(
+          [](const Entity &e) { return e.domain == "lock"; },
+          [](const Entity &e) {
+            return e.has_state && e.state != "locked" &&
+                   e.state != "unavailable" && e.state != "unknown";
+          },
+          "lock-open", NEUTRAL);
+    case BadgeType::OPEN_COVERS:
+      return count_badge(
+          [](const Entity &e) { return e.domain == "cover"; },
+          [](const Entity &e) {
+            return e.has_state && e.state != "closed" &&
+                   e.state != "unavailable" && e.state != "unknown";
+          },
+          "window-shutter-open", NEUTRAL);
+    case BadgeType::MEDIA_PLAYING:
+      return count_badge(
+          [](const Entity &e) { return e.domain == "media_player"; },
+          [](const Entity &e) { return e.has_state && e.state == "playing"; },
+          "play", NEUTRAL);
+    case BadgeType::CLIMATE_ACTIVE:
+      return count_badge(
+          [](const Entity &e) { return e.domain == "climate"; },
+          [](const Entity &e) {
+            return e.has_state && e.state != "off" &&
+                   e.state != "unavailable" && e.state != "unknown";
+          },
+          "thermostat", NEUTRAL);
+    case BadgeType::RUNNING:
+      return count_badge(
+          [](const Entity &e) {
+            return e.domain == "script" || e.domain == "automation" ||
+                   e.domain == "timer";
+          },
+          [](const Entity &e) {
+            if (e.domain == "timer")
+              return e.state == "active";
+            return e.has_state && e.state == "on";
+          },
+          "cog", NEUTRAL);
+    case BadgeType::OFFLINE:
+      return count_badge([](const Entity &) { return true; }, offline_pred,
+                         "alert", RED);
     case BadgeType::ENTITIES: {
-      int n = count_if([](const Entity &) { return true; });
-      if (n == 0)
+      // Pure info — the count itself, always full brightness; hide only on an
+      // empty page (no "quiet" state to dim).
+      int total = 0, matched = 0;
+      count2([](const Entity &) { return true; },
+             [](const Entity &) { return true; }, &total, &matched);
+      if (total == 0)
         return false;
-      set_count(n);
+      set_count(total);
+      *color = NEUTRAL;
       return true;
     }
-    case BadgeType::OPEN_DOORS: {
-      int n = count_if([&](const Entity &e) { return bs_class_on(e, DOOR_CLASSES); });
-      if (n == 0)
-        return false;
-      *icon = "door-open";
-      set_count(n);
-      *color = AMBER;
-      return true;
-    }
-    case BadgeType::MOTION: {
-      int n = count_if([&](const Entity &e) { return bs_class_on(e, MOTION_CLASSES); });
-      if (n == 0)
-        return false;
-      *icon = "motion-sensor";
-      set_count(n);
-      *color = AMBER;
-      return true;
-    }
-    case BadgeType::LOW_BATTERY: {
-      int n = count_if([&](const Entity &e) {
-        if (dclass(e) != "battery")
-          return false;
-        float v;
-        return HAPanel::state_to_value_(e, &v) && v <= (float) spec.threshold;
-      });
-      if (n == 0)
-        return false;
-      *icon = "battery";
-      set_count(n);
-      *color = RED;
-      return true;
-    }
+    case BadgeType::OPEN_DOORS:
+      return count_badge(
+          [&](const Entity &e) { return bs_in_class(e, DOOR_CLASSES); }, is_on,
+          "door-open", AMBER);
+    case BadgeType::MOTION:
+      return count_badge(
+          [&](const Entity &e) { return bs_in_class(e, MOTION_CLASSES); }, is_on,
+          "motion-sensor", AMBER);
+    case BadgeType::LOW_BATTERY:
+      return count_badge(
+          [&](const Entity &e) { return dclass(e) == "battery"; },
+          [&](const Entity &e) {
+            float v;
+            return HAPanel::state_to_value_(e, &v) && v <= (float) spec.threshold;
+          },
+          "battery", RED);
     case BadgeType::ALARM: {
-      int n = count_if([&](const Entity &e) { return bs_class_on(e, ALARM_CLASSES); });
-      if (n == 0)
+      // Dot, no number. DIM grey when monitored but clear; red when any tripped.
+      int total = 0, on = 0;
+      count2([&](const Entity &e) { return bs_in_class(e, ALARM_CLASSES); },
+             is_on, &total, &on);
+      if (total == 0)
         return false;
-      *icon = "alert-circle";  // red presence dot, no number
-      *color = RED;
+      *icon = "alert-circle";
+      *color = on > 0 ? RED : DIM;
       return true;
     }
     case BadgeType::TEMPERATURE:
@@ -1226,48 +1221,63 @@ bool HAPanel::eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
     case BadgeType::AQI:
       return numeric("aqi", BadgeAgg::AVG, "", "gauge");
     case BadgeType::SEVERITY: {
-      int alarms = count_if([&](const Entity &e) { return bs_class_on(e, ALARM_CLASSES); });
-      int doors = count_if([&](const Entity &e) { return bs_class_on(e, DOOR_CLASSES); });
-      int off = count_if(offline_pred);
-      if (alarms > 0) {
+      // Composite dot over the page. Hide only on an empty page; otherwise it's
+      // always present — DIM grey when all clear (monitoring), escalating to
+      // amber (offline / open doors) or red (alarm).
+      int total = 0, dummy = 0;
+      count2([](const Entity &) { return true; },
+             [](const Entity &) { return false; }, &total, &dummy);
+      if (total == 0)
+        return false;
+      int at = 0, am = 0;
+      count2([&](const Entity &e) { return bs_in_class(e, ALARM_CLASSES); },
+             is_on, &at, &am);
+      int dt = 0, dm = 0;
+      count2([&](const Entity &e) { return bs_in_class(e, DOOR_CLASSES); }, is_on,
+             &dt, &dm);
+      int ot = 0, om = 0;
+      count2([](const Entity &) { return true; }, offline_pred, &ot, &om);
+      if (am > 0) {
         *icon = "alert-circle";
         *color = RED;
-        return true;
-      }
-      if (doors > 0) {
+      } else if (dm > 0) {
         *icon = "alert-circle";
         *color = AMBER;
-        return true;
-      }
-      if (off > 0) {
+      } else if (om > 0) {
         *icon = "alert";
         *color = AMBER;
-        return true;
+      } else {
+        *icon = "checkbox-marked-circle-outline";  // all clear, still watching
+        *color = DIM;
       }
-      return false;  // nothing wrong → no dot
+      return true;
     }
     case BadgeType::IDLE: {
-      int on = count_if([](const Entity &e) {
-        if (e.domain == "light" && e.has_state && e.state == "on")
-          return true;
-        if ((e.domain == "switch" || e.domain == "fan" ||
-             e.domain == "input_boolean") &&
-            e.has_state && e.state == "on")
-          return true;
-        if (e.domain == "media_player" && e.state == "playing")
-          return true;
-        if (e.domain == "cover" && e.has_state && e.state != "closed" &&
-            e.state != "unavailable" && e.state != "unknown")
-          return true;
-        if (e.domain == "climate" && e.has_state && e.state != "off" &&
-            e.state != "unavailable" && e.state != "unknown")
-          return true;
+      // Calm indicator. Hide if the page has no controllable entities. Green ✓
+      // when nothing is on/open; DIM grey ✓ when something is (still watching).
+      auto controllable = [](const Entity &e) {
+        return e.domain == "light" || e.domain == "switch" ||
+               e.domain == "fan" || e.domain == "input_boolean" ||
+               e.domain == "media_player" || e.domain == "cover" ||
+               e.domain == "climate";
+      };
+      auto active = [](const Entity &e) {
+        if (e.domain == "media_player")
+          return e.state == "playing";
+        if (e.domain == "cover")
+          return e.has_state && e.state != "closed" &&
+                 e.state != "unavailable" && e.state != "unknown";
+        if (e.domain == "climate")
+          return e.has_state && e.state != "off" &&
+                 e.state != "unavailable" && e.state != "unknown";
+        return e.has_state && e.state == "on";
+      };
+      int total = 0, on = 0;
+      count2(controllable, active, &total, &on);
+      if (total == 0)
         return false;
-      });
-      if (on > 0)
-        return false;  // not idle
       *icon = "checkbox-marked-circle-outline";
-      *color = GREEN;
+      *color = on == 0 ? GREEN : DIM;
       return true;
     }
     case BadgeType::NONE:

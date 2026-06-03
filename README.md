@@ -476,8 +476,16 @@ A page can carry a `picker_badge:` — a small **icon + count** shown to the rig
 of the page name in the **page picker** (the dropdown you open from the header),
 so you can tell "is anything on over there" without opening each page. Declare
 **one** badge or a **list** of them (stacked horizontally, right-aligned; the
-page name stays left). A badge **hides itself when its value is 0/empty**, and is
-recomputed every time the picker opens — over **that page's own entities only**.
+page name stays left). Recomputed every time the picker opens (and live while
+it's open) over **that page's own entities only**.
+
+**Quiet badges dim, they don't vanish.** When a badge has nothing to report
+(`0` lights on, no alarm) it stays visible but **greyed** — its presence tells
+you the panel is *watching* that thing, the grey tells you all's quiet. It
+brightens to its semantic colour when something's notable. A badge **only hides
+entirely when there's nothing on the page to monitor** (e.g. `lights_on` on a
+page with no lights), so you never see a dim count for something that isn't
+there.
 
 ```yaml
 pages:
