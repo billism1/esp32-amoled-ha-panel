@@ -1,16 +1,16 @@
-# Build Plan — Multi-board support
-
+> Part of the [Roadmap](roadmap.md).
+>
 > Split out of the MVP build plan (was "Phase 9"); that plan and its full
-> decision log now live in [DEVELOPMENT.md](DEVELOPMENT.md). The MVP plan
+> decision log now live in [DEVELOPMENT.md](../DEVELOPMENT.md). The MVP plan
 > targets the Waveshare ESP32-S3-Touch-AMOLED-2.16 only. This document
 > covers making the firmware portable across AMOLED boards by dropping in a
 > new board package.
 
-Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha-guide.md).
+Background reference: [esp32-s3-amoled-ha-guide.md](esp32-s3-amoled-ha-guide.md).
 
 ---
 
-## Phase 9 — Multi-board support
+# Phase 9 — Multi-board support
 
 **Status:** ⬜ not started · target tag: `p9-multiboard`
 

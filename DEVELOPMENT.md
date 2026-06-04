@@ -6,9 +6,12 @@ notes, on-device gotchas, and the dated session log for the shipped panel
 phased build plans (`plan-mvp.md` and `plan-enhance-ui.md`); merged here once
 the work shipped so the reasoning stays in one place.
 
-Still-active forward plans live in their own files and are linked from the
-[README](README.md): [plan-multi-board-support.md](plan-multi-board-support.md)
-and [plan-dynamic-discovery.md](plan-dynamic-discovery.md).
+Still-active forward plans live under [docs/](docs/) and are indexed by the
+[roadmap](docs/roadmap.md): multi-board support
+([docs/roadmap-p9-multiboard.md](docs/roadmap-p9-multiboard.md)) and dynamic
+area/entity discovery
+([docs/roadmap-p10-dynamic-discovery.md](docs/roadmap-p10-dynamic-discovery.md),
+on hold), plus the unimplemented UI-enhancement phases (UE7–UE9, UE14).
 
 ---
 
@@ -18,9 +21,9 @@ Phased plan from empty repo → working **handheld, battery-powered** HA remote
 on the Waveshare ESP32-S3-Touch-AMOLED-2.16, with a structure that lets us
 add other AMOLED boards later by dropping in a new board package.
 
-**Follow-on plans** (split out of this one):
-- [plan-multi-board-support.md](plan-multi-board-support.md) — Phase 9, portability across AMOLED boards.
-- [plan-dynamic-discovery.md](plan-dynamic-discovery.md) — Phase 10, HA-driven dynamic area/entity discovery.
+**Follow-on plans** (split out of this one — see the [roadmap](docs/roadmap.md)):
+- [docs/roadmap-p9-multiboard.md](docs/roadmap-p9-multiboard.md) — Phase 9, portability across AMOLED boards.
+- [docs/roadmap-p10-dynamic-discovery.md](docs/roadmap-p10-dynamic-discovery.md) — Phase 10, HA-driven dynamic area/entity discovery (on hold).
 - UI enhancements (post-MVP) — see the "Build Plan — UI enhancements" section below in this document.
 
 Device runs on a LiPo cell in a hand-held enclosure. Idle screen behaviour
@@ -1185,7 +1188,7 @@ Sleep is **opt-out, not opt-in** — on by default, user can disable it.
 
 ## Phase 9 — Multi-board support
 
-**Moved to its own plan:** [plan-multi-board-support.md](plan-multi-board-support.md).
+**Moved to its own plan:** [docs/roadmap-p9-multiboard.md](docs/roadmap-p9-multiboard.md).
 Status, goal, tasks, exit criteria, and risks now live there. This MVP plan
 targets the Waveshare ESP32-S3-Touch-AMOLED-2.16 only.
 
@@ -1193,7 +1196,8 @@ targets the Waveshare ESP32-S3-Touch-AMOLED-2.16 only.
 
 ## Phase 10 — Dynamic area + entity discovery (replaces static YAML)
 
-**Moved to its own plan:** [plan-dynamic-discovery.md](plan-dynamic-discovery.md).
+**Moved to its own plan:** [docs/roadmap-p10-dynamic-discovery.md](docs/roadmap-p10-dynamic-discovery.md)
+(on hold — scope subject to change).
 Mechanism (HA template sensor → JSON attribute → runtime LVGL build), hard
 parts, migration, exit criteria, and risks now live there. The MVP path stays
 the static, gitignored `packages/ha-entities.yaml` from Phase 5.
@@ -1413,8 +1417,9 @@ Wi-Fi / Home Assistant connection-status indicators, and a fix for the area
 title overrunning its dropdown chevron.
 
 Sibling plans: the MVP build plan (shipped baseline — see the first half of this document) ·
-[plan-multi-board-support.md](plan-multi-board-support.md) ·
-[plan-dynamic-discovery.md](plan-dynamic-discovery.md).
+[docs/roadmap-p9-multiboard.md](docs/roadmap-p9-multiboard.md) ·
+[docs/roadmap-p10-dynamic-discovery.md](docs/roadmap-p10-dynamic-discovery.md) ·
+the [roadmap](docs/roadmap.md) for the unimplemented UE phases.
 
 Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha-guide.md).
 

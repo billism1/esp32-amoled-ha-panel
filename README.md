@@ -180,13 +180,18 @@ full hardware/driver reference, pin tables, and known-working community configs.
 .
 ├── README.md
 ├── DEVELOPMENT.md               # full build history + design decisions log
-├── plan-multi-board-support.md  # planned work (see Roadmap)
-├── plan-dynamic-discovery.md    # tentatively planned work (see Roadmap)
 ├── secrets.example.yaml         # template, committed
 ├── secrets.yaml                 # real secrets, gitignored
 ├── power_mgr.h                  # light-sleep IDF wrapper (esphome: includes)
 ├── ha-amoled-panel.yaml         # top-level device YAML (board-agnostic shell)
 ├── docs/
+│   ├── roadmap.md                       # unimplemented phases, links to per-phase docs
+│   ├── roadmap-ue7-device-class.md      # planned UI-enhancement phases (see roadmap)
+│   ├── roadmap-ue8-row-sparkline.md
+│   ├── roadmap-ue9-readonly.md
+│   ├── roadmap-ue14-report-drilldown.md
+│   ├── roadmap-p9-multiboard.md         # planned: multi-board support
+│   ├── roadmap-p10-dynamic-discovery.md # on hold, scope subject to change
 │   └── esp32-s3-amoled-ha-guide.md
 ├── boards/
 │   └── waveshare-2.16.yaml       # pins, display, touch, IMU, sleep wake for this board
@@ -591,15 +596,23 @@ put it in `secrets.yaml` as `ha_history_token`.
 ## Roadmap
 
 Shipped functionality is documented above and in
-[DEVELOPMENT.md](DEVELOPMENT.md). Two efforts remain:
+[DEVELOPMENT.md](DEVELOPMENT.md). The full list of unimplemented phases — with a
+per-phase design doc for each — lives in **[docs/roadmap.md](docs/roadmap.md)**.
+In brief:
 
-- **[Multi-board support](plan-multi-board-support.md)** (*planned*). Make
+- **UI enhancements** (*planned*): binary_sensor `device_class` subscription —
+  the unlock for LED severity colouring + class-gated report/badge aggregations
+  ([UE7](docs/roadmap-ue7-device-class.md)), inline trend sparklines
+  ([UE8](docs/roadmap-ue8-row-sparkline.md)), a `readonly:` per-entity lock
+  ([UE9](docs/roadmap-ue9-readonly.md)), and report-row drill-down
+  ([UE14](docs/roadmap-ue14-report-drilldown.md)).
+- **[Multi-board support](docs/roadmap-p9-multiboard.md)** (*planned*). Make
   adding a second AMOLED board a matter of dropping in one board package (pins,
   display, touch, dimensions) with no changes to the UI / HA logic.
-- **[Dynamic area + entity discovery](plan-dynamic-discovery.md)**
-  (*tentatively planned*). Move the source-of-truth for pages + entities from the
-  static `ha-entities.yaml` into a single HA-side template sensor, so
-  re-arranging a home updates the panel without a firmware rebuild.
+- **[Dynamic area + entity discovery](docs/roadmap-p10-dynamic-discovery.md)**
+  (*on hold — scope subject to change*). Move the source-of-truth for pages +
+  entities from the static `ha-entities.yaml` into a single HA-side template
+  sensor, so re-arranging a home updates the panel without a firmware rebuild.
 
 ---
 
