@@ -17,28 +17,31 @@ widget, reusing the same HA state and the same service call. Sequenced easy → 
 each lands as an independent, shippable commit. Shared conventions are at the
 bottom of this file.
 
-| Phase | Name | What it does | Depends on |
-|-------|------|--------------|------------|
-| [UE7](roadmap-ue7-device-class.md) | binary_sensor `device_class` subscription | Subscribe binary_sensor `device_class` at connect time + a severity classifier. Shared prerequisite that unlocks LED severity colouring (leak/smoke = red, motion/door = amber, connectivity = green) **and** the class-gated report aggregations (open doors, low battery, alarm) + picker badges that UE11/UE12 parse-but-gate today. | — |
-| [UE8](roadmap-ue8-row-sparkline.md) | Inline trend sparkline | Opt-in `plot_preview: true` paints a faint trend line behind a numeric sensor row, scaled to its `size:`, fed by the existing per-entity history ring buffer. | reuses UE6 |
-| [UE9](roadmap-ue9-readonly.md) | `readonly: true` per-entity lock | A flag that keeps a row's state read-out + history/sparkline but disables every path that actuates HA (taps, confirm sheet, detail modal). | — |
-| [UE14](roadmap-ue14-report-drilldown.md) | Report-row drill-down | Tap a UE12 report row to open a modal listing the member entities behind the number; the listed rows are fully interactive (toggle / detail / confirm), exactly as on a page. | UE12 (done) |
+Complexity is rated on a T-shirt scale: **XS** (very simple) · **S** (simple) ·
+**M** (medium) · **L** (difficult) · **XL** (very difficult).
+
+| Phase | Name | What it does | Complexity | Depends on |
+|-------|------|--------------|------------|------------|
+| [UE7](roadmap-ue7-device-class.md) | binary_sensor `device_class` subscription | Subscribe binary_sensor `device_class` at connect time + a severity classifier. Shared prerequisite that unlocks LED severity colouring (leak/smoke = red, motion/door = amber, connectivity = green) **and** the class-gated report aggregations (open doors, low battery, alarm) + picker badges that UE11/UE12 parse-but-gate today. | M | — |
+| [UE8](roadmap-ue8-row-sparkline.md) | Inline trend sparkline | Opt-in `plot_preview: true` paints a faint trend line behind a numeric sensor row, scaled to its `size:`, fed by the existing per-entity history ring buffer. | M | reuses UE6 |
+| [UE9](roadmap-ue9-readonly.md) | `readonly: true` per-entity lock | A flag that keeps a row's state read-out + history/sparkline but disables every path that actuates HA (taps, confirm sheet, detail modal). | S | — |
+| [UE14](roadmap-ue14-report-drilldown.md) | Report-row drill-down | Tap a UE12 report row to open a modal listing the member entities behind the number; the listed rows are fully interactive (toggle / detail / confirm), exactly as on a page. | L | UE12 (done) |
 
 ---
 
 ## Portability
 
-| Phase | Name | What it does |
-|-------|------|--------------|
-| [P9](roadmap-p9-multiboard.md) | Multi-board support | Make adding a second AMOLED board a matter of dropping in one board package (pins, display, touch, dimensions) — no changes to the UI / HA logic. |
+| Phase | Name | What it does | Complexity |
+|-------|------|--------------|------------|
+| [P9](roadmap-p9-multiboard.md) | Multi-board support | Make adding a second AMOLED board a matter of dropping in one board package (pins, display, touch, dimensions) — no changes to the UI / HA logic. | L |
 
 ---
 
 ## On hold (scope subject to change)
 
-| Phase | Name | What it does |
-|-------|------|--------------|
-| [P10](roadmap-p10-dynamic-discovery.md) | Dynamic area + entity discovery | Move the source-of-truth for pages + entities from the static `packages/ha-entities.yaml` into a single HA-side template sensor, so re-arranging a home updates the panel without a firmware rebuild. |
+| Phase | Name | What it does | Complexity |
+|-------|------|--------------|------------|
+| [P10](roadmap-p10-dynamic-discovery.md) | Dynamic area + entity discovery | Move the source-of-truth for pages + entities from the static `packages/ha-entities.yaml` into a single HA-side template sensor, so re-arranging a home updates the panel without a firmware rebuild. | XL |
 
 > ⚠️ **P10 is on hold and its scope is subject to change.** We may not implement
 > it as written; if we do, the scope will likely change. The
