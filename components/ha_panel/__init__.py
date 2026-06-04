@@ -77,12 +77,12 @@ CONF_AGG = "agg"
 CONF_THRESHOLD = "threshold"
 # UE11: selectable badge `type:` values — source of truth for this compile-time
 # validation and the C++ BadgeType enum (badge_type_from_). Config-free group
-# (domain + state only) ships in v1; the device_class / numeric group parses +
-# evaluates but stays empty until UE7 subscribes device_class (gated).
+# (domain + state only) shipped in v1; the device_class / numeric group went live
+# once UE7 added the connect-time device_class subscription.
 #   config-free: lights_on, devices_on, unlocked, open_covers, media_playing,
 #                climate_active, running, offline, entities
-#   needs UE7  : open_doors, motion, low_battery, alarm, temperature, humidity,
-#                power, co2, aqi, severity (alarm/door portions)
+#   device_class (live since UE7): open_doors, motion, low_battery, alarm,
+#                temperature, humidity, power, co2, aqi, severity (alarm/door)
 #   composite  : severity, idle
 BADGE_TYPES = [
     "lights_on", "devices_on", "unlocked", "open_covers", "media_playing",
@@ -158,8 +158,8 @@ REPORT_SCHEMA = cv.Schema(
         cv.Required(CONF_TITLE): cv.string,
         cv.Optional(CONF_DOMAINS, default=[]): cv.ensure_list(cv.string),
         cv.Optional(CONF_MATCH_STATE, default=[]): cv.ensure_list(_match_state_value),
-        # device_class filtering needs UE7's connect-time attr subscription; it
-        # is parsed + matched today but inert until that lands (matches nothing).
+        # device_class filtering went live with UE7's connect-time attr
+        # subscription (binary_sensor + sensor); matched against the cached attr.
         cv.Optional(CONF_DEVICE_CLASS, default=""): cv.string,
         cv.Optional(CONF_UNIT, default=""): cv.string,
         cv.Optional(CONF_SHOW_TOTAL, default=False): cv.boolean,

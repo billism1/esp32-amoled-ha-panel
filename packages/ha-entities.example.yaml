@@ -39,6 +39,19 @@
 # does not record, where a backfill fetch is wasted and the live stream is the
 # data source. No effect on entities HA records normally — leave it off for those.
 #
+# Status LED severity (UE7): every `binary_sensor` row carries a glowing status
+# dot. Its COLOUR is chosen by the entity's Home Assistant `device_class` (which
+# the panel subscribes automatically — nothing to configure here), so the dot
+# means something instead of always-green:
+#   PROBLEM  class on → RED   — moisture(leak)/smoke/gas/co/safety/problem/
+#                               tamper/heat/cold/battery; "on" = bad. off = dim green.
+#   ACTIVITY class on → AMBER — motion/occupancy/presence/door/window/opening/
+#                               garage_door/…; "on" = active (no good/bad). off = grey.
+#   POSITIVE class on → GREEN — connectivity/battery_charging; "on" = good. off = red.
+#   no/unknown device_class   → plain green-on / grey-off (unchanged from before).
+# The on/off word beside the dot is recoloured to match (redundant for colour-
+# blind readers). See the "Safety" page below for one of each.
+#
 # Row size (E8): add an optional `size:` to make a row bigger and more glanceable
 # from across the room. Values: small (default, today's look), medium, large.
 # Size scales the whole row together — height, name font, icon glyph, and the
@@ -95,7 +108,7 @@
 #     offline         unavailable / unknown                → red alert + N
 #     entities        total entities on the page           → N
 #     idle            green check when nothing on / open
-#   Needs device_class (parses now, lights up once UE7 ships — hidden until then):
+#   Driven by device_class (LIVE since UE7 — read each entity's HA device_class):
 #     open_doors      binary_sensor door/window/garage on  → door + N (amber)
 #     motion          binary_sensor motion/occupancy on    → motion + N (amber)
 #     low_battery     battery device_class <= threshold:   → battery + N (red)
@@ -105,6 +118,11 @@
 #     power           sum of power sensors                 → power + value
 #     co2 / aqi        avg of co2 / aqi sensors            → gauge + value
 #     severity        composite: alarm→red, doors→amber, offline→amber dot
+#   NOTE: device_class is NOT a key you set here — the panel subscribes each
+#   binary_sensor / sensor entity's device_class from Home Assistant at connect
+#   (UE7). You just pick the badge/report type; it reads the real attribute. If a
+#   class-driven badge stays empty, the entity has no device_class in HA (check
+#   Developer Tools → States → Attributes). See the "Safety" page below.
 # Block params: `agg:` (avg|min|max|sum, numeric badges) · `threshold:` (int,
 # low_battery percent, default 20) · `unit:` (suffix override for numeric badges)
 # · `icon:` (mdi:foo to override the type's default glyph; baked-subset only).
@@ -174,7 +192,93 @@ ha_panel:
           friendly_name: "Temperature"
         - entity_id: sensor.live_power_draw
           friendly_name: "Live Power"
-          realtime: true          # UE7: high-rate, unrecorded → live ring-buffer plot
+          realtime: true          # high-rate, unrecorded → live ring-buffer plot
+
+    # ───────────────────────────────────────────────────────────────────────
+    # UE7 worked example: the device_class layer. Every binary_sensor below
+    # gets a severity-coloured status LED, and the reports + picker badges
+    # aggregate by device_class — all from the entity's HA device_class, which
+    # the panel auto-subscribes (no device_class key on the rows themselves).
+    # entity_ids here are illustrative; the `# device_class:` comments note what
+    # each one reports in HA, which is what actually drives the colour/badge.
+    # ───────────────────────────────────────────────────────────────────────
+    - name: "Safety"
+      # UE11 device_class badges, stacked right of the page name. Each reads the
+      # page's own binary_sensor / sensor device_classes:
+      picker_badge:
+        - alarm                                  # RED dot if any leak/smoke/gas/CO on
+        - { type: open_doors }                   # AMBER N: doors/windows/garage open
+        - { type: low_battery, threshold: 20 }   # RED N: batteries at/below 20%
+        - { type: temperature, agg: avg }        # avg of this page's temp sensors
+      entities:
+        # ── Severity LED demo — one binary_sensor per bucket ──
+        # PROBLEM classes → RED dot when "on" (an alarm), dim green when clear:
+        - entity_id: binary_sensor.basement_leak     # device_class: moisture
+          friendly_name: "Basement leak"             #   on → RED (water detected)
+        - entity_id: binary_sensor.hallway_smoke      # device_class: smoke
+          friendly_name: "Smoke detector"            #   on → RED (alarm)
+        # ACTIVITY classes → AMBER dot when "on" (active), grey when idle:
+        - entity_id: binary_sensor.front_door         # device_class: door
+          friendly_name: "Front door"                #   open → AMBER (active)
+        - entity_id: binary_sensor.hallway_motion     # device_class: motion
+          friendly_name: "Hallway motion"            #   detected → AMBER
+        # POSITIVE class → GREEN when "on" (good), RED when "off" (down):
+        - entity_id: binary_sensor.internet_up        # device_class: connectivity
+          friendly_name: "Internet"                  #   connected → GREEN
+        # ── Numeric sensors — their device_class feeds the reports/badges below ──
+        - entity_id: sensor.fridge_battery            # device_class: battery
+          friendly_name: "Fridge battery"
+        - entity_id: sensor.outdoor_temperature       # device_class: temperature
+          friendly_name: "Outdoor temp"
+        - entity_id: sensor.bathroom_humidity         # device_class: humidity
+          friendly_name: "Bathroom humidity"
+        - entity_id: sensor.house_power               # device_class: power
+          friendly_name: "House power"
+        # ── Class-gated report rows (UE12) — the `device_class:` filter is live ──
+        # A report filters on ONE device_class. "Open doors" = door binary_sensors
+        # that are on (use the open_doors BADGE above to also fold in window/garage).
+        - report:
+            type: count
+            title: "Open doors"
+            domains: [binary_sensor]
+            device_class: door
+            match_state: ["on"]
+            scope: page
+            icon: mdi:door-open
+            style: [bold]
+        - report:
+            type: bool                 # green ✓ when none, amber N when any
+            title: "Smoke alarms"
+            domains: [binary_sensor]
+            device_class: smoke
+            match_state: ["on"]
+            scope: page
+            icon: mdi:smoke-detector
+        - report:
+            type: min                  # lowest battery, with the entity's name
+            title: "Lowest battery"
+            domains: [sensor]
+            device_class: battery
+            show_source: true          # "Fridge battery 12%"
+            unit: "%"
+            scope: page
+            icon: mdi:battery-alert
+        - report:
+            type: avg
+            title: "Avg temperature"
+            domains: [sensor]
+            device_class: temperature
+            unit: "°"
+            scope: page
+            icon: mdi:thermometer
+        - report:
+            type: sum
+            title: "Total power"
+            domains: [sensor]
+            device_class: power
+            unit: " W"
+            scope: page
+            icon: mdi:power
 
     - name: "Kitchen"
       picker_badge: devices_on       # UE11: bare single badge (plug + count)

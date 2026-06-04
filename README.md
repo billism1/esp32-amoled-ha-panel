@@ -112,6 +112,13 @@ behaviour live in shared, board-agnostic packages.
   fires the action only on a deliberate second tap.
 - Read-only display for unsupported domains (`sensor`, `binary_sensor`,
   `climate`, `media_player`, …).
+- **`device_class`-aware status LED** on `binary_sensor` rows: the dot is
+  coloured by *meaning*, not raw on/off — a leak / smoke / low-battery sensor
+  glows **red** when triggered (alarm), motion / door / window glow **amber**
+  (active), connectivity / charging glow **green**, and a sensor with no
+  `device_class` keeps the plain green-on / grey-off. The same connect-time
+  `device_class` subscription powers the class-driven report and picker-badge
+  aggregates below.
 - Tap a numeric `sensor` or `binary_sensor` → **history chart sheet**
   (1h / 6h / 24h windows). See [Entity history chart](#entity-history-chart).
 - **Report rows** (`report:` instead of `entity_id:`) show a live, computed
@@ -186,8 +193,7 @@ full hardware/driver reference, pin tables, and known-working community configs.
 ├── ha-amoled-panel.yaml         # top-level device YAML (board-agnostic shell)
 ├── docs/
 │   ├── roadmap.md                       # unimplemented phases, links to per-phase docs
-│   ├── roadmap-ue7-device-class.md      # planned UI-enhancement phases (see roadmap)
-│   ├── roadmap-ue8-row-sparkline.md
+│   ├── roadmap-ue8-row-sparkline.md     # planned UI-enhancement phases (see roadmap)
 │   ├── roadmap-ue9-readonly.md
 │   ├── roadmap-ue14-report-drilldown.md
 │   ├── roadmap-p9-multiboard.md         # planned: multi-board support
@@ -440,9 +446,10 @@ Developer Tools → States**:
 - the **Attributes** box, the `device_class:` line (if present), is the
   **`device_class`** — `temperature`, `motion`, `door`, …
 
-> **`device_class` is parsed but inert today** — it needs the attribute
-> subscription that lands in a later phase (UE7), so a `device_class:` filter
-> currently matches nothing. Filter with `domains` + `match_state` for now.
+> **`device_class` filtering is live** (since UE7) — the panel subscribes each
+> `binary_sensor` / `sensor` entity's `device_class` at connect time, so a
+> `device_class:` filter matches against the real attribute. Combine it with
+> `domains` to scope a report to, say, only `door`/`window` binary sensors.
 
 Common values, as a starting point (**not exhaustive** — Developer Tools is the
 source of truth for your install):
@@ -462,7 +469,7 @@ source of truth for your install):
 Any entity in any state can also be `unavailable` or `unknown` (what `offline`
 counts).
 
-Common `device_class` values (for when UE7 lands): `sensor` →
+Common `device_class` values: `sensor` →
 `temperature`, `humidity`, `power`, `energy`, `battery`, `illuminance`,
 `pressure`, `co2`; `binary_sensor` → `motion`, `occupancy`, `presence`, `door`,
 `window`, `garage_door`, `moisture`, `smoke`, `gas`, `co`, `problem`, `battery`,
@@ -530,20 +537,21 @@ picker_badge: { type: lights_on, icon: mdi:ceiling-light }   # custom glyph
 | `offline` | `unavailable` / `unknown` entities (red) | |
 | `entities` | total entities on the page | no state filter |
 | `idle` | a green ✓ when nothing is on / open | calm-state indicator |
-| `open_doors` | `binary_sensor` `door`/`window`/`garage_door` `on` (amber) | needs `device_class` ⚠ |
-| `motion` | `binary_sensor` `motion`/`occupancy`/`presence` `on` (amber) | needs `device_class` ⚠ |
-| `low_battery` | batteries at/below `threshold:` (red) | needs `device_class` ⚠ |
-| `alarm` | a red dot when smoke/leak/gas/CO/problem/safety is `on` | needs `device_class` ⚠ |
-| `temperature` | `agg:` of temperature sensors | needs `device_class` ⚠ |
-| `humidity` | average humidity | needs `device_class` ⚠ |
-| `power` | sum of power sensors | needs `device_class` ⚠ |
-| `co2` / `aqi` | average CO₂ / AQI | needs `device_class` ⚠ |
-| `severity` | composite dot — `alarm` → red, doors → amber, offline → amber | partly needs `device_class` ⚠ |
+| `open_doors` | `binary_sensor` `door`/`window`/`garage_door` `on` (amber) | by `device_class` |
+| `motion` | `binary_sensor` `motion`/`occupancy`/`presence` `on` (amber) | by `device_class` |
+| `low_battery` | batteries at/below `threshold:` (red) | by `device_class` |
+| `alarm` | a red dot when smoke/leak/gas/CO/problem/safety is `on` | by `device_class` |
+| `temperature` | `agg:` of temperature sensors | by `device_class` |
+| `humidity` | average humidity | by `device_class` |
+| `power` | sum of power sensors | by `device_class` |
+| `co2` / `aqi` | average CO₂ / AQI | by `device_class` |
+| `severity` | composite dot — `alarm` → red, doors → amber, offline → amber | by `device_class` |
 
-> ⚠️ The **`device_class`-dependent** types parse and validate today but stay
-> **hidden** until the attribute subscription lands (UE7) — the panel doesn't
-> know an entity's `device_class` yet, so they match nothing. The config-free
-> types above them work now. (`severity`/`offline` still show the offline signal.)
+> The **`device_class`-driven** types (the bottom group) read each entity's
+> `device_class` attribute, which the panel subscribes at connect time (since
+> UE7). For these to light up, the matching entities must report a `device_class`
+> in Home Assistant — most `binary_sensor`s and measurement `sensor`s do; check
+> **Developer Tools → States → Attributes** if a badge stays empty.
 
 ---
 
@@ -600,9 +608,7 @@ Shipped functionality is documented above and in
 per-phase design doc for each — lives in **[docs/roadmap.md](docs/roadmap.md)**.
 In brief:
 
-- **UI enhancements** (*planned*): binary_sensor `device_class` subscription —
-  the unlock for LED severity colouring + class-gated report/badge aggregations
-  ([UE7](docs/roadmap-ue7-device-class.md)), inline trend sparklines
+- **UI enhancements** (*planned*): inline trend sparklines
   ([UE8](docs/roadmap-ue8-row-sparkline.md)), a `readonly:` per-entity lock
   ([UE9](docs/roadmap-ue9-readonly.md)), and report-row drill-down
   ([UE14](docs/roadmap-ue14-report-drilldown.md)).
