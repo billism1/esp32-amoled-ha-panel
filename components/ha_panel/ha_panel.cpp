@@ -35,7 +35,7 @@ void HAPanel::add_page(const std::string &name) {
 
 void HAPanel::add_entity(const std::string &entity_id, const std::string &friendly_name,
                          const std::string &icon_override, bool confirm,
-                         EntitySize size, bool realtime) {
+                         EntitySize size, bool realtime, uint8_t name_style) {
   if (this->pages_.empty()) {
     ESP_LOGE(TAG, "add_entity called before any page — codegen bug");
     return;
@@ -49,6 +49,7 @@ void HAPanel::add_entity(const std::string &entity_id, const std::string &friend
   e.confirm = confirm;
   e.size = size;
   e.realtime = realtime;
+  e.name_style = name_style;
   size_t idx = this->entities_.size();
   this->entities_.push_back(std::move(e));
   this->pages_.back().entity_indices.push_back(idx);
@@ -75,7 +76,7 @@ void HAPanel::add_report(const std::string &title, const std::string &type,
                          const std::string &domains_csv, const std::string &match_state_csv,
                          const std::string &device_class, const std::string &unit,
                          bool show_total, bool show_source, const std::string &scope,
-                         const std::string &icon, EntitySize size) {
+                         const std::string &icon, EntitySize size, uint8_t name_style) {
   if (this->pages_.empty()) {
     ESP_LOGE(TAG, "add_report called before any page — codegen bug");
     return;
@@ -98,9 +99,61 @@ void HAPanel::add_report(const std::string &title, const std::string &type,
   e.report.unit = unit;
   e.report.show_total = show_total;
   e.report.show_source = show_source;
+  e.name_style = name_style;
   size_t idx = this->entities_.size();
   this->entities_.push_back(std::move(e));
   this->pages_.back().entity_indices.push_back(idx);
+}
+
+// UE11: map the validated `picker_badge:` type / agg strings to enums. Codegen
+// guarantees a known value; NONE / AVG are belt-and-suspenders defaults.
+static BadgeType badge_type_from_(const std::string &t) {
+  if (t == "lights_on") return BadgeType::LIGHTS_ON;
+  if (t == "devices_on") return BadgeType::DEVICES_ON;
+  if (t == "unlocked") return BadgeType::UNLOCKED;
+  if (t == "open_covers") return BadgeType::OPEN_COVERS;
+  if (t == "media_playing") return BadgeType::MEDIA_PLAYING;
+  if (t == "climate_active") return BadgeType::CLIMATE_ACTIVE;
+  if (t == "running") return BadgeType::RUNNING;
+  if (t == "offline") return BadgeType::OFFLINE;
+  if (t == "entities") return BadgeType::ENTITIES;
+  if (t == "open_doors") return BadgeType::OPEN_DOORS;
+  if (t == "motion") return BadgeType::MOTION;
+  if (t == "low_battery") return BadgeType::LOW_BATTERY;
+  if (t == "alarm") return BadgeType::ALARM;
+  if (t == "temperature") return BadgeType::TEMPERATURE;
+  if (t == "humidity") return BadgeType::HUMIDITY;
+  if (t == "power") return BadgeType::POWER;
+  if (t == "co2") return BadgeType::CO2;
+  if (t == "aqi") return BadgeType::AQI;
+  if (t == "severity") return BadgeType::SEVERITY;
+  if (t == "idle") return BadgeType::IDLE;
+  return BadgeType::NONE;
+}
+
+static BadgeAgg badge_agg_from_(const std::string &a) {
+  if (a == "min") return BadgeAgg::MIN;
+  if (a == "max") return BadgeAgg::MAX;
+  if (a == "sum") return BadgeAgg::SUM;
+  return BadgeAgg::AVG;
+}
+
+void HAPanel::add_page_badge(const std::string &type, const std::string &agg,
+                             int threshold, const std::string &unit,
+                             const std::string &icon) {
+  if (this->pages_.empty()) {
+    ESP_LOGE(TAG, "add_page_badge called before any page — codegen bug");
+    return;
+  }
+  PickerBadge b;
+  b.type = badge_type_from_(type);
+  b.agg = badge_agg_from_(agg);
+  b.threshold = threshold;
+  b.unit = unit;
+  b.icon = icon;
+  if (b.type == BadgeType::NONE)
+    return;  // "none" → leave the page badgeless
+  this->pages_.back().badges.push_back(b);
 }
 
 std::string HAPanel::extract_domain_(const std::string &entity_id) {
@@ -308,6 +361,25 @@ const std::string &HAPanel::resolve_icon_(const Entity &e) const {
   }
   e.icon_resolved_ = HAPanel::utf8_encode_(cp);
   return e.icon_resolved_;
+}
+
+const lv_font_t *HAPanel::resolve_name_font_(const Entity &e) const {
+  // UE13: only bold / italic need a baked font; underline is decor, plain uses
+  // the RowMetrics built-in. Returns nullptr to mean "keep the regular font".
+  const bool bold = e.name_style & STYLE_BOLD;
+  const bool italic = e.name_style & STYLE_ITALIC;
+  if (!bold && !italic)
+    return nullptr;
+  uint8_t si = e.size == EntitySize::MEDIUM ? 1 : e.size == EntitySize::LARGE ? 2 : 0;
+  // variant 0 = bold, 1 = italic. bold (or bold+italic) prefers the bold font;
+  // italic-only uses the italic font; bold+italic falls back to bold if that's
+  // the only one wired.
+  font::Font *f = nullptr;
+  if (bold)
+    f = this->style_fonts_[si][0];
+  if (f == nullptr && italic)
+    f = this->style_fonts_[si][1];
+  return f != nullptr ? f->get_lv_font() : nullptr;
 }
 
 // ---------- setup / dump ----------
@@ -545,6 +617,11 @@ void HAPanel::on_state_(const std::string &entity_id, StringRef state) {
     // UE12: any state change can shift a report's aggregate — recompute all
     // report rows. Bounded (tens of entities); see the plan's perf note.
     this->recompute_reports_();
+    // UE11: keep the picker badges live while it's open (cheap — only runs when
+    // the picker is visible, which is brief). Closed → recomputed on next open.
+    if (this->picker_ != nullptr &&
+        !lv_obj_has_flag(this->picker_, LV_OBJ_FLAG_HIDDEN))
+      this->update_picker_badges_();
     return;
   }
   ESP_LOGW(TAG, "state callback for unknown entity %s", entity_id.c_str());
@@ -863,6 +940,361 @@ void HAPanel::compute_report_(const ReportSpec &s, const std::vector<size_t> *sc
   }
 }
 
+// ---------- UE11 page-picker badges ----------
+
+void HAPanel::update_picker_badges_() {
+  for (size_t pi = 0;
+       pi < this->pages_.size() && pi < this->picker_badges_.size(); pi++) {
+    const std::vector<PickerBadge> &specs = this->pages_[pi].badges;
+    std::vector<lv_obj_t *> &groups = this->picker_badges_[pi];
+    for (size_t bi = 0; bi < groups.size() && bi < specs.size(); bi++) {
+      lv_obj_t *grp = groups[bi];
+      if (grp == nullptr)
+        continue;
+      std::string icon_name, value;
+      uint32_t color = 0xFFFFFF;
+      bool show = this->eval_picker_badge_(pi, specs[bi], &icon_name, &value, &color);
+      if (!show) {
+        lv_obj_add_flag(grp, LV_OBJ_FLAG_HIDDEN);
+        continue;
+      }
+      // UE11: per-badge icon override (mdi name, "mdi:" prefix optional) replaces
+      // the type's default glyph; colour + value/dim semantics are unchanged.
+      if (!specs[bi].icon.empty()) {
+        icon_name = specs[bi].icon;
+        if (icon_name.rfind("mdi:", 0) == 0)
+          icon_name.erase(0, 4);
+      }
+      lv_obj_t *bicon = lv_obj_get_child(grp, 0);
+      lv_obj_t *bval = lv_obj_get_child(grp, 1);
+      if (bicon != nullptr) {
+        if (!icon_name.empty() && this->mdi_font_ != nullptr) {
+          uint32_t cp = HAPanel::mdi_codepoint_(icon_name);
+          if (cp == 0)
+            cp = MDI_FALLBACK_CP;
+          lv_label_set_text(bicon, HAPanel::utf8_encode_(cp).c_str());
+          lv_obj_set_style_text_color(bicon, lv_color_hex(color), 0);
+          lv_obj_clear_flag(bicon, LV_OBJ_FLAG_HIDDEN);
+        } else {
+          lv_obj_add_flag(bicon, LV_OBJ_FLAG_HIDDEN);
+        }
+      }
+      if (bval != nullptr) {
+        lv_label_set_text(bval, value.c_str());
+        lv_obj_set_style_text_color(bval, lv_color_hex(color), 0);
+        if (value.empty())
+          lv_obj_add_flag(bval, LV_OBJ_FLAG_HIDDEN);
+        else
+          lv_obj_clear_flag(bval, LV_OBJ_FLAG_HIDDEN);
+      }
+      lv_obj_clear_flag(grp, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+}
+
+bool HAPanel::eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
+                                 std::string *icon, std::string *value,
+                                 uint32_t *color) {
+  // Shared palette with compute_report_ / rebuild_entity_row_. DIM = the
+  // "nothing to say" grey: a badge with in-scope entities but nothing notable
+  // stays VISIBLE in this colour — its presence says "monitoring this", its
+  // greyness says "all quiet". A badge HIDES only when there's nothing in scope
+  // to monitor (so we never show a dim count for a thing the page doesn't have).
+  // (Dim is a grey colour, not low opacity — opacity on the black bg vanishes.)
+  constexpr uint32_t NEUTRAL = 0xFFFFFF, GREEN = 0x66BB66, AMBER = 0xDDAA33,
+                     RED = 0xCC4444, DIM = 0x555555;
+  *color = NEUTRAL;
+  *icon = "";
+  *value = "";
+  const std::vector<size_t> &idxs = this->pages_[page_idx].entity_indices;
+
+  auto dclass = [](const Entity &e) -> const std::string & {
+    static const std::string empty;
+    auto it = e.attrs.find("device_class");
+    return it == e.attrs.end() ? empty : it->second;
+  };
+  auto offline_pred = [](const Entity &e) -> bool {
+    return !e.has_state || e.state == "unavailable" || e.state == "unknown";
+  };
+  auto is_on = [](const Entity &e) -> bool {
+    return e.has_state && e.state == "on";
+  };
+  auto set_count = [&](int n) {
+    char b[16];
+    snprintf(b, sizeof(b), "%d", n);
+    *value = b;
+  };
+  // Walk the page's OWN entities (report rows skipped). `total` = in-scope
+  // candidates (scope_pred); `matched` = those also in the notable state
+  // (active_pred). Page-scoped by construction: idxs is this page.
+  auto count2 = [&](const std::function<bool(const Entity &)> &scope_pred,
+                    const std::function<bool(const Entity &)> &active_pred,
+                    int *total, int *matched) {
+    *total = 0;
+    *matched = 0;
+    for (size_t ei : idxs) {
+      if (ei >= this->entities_.size())
+        continue;
+      const Entity &e = this->entities_[ei];
+      if (e.render_class == RenderClass::REPORT_TEXT)
+        continue;
+      if (!scope_pred(e))
+        continue;
+      (*total)++;
+      if (active_pred(e))
+        (*matched)++;
+    }
+  };
+  // count-style badge: hide when nothing in scope; else show the matched count,
+  // full `active_color` when matched > 0, else DIM grey (monitoring, quiet).
+  auto count_badge = [&](const std::function<bool(const Entity &)> &scope_pred,
+                         const std::function<bool(const Entity &)> &active_pred,
+                         const char *icon_name, uint32_t active_color) -> bool {
+    int total = 0, matched = 0;
+    count2(scope_pred, active_pred, &total, &matched);
+    if (total == 0)
+      return false;
+    *icon = icon_name;
+    set_count(matched);
+    *color = matched > 0 ? active_color : DIM;
+    return true;
+  };
+  // Numeric aggregate over sensors with device_class `dc` (gated until UE7):
+  // hide when no such sensors; DIM "--" when present but no numeric reading yet;
+  // else the aggregate value at full brightness.
+  auto numeric = [&](const char *dc, BadgeAgg agg, const char *def_unit,
+                     const char *icon_name) -> bool {
+    int scope_total = 0, cnt = 0;
+    float acc = 0.0f, best = 0.0f;
+    for (size_t ei : idxs) {
+      if (ei >= this->entities_.size())
+        continue;
+      const Entity &e = this->entities_[ei];
+      if (e.render_class == RenderClass::REPORT_TEXT || dclass(e) != dc)
+        continue;
+      scope_total++;
+      float v;
+      if (!HAPanel::state_to_value_(e, &v))
+        continue;
+      if (cnt == 0)
+        best = v;
+      else if (agg == BadgeAgg::MIN && v < best)
+        best = v;
+      else if (agg == BadgeAgg::MAX && v > best)
+        best = v;
+      acc += v;
+      cnt++;
+    }
+    if (scope_total == 0)
+      return false;
+    *icon = icon_name;
+    if (cnt == 0) {
+      *value = "--";
+      *color = DIM;
+      return true;
+    }
+    float r = best;
+    if (agg == BadgeAgg::SUM)
+      r = acc;
+    else if (agg == BadgeAgg::AVG)
+      r = acc / cnt;
+    char num[24];
+    if (r == floorf(r))
+      snprintf(num, sizeof(num), "%.0f", r);
+    else
+      snprintf(num, sizeof(num), "%.1f", r);
+    *value = std::string(num) + (spec.unit.empty() ? def_unit : spec.unit);
+    *color = NEUTRAL;
+    return true;
+  };
+  // True when a binary_sensor's device_class is in `classes` (state-agnostic —
+  // the scope test; pair with is_on for the active test).
+  auto bs_in_class = [&](const Entity &e, const std::vector<std::string> &classes) -> bool {
+    if (e.domain != "binary_sensor")
+      return false;
+    const std::string &dc = dclass(e);
+    for (const auto &c : classes)
+      if (dc == c)
+        return true;
+    return false;
+  };
+  static const std::vector<std::string> ALARM_CLASSES = {
+      "smoke", "moisture", "co", "gas", "problem", "safety"};
+  static const std::vector<std::string> DOOR_CLASSES = {"door", "window",
+                                                        "garage_door"};
+  static const std::vector<std::string> MOTION_CLASSES = {"motion", "occupancy",
+                                                          "presence"};
+
+  switch (spec.type) {
+    case BadgeType::LIGHTS_ON:
+      return count_badge([](const Entity &e) { return e.domain == "light"; },
+                         is_on, "lightbulb-on", NEUTRAL);
+    case BadgeType::DEVICES_ON:
+      return count_badge(
+          [](const Entity &e) {
+            return e.domain == "switch" || e.domain == "fan" ||
+                   e.domain == "input_boolean";
+          },
+          is_on, "power-plug", NEUTRAL);
+    case BadgeType::UNLOCKED:
+      return count_badge(
+          [](const Entity &e) { return e.domain == "lock"; },
+          [](const Entity &e) {
+            return e.has_state && e.state != "locked" &&
+                   e.state != "unavailable" && e.state != "unknown";
+          },
+          "lock-open", NEUTRAL);
+    case BadgeType::OPEN_COVERS:
+      return count_badge(
+          [](const Entity &e) { return e.domain == "cover"; },
+          [](const Entity &e) {
+            return e.has_state && e.state != "closed" &&
+                   e.state != "unavailable" && e.state != "unknown";
+          },
+          "window-shutter-open", NEUTRAL);
+    case BadgeType::MEDIA_PLAYING:
+      return count_badge(
+          [](const Entity &e) { return e.domain == "media_player"; },
+          [](const Entity &e) { return e.has_state && e.state == "playing"; },
+          "play", NEUTRAL);
+    case BadgeType::CLIMATE_ACTIVE:
+      return count_badge(
+          [](const Entity &e) { return e.domain == "climate"; },
+          [](const Entity &e) {
+            return e.has_state && e.state != "off" &&
+                   e.state != "unavailable" && e.state != "unknown";
+          },
+          "thermostat", NEUTRAL);
+    case BadgeType::RUNNING:
+      return count_badge(
+          [](const Entity &e) {
+            return e.domain == "script" || e.domain == "automation" ||
+                   e.domain == "timer";
+          },
+          [](const Entity &e) {
+            if (e.domain == "timer")
+              return e.state == "active";
+            return e.has_state && e.state == "on";
+          },
+          "cog", NEUTRAL);
+    case BadgeType::OFFLINE:
+      return count_badge([](const Entity &) { return true; }, offline_pred,
+                         "alert", RED);
+    case BadgeType::ENTITIES: {
+      // Pure info — the count itself, always full brightness; hide only on an
+      // empty page (no "quiet" state to dim).
+      int total = 0, matched = 0;
+      count2([](const Entity &) { return true; },
+             [](const Entity &) { return true; }, &total, &matched);
+      if (total == 0)
+        return false;
+      set_count(total);
+      *color = NEUTRAL;
+      return true;
+    }
+    case BadgeType::OPEN_DOORS:
+      return count_badge(
+          [&](const Entity &e) { return bs_in_class(e, DOOR_CLASSES); }, is_on,
+          "door-open", AMBER);
+    case BadgeType::MOTION:
+      return count_badge(
+          [&](const Entity &e) { return bs_in_class(e, MOTION_CLASSES); }, is_on,
+          "motion-sensor", AMBER);
+    case BadgeType::LOW_BATTERY:
+      return count_badge(
+          [&](const Entity &e) { return dclass(e) == "battery"; },
+          [&](const Entity &e) {
+            float v;
+            return HAPanel::state_to_value_(e, &v) && v <= (float) spec.threshold;
+          },
+          "battery", RED);
+    case BadgeType::ALARM: {
+      // Dot, no number. DIM grey when monitored but clear; red when any tripped.
+      int total = 0, on = 0;
+      count2([&](const Entity &e) { return bs_in_class(e, ALARM_CLASSES); },
+             is_on, &total, &on);
+      if (total == 0)
+        return false;
+      *icon = "alert-circle";
+      *color = on > 0 ? RED : DIM;
+      return true;
+    }
+    case BadgeType::TEMPERATURE:
+      return numeric("temperature", spec.agg, "°", "thermometer");
+    case BadgeType::HUMIDITY:
+      return numeric("humidity", BadgeAgg::AVG, "%", "water-percent");
+    case BadgeType::POWER:
+      return numeric("power", BadgeAgg::SUM, "W", "power");
+    case BadgeType::CO2:
+      return numeric("carbon_dioxide", BadgeAgg::AVG, "ppm", "gauge");
+    case BadgeType::AQI:
+      return numeric("aqi", BadgeAgg::AVG, "", "gauge");
+    case BadgeType::SEVERITY: {
+      // Composite dot over the page. Hide only on an empty page; otherwise it's
+      // always present — DIM grey when all clear (monitoring), escalating to
+      // amber (offline / open doors) or red (alarm).
+      int total = 0, dummy = 0;
+      count2([](const Entity &) { return true; },
+             [](const Entity &) { return false; }, &total, &dummy);
+      if (total == 0)
+        return false;
+      int at = 0, am = 0;
+      count2([&](const Entity &e) { return bs_in_class(e, ALARM_CLASSES); },
+             is_on, &at, &am);
+      int dt = 0, dm = 0;
+      count2([&](const Entity &e) { return bs_in_class(e, DOOR_CLASSES); }, is_on,
+             &dt, &dm);
+      int ot = 0, om = 0;
+      count2([](const Entity &) { return true; }, offline_pred, &ot, &om);
+      if (am > 0) {
+        *icon = "alert-circle";
+        *color = RED;
+      } else if (dm > 0) {
+        *icon = "alert-circle";
+        *color = AMBER;
+      } else if (om > 0) {
+        *icon = "alert";
+        *color = AMBER;
+      } else {
+        *icon = "checkbox-marked-circle-outline";  // all clear, still watching
+        *color = DIM;
+      }
+      return true;
+    }
+    case BadgeType::IDLE: {
+      // Calm indicator. Hide if the page has no controllable entities. Green ✓
+      // when nothing is on/open; DIM grey ✓ when something is (still watching).
+      auto controllable = [](const Entity &e) {
+        return e.domain == "light" || e.domain == "switch" ||
+               e.domain == "fan" || e.domain == "input_boolean" ||
+               e.domain == "media_player" || e.domain == "cover" ||
+               e.domain == "climate";
+      };
+      auto active = [](const Entity &e) {
+        if (e.domain == "media_player")
+          return e.state == "playing";
+        if (e.domain == "cover")
+          return e.has_state && e.state != "closed" &&
+                 e.state != "unavailable" && e.state != "unknown";
+        if (e.domain == "climate")
+          return e.has_state && e.state != "off" &&
+                 e.state != "unavailable" && e.state != "unknown";
+        return e.has_state && e.state == "on";
+      };
+      int total = 0, on = 0;
+      count2(controllable, active, &total, &on);
+      if (total == 0)
+        return false;
+      *icon = "checkbox-marked-circle-outline";
+      *color = on == 0 ? GREEN : DIM;
+      return true;
+    }
+    case BadgeType::NONE:
+    default:
+      return false;
+  }
+}
+
 // ---------- tap dispatch ----------
 
 bool HAPanel::tap_entity_(size_t entity_idx) {
@@ -998,7 +1430,9 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
                                  const lv_font_t *mdi_lv_font,
                                  lv_obj_t **out_icon,
                                  lv_obj_t **out_led,
-                                 const RowMetrics &m) {
+                                 const RowMetrics &m,
+                                 const lv_font_t *name_font_override,
+                                 bool name_underline) {
   *out_unavail_label = nullptr;
   *out_icon = nullptr;
   *out_led = nullptr;
@@ -1037,7 +1471,11 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
   lv_obj_t *name = lv_label_create(btn);
   lv_label_set_text(name, e.friendly_name.c_str());
   lv_obj_set_style_text_color(name, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_text_font(name, m.name_font, 0);
+  // UE13: bold/italic swap to a baked variant of the row's size; underline is a
+  // runtime decor on top of whichever font. Fall back to the regular built-in.
+  lv_obj_set_style_text_font(name, name_font_override != nullptr ? name_font_override : m.name_font, 0);
+  if (name_underline)
+    lv_obj_set_style_text_decor(name, LV_TEXT_DECOR_UNDERLINE, 0);
   // With an icon: shift name right and trim width so the ellipsis still lands
   // before the right-side widget. Without: name flush-left, full width.
   lv_obj_align(name, LV_ALIGN_LEFT_MID, have_icon ? m.name_x_icon : m.name_x_noicon, 0);
@@ -1639,9 +2077,13 @@ void HAPanel::build_ui_() {
       else if (e.size == EntitySize::LARGE)
         row_mdi_font = mdi_lv_font_lg;
       const RowMetrics metrics = row_metrics_for(e.size);
+      // UE13: per-row name-label styling — bold/italic baked font + underline.
+      const lv_font_t *name_font_ovr = this->resolve_name_font_(e);
+      const bool name_underline = e.name_style & STYLE_UNDERLINE;
       lv_obj_t *btn = make_entity_row(list, e, this, &HAPanel::on_entity_row_clicked_,
                                       (uintptr_t) ei, &widget, &unavail,
-                                      glyph.c_str(), row_mdi_font, &icon, &led, metrics);
+                                      glyph.c_str(), row_mdi_font, &icon, &led, metrics,
+                                      name_font_ovr, name_underline);
       // P7d: long-press → detail modal, only for domains that have one.
       // P7f: also register long-press for confirm-flagged action-only entities
       // (no detail modal) so a long-press opens the same confirm sheet as a
@@ -1739,6 +2181,10 @@ void HAPanel::build_ui_() {
   lv_obj_set_flex_flow(plist, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_scroll_dir(plist, LV_DIR_VER);
 
+  // UE11: mdi font for the badge icon column (nullptr → icon hidden, value only).
+  const lv_font_t *picker_mdi_font =
+      this->mdi_font_ != nullptr ? this->mdi_font_->get_lv_font() : nullptr;
+  this->picker_badges_.assign(this->pages_.size(), {});
   for (size_t pi = 0; pi < this->pages_.size(); pi++) {
     lv_obj_t *row = lv_button_create(plist);
     lv_obj_set_width(row, LV_PCT(100));
@@ -1757,6 +2203,59 @@ void HAPanel::build_ui_() {
     lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
     lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 12, 0);
+    // UE11: cap + ellipsize the name so a long one can't run under the badges.
+    lv_obj_set_width(lbl, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_width(lbl, 300, 0);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+
+    // UE11: right-aligned bar holding one group per declared badge. Each group
+    // is [icon][value]; a group hides itself (and collapses out of the flex
+    // layout) when its value is 0/empty, so the visible badges stay packed
+    // against the right edge. Non-clickable + event-bubble so a tap on a badge
+    // still selects the page row. The page name keeps its left alignment.
+    const std::vector<PickerBadge> &page_badges = this->pages_[pi].badges;
+    std::vector<lv_obj_t *> groups;
+    if (!page_badges.empty()) {
+      lv_obj_t *bar = lv_obj_create(row);
+      lv_obj_remove_style_all(bar);
+      lv_obj_set_size(bar, LV_SIZE_CONTENT, 56);
+      lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+      lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
+                            LV_FLEX_ALIGN_CENTER);
+      lv_obj_set_style_pad_column(bar, 14, 0);  // gap between stacked badges
+      lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+      lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_add_flag(bar, LV_OBJ_FLAG_EVENT_BUBBLE);
+      lv_obj_align(bar, LV_ALIGN_RIGHT_MID, -12, 0);
+
+      for (size_t bi = 0; bi < page_badges.size(); bi++) {
+        lv_obj_t *grp = lv_obj_create(bar);
+        lv_obj_remove_style_all(grp);
+        lv_obj_set_size(grp, LV_SIZE_CONTENT, 56);
+        lv_obj_set_flex_flow(grp, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(grp, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(grp, 6, 0);  // gap between icon + value
+        lv_obj_clear_flag(grp, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(grp, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(grp, LV_OBJ_FLAG_EVENT_BUBBLE);
+        lv_obj_add_flag(grp, LV_OBJ_FLAG_HIDDEN);
+
+        // Child 0: mdi icon glyph (index-stable — always created even w/o font).
+        lv_obj_t *bicon = lv_label_create(grp);
+        lv_label_set_text(bicon, "");
+        if (picker_mdi_font != nullptr)
+          lv_obj_set_style_text_font(bicon, picker_mdi_font, 0);
+
+        // Child 1: value text.
+        lv_obj_t *bval = lv_label_create(grp);
+        lv_label_set_text(bval, "");
+        lv_obj_set_style_text_font(bval, &lv_font_montserrat_18, 0);
+
+        groups.push_back(grp);
+      }
+    }
+    this->picker_badges_[pi] = std::move(groups);
   }
   // E1: the picker lists pages only — Settings moved to the bottom-bar gear.
 
@@ -1818,6 +2317,9 @@ void HAPanel::build_ui_() {
 void HAPanel::open_picker_() {
   if (this->picker_ == nullptr)
     return;
+  // UE11: recompute badges from current state before the unhide — entity states
+  // are already live (subscriptions don't pause), so no fetch is needed.
+  this->update_picker_badges_();
   lv_obj_clear_flag(this->picker_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(this->picker_);
   ESP_LOGD(TAG, "picker open");

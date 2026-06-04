@@ -1,18 +1,26 @@
-# Build Plan — Dynamic area + entity discovery
-
+> ⚠️ **ON HOLD — scope subject to change.** We may not implement this phase as
+> written; if we do, the scope will likely change. The functionality outline
+> below is preserved as the original thinking, **not** a committed spec. Treat it
+> as a starting point to revisit, not a plan to execute as-is. See the
+> [Roadmap](roadmap.md) for status.
+>
+> ---
+>
+> Part of the [Roadmap](roadmap.md).
+>
 > Split out of the MVP build plan (was "Phase 10"); that plan and its full
-> decision log now live in [DEVELOPMENT.md](DEVELOPMENT.md). The MVP plan
+> decision log now live in [DEVELOPMENT.md](../DEVELOPMENT.md). The MVP plan
 > ships a static, gitignored `packages/ha-entities.yaml` (see its Phase 5).
 > This document covers replacing that static file with HA-side dynamic
 > config so re-arranging a home no longer needs a firmware rebuild.
 
-Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha-guide.md).
+Background reference: [esp32-s3-amoled-ha-guide.md](esp32-s3-amoled-ha-guide.md).
 
 ---
 
-## Phase 10 — Dynamic area + entity discovery (replaces static YAML)
+# Phase 10 — Dynamic area + entity discovery (replaces static YAML)
 
-**Status:** ⬜ not started · target tag: `p10-dynamic`
+**Status:** ⬜ on hold (scope subject to change) · target tag: `p10-dynamic`
 
 **Goal:** Move source-of-truth for areas + entities from `packages/ha-entities.yaml` into Home Assistant itself. Re-arranging a home no longer requires a firmware rebuild.
 
@@ -84,4 +92,4 @@ text_sensor:
 
 ### Related
 
-- **Live-attr modal preload** (parked in the MVP plan's "Post-P7 TODO") naturally folds into this work: a HA-side template sensor batching per-entity attributes into one payload solves the connect-time TX-saturation problem. See [DEVELOPMENT.md](DEVELOPMENT.md) §"Post-P7 TODO — live attrs in modal".
+- **Live-attr modal preload** (parked in the MVP plan's "Post-P7 TODO") naturally folds into this work: a HA-side template sensor batching per-entity attributes into one payload solves the connect-time TX-saturation problem. See [DEVELOPMENT.md](../DEVELOPMENT.md) §"Post-P7 TODO — live attrs in modal".

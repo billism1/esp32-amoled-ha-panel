@@ -58,6 +58,48 @@ CONF_SCOPE = "scope"
 # UE12: report aggregation scope. "all" (default) = every entity on the panel
 # across all pages; "page" = only entities on the same page as the report row.
 REPORT_SCOPES = ["all", "page"]
+# UE13: per-row name/title text styles. Values map to the STYLE_* bitmask in
+# ha_panel.h. bold/italic need baked font variants (wired via `style_fonts:`
+# below); underline is a runtime LVGL decor (no font). Mutually combinable.
+CONF_STYLE = "style"
+TEXT_STYLES = {"bold": 1, "italic": 2, "underline": 4}
+# UE13: the baked Montserrat bold/italic fonts at the three row sizes, supplied
+# by packages/style-fonts.yaml and merged into this component's config. Each is
+# a list of exactly 3 font ids [small(18), medium(24), large(32)].
+CONF_STYLE_FONTS = "style_fonts"
+CONF_BOLD = "bold"
+CONF_ITALIC = "italic"
+# UE11: per-page picker badge(s). A page declares one badge or a list of badges,
+# shown as icon+value stacked horizontally to the right of the page name in the
+# picker, computed fresh on open over THAT page's entities only (page-scoped).
+CONF_PICKER_BADGE = "picker_badge"
+CONF_AGG = "agg"
+CONF_THRESHOLD = "threshold"
+# UE11: selectable badge `type:` values — source of truth for this compile-time
+# validation and the C++ BadgeType enum (badge_type_from_). Config-free group
+# (domain + state only) ships in v1; the device_class / numeric group parses +
+# evaluates but stays empty until UE7 subscribes device_class (gated).
+#   config-free: lights_on, devices_on, unlocked, open_covers, media_playing,
+#                climate_active, running, offline, entities
+#   needs UE7  : open_doors, motion, low_battery, alarm, temperature, humidity,
+#                power, co2, aqi, severity (alarm/door portions)
+#   composite  : severity, idle
+BADGE_TYPES = [
+    "lights_on", "devices_on", "unlocked", "open_covers", "media_playing",
+    "climate_active", "running", "offline", "entities",
+    "open_doors", "motion", "low_battery", "alarm",
+    "temperature", "humidity", "power", "co2", "aqi",
+    "severity", "idle",
+]
+# UE11: numeric-aggregate selector for temperature / co2 / aqi badges.
+BADGE_AGGS = ["avg", "min", "max", "sum"]
+
+
+def _style_flags(values):
+    flags = 0
+    for s in values:
+        flags |= TEXT_STYLES[s]
+    return flags
 # UE12: selectable report `type:` values. Source of truth for both the
 # compile-time validation here and the C++ ReportType enum (report_type_from_).
 #   count    — N entities matching {domains, match_state}; show_total → "N / M"
@@ -127,6 +169,10 @@ REPORT_SCHEMA = cv.Schema(
         cv.Optional(CONF_SCOPE, default="all"): cv.one_of(*REPORT_SCOPES, lower=True),
         # optional MDI icon for the row ("mdi:foo"); omit = no icon column.
         cv.Optional(CONF_ICON, default=""): cv.string,
+        # UE13: title text styles, any of bold / italic / underline.
+        cv.Optional(CONF_STYLE, default=[]): cv.ensure_list(
+            cv.one_of(*TEXT_STYLES, lower=True)
+        ),
     }
 )
 
@@ -149,6 +195,10 @@ ENTITY_SCHEMA = cv.All(
             ),
             # UE7: bypass REST backfill, plot live from the ring buffer.
             cv.Optional(CONF_REALTIME, default=False): cv.boolean,
+            # UE13: name text styles, any of bold / italic / underline.
+            cv.Optional(CONF_STYLE, default=[]): cv.ensure_list(
+                cv.one_of(*TEXT_STYLES, lower=True)
+            ),
             # UE12: computed-aggregate row (mutually exclusive with entity_id).
             cv.Optional(CONF_REPORT): REPORT_SCHEMA,
         }
@@ -156,10 +206,55 @@ ENTITY_SCHEMA = cv.All(
     cv.has_exactly_one_key(CONF_ENTITY_ID, CONF_REPORT),
 )
 
+# UE11: one picker badge. `type` is a strict enum (unknown value = compile
+# error). The block form carries optional params; a bare type name is sugar for
+# `{type: <name>}` (normalised by _picker_badge).
+PICKER_BADGE_BLOCK_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_TYPE): cv.one_of(*BADGE_TYPES, lower=True),
+        # numeric badges (temperature / co2 / aqi): which aggregate to show.
+        cv.Optional(CONF_AGG, default="avg"): cv.one_of(*BADGE_AGGS, lower=True),
+        # low_battery: percent at/below which a battery counts as low.
+        cv.Optional(CONF_THRESHOLD, default=20): cv.int_,
+        # numeric badges: suffix override ("°", "%", "W", …); empty = built-in.
+        cv.Optional(CONF_UNIT, default=""): cv.string,
+        # icon override ("mdi:foo" or bare); empty = the type's default glyph.
+        cv.Optional(CONF_ICON, default=""): cv.string,
+    }
+)
+
+
+def _picker_badge(value):
+    # Accept a bare type name ("lights_on") or a block ({type: …, agg: …}).
+    if isinstance(value, str):
+        return PICKER_BADGE_BLOCK_SCHEMA({CONF_TYPE: value})
+    return PICKER_BADGE_BLOCK_SCHEMA(value)
+
+
+# A page's `picker_badge:` accepts one badge or a list of them (ensure_list
+# wraps a single into a list); each item is bare-name-or-block.
+PICKER_BADGE_SCHEMA = cv.ensure_list(_picker_badge)
+
 PAGE_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_NAME): cv.string,
         cv.Required(CONF_ENTITIES): cv.ensure_list(ENTITY_SCHEMA),
+        # UE11: zero or more page-picker badges (default omitted = none).
+        cv.Optional(CONF_PICKER_BADGE, default=[]): PICKER_BADGE_SCHEMA,
+    }
+)
+
+# UE13: baked bold / italic name-label fonts, one per row size (small 18,
+# medium 24, large 32) — exactly 3 ids each. Supplied + merged by
+# packages/style-fonts.yaml; users don't write this by hand.
+STYLE_FONTS_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_BOLD): cv.All(
+            cv.ensure_list(cv.use_id(font.Font)), cv.Length(min=3, max=3)
+        ),
+        cv.Optional(CONF_ITALIC): cv.All(
+            cv.ensure_list(cv.use_id(font.Font)), cv.Length(min=3, max=3)
+        ),
     }
 )
 
@@ -183,6 +278,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_MDI_FONT_MEDIUM): cv.use_id(font.Font),
         cv.Optional(CONF_MDI_FONT_LARGE): cv.use_id(font.Font),
         cv.Optional(CONF_HISTORY): HISTORY_SCHEMA,
+        cv.Optional(CONF_STYLE_FONTS): STYLE_FONTS_SCHEMA,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -202,8 +298,31 @@ async def to_code(config):
         cg.add(var.set_history_time(await cg.get_variable(h[CONF_TIME_ID])))
         cg.add(var.set_history_base_url(h[CONF_BASE_URL]))
         cg.add(var.set_history_token(h[CONF_TOKEN]))
+    # UE13: wire the baked bold/italic name fonts. variant 0 = bold, 1 = italic;
+    # each list is [small, medium, large].
+    if CONF_STYLE_FONTS in config:
+        sf = config[CONF_STYLE_FONTS]
+        for variant_idx, key in ((0, CONF_BOLD), (1, CONF_ITALIC)):
+            if key in sf:
+                for size_idx, fid in enumerate(sf[key]):
+                    cg.add(
+                        var.set_style_font(
+                            size_idx, variant_idx, await cg.get_variable(fid)
+                        )
+                    )
     for page in config[CONF_PAGES]:
         cg.add(var.add_page(page[CONF_NAME]))
+        # UE11: append each declared picker badge to the page just added.
+        for badge in page[CONF_PICKER_BADGE]:
+            cg.add(
+                var.add_page_badge(
+                    badge[CONF_TYPE],
+                    badge[CONF_AGG],
+                    badge[CONF_THRESHOLD],
+                    badge[CONF_UNIT],
+                    badge[CONF_ICON],
+                )
+            )
         for ent in page[CONF_ENTITIES]:
             # UE12: a report row — emit add_report and skip the entity path.
             if CONF_REPORT in ent:
@@ -221,6 +340,7 @@ async def to_code(config):
                         r[CONF_SCOPE],
                         r[CONF_ICON],
                         ENTITY_SIZES[ent[CONF_SIZE]],
+                        _style_flags(r[CONF_STYLE]),
                     )
                 )
                 continue
@@ -243,5 +363,6 @@ async def to_code(config):
                     confirm,
                     ENTITY_SIZES[ent[CONF_SIZE]],
                     ent[CONF_REALTIME],
+                    _style_flags(ent[CONF_STYLE]),
                 )
             )

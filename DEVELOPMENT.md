@@ -6,9 +6,12 @@ notes, on-device gotchas, and the dated session log for the shipped panel
 phased build plans (`plan-mvp.md` and `plan-enhance-ui.md`); merged here once
 the work shipped so the reasoning stays in one place.
 
-Still-active forward plans live in their own files and are linked from the
-[README](README.md): [plan-multi-board-support.md](plan-multi-board-support.md)
-and [plan-dynamic-discovery.md](plan-dynamic-discovery.md).
+Still-active forward plans live under [docs/](docs/) and are indexed by the
+[roadmap](docs/roadmap.md): multi-board support
+([docs/roadmap-p9-multiboard.md](docs/roadmap-p9-multiboard.md)) and dynamic
+area/entity discovery
+([docs/roadmap-p10-dynamic-discovery.md](docs/roadmap-p10-dynamic-discovery.md),
+on hold), plus the unimplemented UI-enhancement phases (UE7–UE9, UE14).
 
 ---
 
@@ -18,9 +21,9 @@ Phased plan from empty repo → working **handheld, battery-powered** HA remote
 on the Waveshare ESP32-S3-Touch-AMOLED-2.16, with a structure that lets us
 add other AMOLED boards later by dropping in a new board package.
 
-**Follow-on plans** (split out of this one):
-- [plan-multi-board-support.md](plan-multi-board-support.md) — Phase 9, portability across AMOLED boards.
-- [plan-dynamic-discovery.md](plan-dynamic-discovery.md) — Phase 10, HA-driven dynamic area/entity discovery.
+**Follow-on plans** (split out of this one — see the [roadmap](docs/roadmap.md)):
+- [docs/roadmap-p9-multiboard.md](docs/roadmap-p9-multiboard.md) — Phase 9, portability across AMOLED boards.
+- [docs/roadmap-p10-dynamic-discovery.md](docs/roadmap-p10-dynamic-discovery.md) — Phase 10, HA-driven dynamic area/entity discovery (on hold).
 - UI enhancements (post-MVP) — see the "Build Plan — UI enhancements" section below in this document.
 
 Device runs on a LiPo cell in a hand-held enclosure. Idle screen behaviour
@@ -1185,7 +1188,7 @@ Sleep is **opt-out, not opt-in** — on by default, user can disable it.
 
 ## Phase 9 — Multi-board support
 
-**Moved to its own plan:** [plan-multi-board-support.md](plan-multi-board-support.md).
+**Moved to its own plan:** [docs/roadmap-p9-multiboard.md](docs/roadmap-p9-multiboard.md).
 Status, goal, tasks, exit criteria, and risks now live there. This MVP plan
 targets the Waveshare ESP32-S3-Touch-AMOLED-2.16 only.
 
@@ -1193,7 +1196,8 @@ targets the Waveshare ESP32-S3-Touch-AMOLED-2.16 only.
 
 ## Phase 10 — Dynamic area + entity discovery (replaces static YAML)
 
-**Moved to its own plan:** [plan-dynamic-discovery.md](plan-dynamic-discovery.md).
+**Moved to its own plan:** [docs/roadmap-p10-dynamic-discovery.md](docs/roadmap-p10-dynamic-discovery.md)
+(on hold — scope subject to change).
 Mechanism (HA template sensor → JSON attribute → runtime LVGL build), hard
 parts, migration, exit criteria, and risks now live there. The MVP path stays
 the static, gitignored `packages/ha-entities.yaml` from Phase 5.
@@ -1413,8 +1417,9 @@ Wi-Fi / Home Assistant connection-status indicators, and a fix for the area
 title overrunning its dropdown chevron.
 
 Sibling plans: the MVP build plan (shipped baseline — see the first half of this document) ·
-[plan-multi-board-support.md](plan-multi-board-support.md) ·
-[plan-dynamic-discovery.md](plan-dynamic-discovery.md).
+[docs/roadmap-p9-multiboard.md](docs/roadmap-p9-multiboard.md) ·
+[docs/roadmap-p10-dynamic-discovery.md](docs/roadmap-p10-dynamic-discovery.md) ·
+the [roadmap](docs/roadmap.md) for the unimplemented UE phases.
 
 Background reference: [docs/esp32-s3-amoled-ha-guide.md](docs/esp32-s3-amoled-ha-guide.md).
 
@@ -2954,8 +2959,9 @@ edits.
 
 ### Phase UE12 — Report rows (computed aggregates as a row type)
 
-**Status:** code complete; compiles + links clean (RAM 16.6%, Flash 19.6%);
-on-device validation pending.
+**Status:** ✅ done — validated on-device (count / bool / offline / sum / avg /
+min / max render live + recompute on state change; page + all scope; honour
+`size:`; inert on tap). Compiles + links clean (RAM 16.6%, Flash 19.6%).
 
 **Outcome:** a page row can now be a `report:` block instead of an `entity_id:`,
 rendering a **computed aggregate** over the panel's other entities — "N lights
@@ -3037,6 +3043,134 @@ unchanged. Also: put the same `count` block with `scope: page` on two different
 pages and confirm each shows its own page's total, and that `scope: all` (or
 omitted) matches the whole-panel total; confirm a report `icon:` renders in the
 icon column.
+
+---
+
+### Phase UE13 — Per-row text styles (bold / italic / underline)
+
+**Status:** ✅ done — validated on-device (bold / italic / underline + combos
+render on the row title at small/medium/large; unstyled rows unchanged).
+Compiles + links clean (firmware ~+100 KB for the baked fonts).
+
+**Outcome:** any row (entity or report) can style its **name/title** label via
+`style: [bold, italic, underline]`. Applies to the left-hand name label only,
+across all row sizes.
+
+**Why ESPHome fonts, not an LVGL flag.** LVGL has no synthetic bold/italic and no
+runtime weight — styled text is purely a *font swap*, and the built-in
+`lv_font_montserrat_*` are regular-only. So bold/italic need **real baked font
+data**; underline is the one style LVGL does at runtime (`lv_text_decor`).
+
+- **Underline** → `lv_obj_set_style_text_decor(name, LV_TEXT_DECOR_UNDERLINE, 0)`
+  in `make_entity_row`. No font, no flash.
+- **Bold / italic** → baked Montserrat Bold + Italic at the three row sizes
+  (18/24/32) in a new `packages/style-fonts.yaml`, pulled from Google Fonts via
+  ESPHome's `gfonts://` at build (network at compile, like the MDI webfont).
+  `resolve_name_font_(e)` maps the row's `STYLE_*` bits + size → the baked
+  `font::Font*` (via `get_lv_font()`), or nullptr to keep the regular built-in.
+  `bold|italic` with no bold-italic font baked → bold (documented).
+
+**Auto-wired, zero user config.** The 6 fonts are anchored in `lvgl-ui.yaml`
+(hidden labels, same trick as the MDI fonts) and `style-fonts.yaml` carries an
+`ha_panel:` block (same id) that **package-merges** with the user's
+`ha-entities.yaml` — so `style_fonts: {bold: [...], italic: [...]}` lands on the
+component without the user touching their config. They only write `style:` on a
+row. Verified the merge: `esphome config` shows `pages` + `style_fonts` under one
+`ha_panel:`.
+
+**Plumbing.** `Entity::name_style` (uint8 bitmask, `STYLE_BOLD/ITALIC/UNDERLINE`
+in ha_panel.h); `add_entity`/`add_report` gain a `name_style` arg; codegen maps
+the YAML `style:` list → flags (`_style_flags`). Fonts wired via
+`set_style_font(size_idx, variant_idx, font)` from a `style_fonts:` config block
+(`STYLE_FONTS_SCHEMA`, each variant a list of exactly 3 ids). `make_entity_row`
+takes `name_font_override` + `name_underline` and applies them to the name label;
+the build loop computes them per row from `resolve_name_font_` + the underline
+bit. Styles are set at build time (name text is static) — no rebuild path needed.
+
+**Cost.** 6 baked fonts (~+100 KB flash) + a build-time gfonts download. If
+unused, dropping the `style_fonts:` package include reclaims it.
+
+**Verification (pending on-device):** style a row `[bold]`, `[italic]`,
+`[underline]`, and `[bold, underline]` at small/medium/large; confirm the title
+renders in the right weight/slant/decoration and that unstyled rows are
+unchanged.
+
+---
+
+### Phase UE11 — Page-picker count badges
+
+**Status:** code complete; compiles + links clean (RAM 16.8%, Flash 20.9%);
+on-device validation pending.
+
+**Outcome:** a page can declare a `picker_badge:` — a small **icon + count**
+shown to the right of the page name in the page picker (e.g. `🔆 3` = three lights
+on). A page may carry **one badge or a list** of them, stacked horizontally and
+right-aligned; the page name keeps its left alignment + ellipsizes so it can't run
+under the badges. Recomputed on every picker open over **that page's own entities
+only** (page-scoped).
+
+**Quiet = dim, not gone.** A badge with nothing to report (0 lights on, no
+alarm) stays visible in a **DIM grey** (`0x555555`) — its presence signals
+"monitoring this", its greyness "all quiet" — and brightens to its semantic
+colour when notable. A badge **hides only when there's nothing in scope to
+monitor** (`total == 0`: e.g. `lights_on` on a page with no lights), so the panel
+never shows a dim count for a thing the page doesn't have. (Dim is a grey colour,
+not low opacity — on the black bg, fading opacity just vanishes.) The evaluator
+splits each type into a *scope* predicate (in-scope `total`) + an *active*
+predicate (notable `matched`) via a `count2` helper; `total==0`→hide,
+`matched>0`→full colour, else→DIM.
+
+**Cheap by construction.** The picker is a built-once hidden overlay.
+`update_picker_badges_()` runs on `open_picker_()` (clears HIDDEN + raises) and
+again from `on_state_` **only while the picker is visible** (a `!HIDDEN` guard)
+so open badges track state live; a closed picker is zero-cost and refreshes on
+next open. Entity states are already live (subscriptions don't pause), no fetch.
+
+**Config.** Page-level `picker_badge:` accepts a bare type name (`lights_on`), a
+block (`{type, agg, threshold, unit, icon}` — `icon:` overrides the type's
+default glyph, same baked-subset rule as an entity/report `icon:`), or a **list**
+of either (`cv.ensure_list(_picker_badge)`). `BADGE_TYPES` / `BADGE_AGGS` in `__init__.py`
+are the validation source of truth — an unknown type is a compile error
+(`cv.one_of`). Codegen emits `add_page_badge(...)` once per badge, appending to
+the page just added (mirrors `add_entity`'s `pages_.back()`).
+
+**Model.** `enum class BadgeType` (NONE + 20 types) + `BadgeAgg` +
+`PickerBadge{type, agg, threshold, unit}`; `std::vector<PickerBadge> badges` on
+`Page`. Widget handles in `std::vector<std::vector<lv_obj_t*>> picker_badges_`
+([page][badge] → an [icon][value] flex group); hidden groups collapse out of the
+right-aligned flex **bar**'s layout, so visible badges stay packed against the
+right edge.
+
+**Types.** Config-free group works today (domain + state only): `lights_on`,
+`devices_on`, `unlocked`, `open_covers`, `media_playing`, `climate_active`,
+`running`, `offline`, `entities`, `idle`. The `device_class` / numeric group
+(`open_doors`, `motion`, `low_battery`, `alarm`, `temperature`, `humidity`,
+`power`, `co2`, `aqi`, `severity`) parses + evaluates but stays **hidden until
+UE7** subscribes `device_class` (the predicates read `attrs["device_class"]`,
+empty today → 0 → hidden). Colours: neutral counts, amber active (doors/motion),
+red alarm/severity/offline/low-battery, green `idle`.
+
+**Local evaluator, not UE12's `compute_report_`.** Badge predicates are mostly
+**negative** — `unlocked` = *not* `locked`, `open_covers` = *not* `closed`,
+`climate_active` ≠ `off` — which UE12's `{domains, match_state}` filter (positive
+match only) can't express. So UE11 ships a dedicated `eval_picker_badge_()`
+switch. The UE11/UE12 "share the count helper" idea is parked; if a future pass
+generalises the report filter to negative/predicate matching, both can collapse
+onto it. Noted here per the cross-cutting rule.
+
+**Icons.** Reuse the baked MDI subset (`mdi_codepoint_` + `utf8_encode_`,
+`MDI_FALLBACK_CP` on a miss) drawn in `mdi_font_`; the value text is
+`montserrat_18`. Mixing the two needs two labels per badge (the MDI font has no
+ASCII digits), hence the [icon][value] group. All badge glyphs
+(`lightbulb-on`, `power-plug`, `lock-open`, `window-shutter-open`, `play`,
+`thermostat`, `cog`, `alert`, `door-open`, `motion-sensor`, `battery`,
+`alert-circle`, `thermometer`, `water-percent`, `power`, `gauge`,
+`checkbox-marked-circle-outline`) are already in the baked set.
+
+**Verification (pending on-device):** put `picker_badge: [lights_on,
+open_covers]` on a page, turn a light on, open the picker → badge shows `🔆 1`,
+hides when 0; long page names ellipsize without overlapping; a list stacks
+right-aligned; bare / block / list forms all render.
 
 ---
 

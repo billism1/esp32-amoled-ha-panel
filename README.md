@@ -84,6 +84,10 @@ behaviour live in shared, board-agnostic packages.
 **Navigation & UI**
 - Horizontal swipe **or** a persistent bottom bar (`◀ 🏠 ⚙ ▶`) to move between
   pages; top dropdown picker jumps straight to any page.
+- Per-page **picker badges** (`picker_badge:`) — an at-a-glance icon+count to the
+  right of each page name in the picker ("🔆 3" = three lights on, plug count,
+  open covers, offline, …). One badge or a list, computed live on open over that
+  page's own entities.
 - Vertical scroll through the entities on a page.
 - Header status bar: clock, page name, Wi-Fi / battery / connection-status
   icons. Wi-Fi + HA indicators blink amber while reconnecting (e.g. on
@@ -93,6 +97,8 @@ behaviour live in shared, board-agnostic packages.
   resolution chain.
 - Per-entity size (`small` / `medium` / `large`) to make important rows
   glanceable from across the room.
+- Per-row text styles (`style: [bold, italic, underline]`) for the row's
+  name/title — bold/italic via baked Montserrat variants, underline at runtime.
 
 **Entity control**
 - Tap to control: `light`, `switch`, `fan`, `input_boolean`, `cover`, `lock`,
@@ -174,13 +180,18 @@ full hardware/driver reference, pin tables, and known-working community configs.
 .
 ├── README.md
 ├── DEVELOPMENT.md               # full build history + design decisions log
-├── plan-multi-board-support.md  # planned work (see Roadmap)
-├── plan-dynamic-discovery.md    # tentatively planned work (see Roadmap)
 ├── secrets.example.yaml         # template, committed
 ├── secrets.yaml                 # real secrets, gitignored
 ├── power_mgr.h                  # light-sleep IDF wrapper (esphome: includes)
 ├── ha-amoled-panel.yaml         # top-level device YAML (board-agnostic shell)
 ├── docs/
+│   ├── roadmap.md                       # unimplemented phases, links to per-phase docs
+│   ├── roadmap-ue7-device-class.md      # planned UI-enhancement phases (see roadmap)
+│   ├── roadmap-ue8-row-sparkline.md
+│   ├── roadmap-ue9-readonly.md
+│   ├── roadmap-ue14-report-drilldown.md
+│   ├── roadmap-p9-multiboard.md         # planned: multi-board support
+│   ├── roadmap-p10-dynamic-discovery.md # on hold, scope subject to change
 │   └── esp32-s3-amoled-ha-guide.md
 ├── boards/
 │   └── waveshare-2.16.yaml       # pins, display, touch, IMU, sleep wake for this board
@@ -248,6 +259,7 @@ ha_panel:
   id: ha_panel_id
   pages:
     - name: "Living Room"
+      picker_badge: [lights_on, open_covers]  # optional: badge(s) in the picker
       entities:
         - entity_id: light.couch_lamp
           friendly_name: "Couch lamp"   # optional; falls back to entity_id
@@ -275,6 +287,7 @@ left-to-right in the carousel in declared order.
 |-----|----------|--------------|
 | `name` | yes | Page title, shown in the header and the page picker. |
 | `entities` | yes | Ordered list of rows. Each row is **either** an entity (`entity_id:` + the options below) **or** a [report](#report-rows) (`report:`). |
+| `picker_badge` | no | One [picker badge](#page-picker-badges), or a list of them, shown right of the page name in the picker. |
 
 **Entity row options**
 
@@ -289,6 +302,7 @@ that.
 | `friendly_name` | the `entity_id` | any | The row label. |
 | `icon` | domain default | any | MDI glyph override, `mdi:floor-lamp` (or bare `floor-lamp`). Must be in the baked glyph subset — unknown names log once and fall back to a generic glyph. Add glyphs with `tools/build-mdi-glyphs.py`. |
 | `size` | `small` | any | Row scale: `small` / `medium` / `large`. Scales height, name font, icon and the right-side widget together. Mixed sizes on a page are fine. |
+| `style` | none | any | Text style(s) for the row's name/title, as a list of any of `bold`, `italic`, `underline` — e.g. `style: [bold, underline]`. See [Row text styles](#row-text-styles) below. |
 | `confirm` | `false` | controllable domains | Short-tap opens a confirm sheet / detail modal instead of firing immediately — a guard against accidental brushes. Meaningful on `light` `switch` `fan` `input_boolean` `scene` `script` `automation` `button` `lock` `cover` `climate` `media_player` `number` `select`; ignored (with a compile warning) on read-only domains. |
 | `realtime` | `false` | numeric `sensor` / `binary_sensor` | Skips the REST history backfill and plots the history sheet purely from the in-device ring buffer + live stream, on a short "Live" window. For high-rate feeds HA doesn't record (e.g. 1 Hz MQTT). Leave off for entities HA records normally. |
 
@@ -309,6 +323,39 @@ actions above.)
 For copy-paste starting points covering each of these, see the worked examples in
 [packages/ha-entities.example.yaml](packages/ha-entities.example.yaml).
 
+### Row text styles
+
+`style:` sets the typeface of a row's **name/title** label (works on both entity
+and report rows). It takes a list of any of:
+
+| Style | Effect | How |
+|-------|--------|-----|
+| `bold` | **bold** name | baked Montserrat-Bold (per row size) |
+| `italic` | *italic* name | baked Montserrat-Italic (per row size) |
+| `underline` | underlined name | runtime LVGL decoration |
+
+```yaml
+- entity_id: light.kitchen
+  style: [bold]
+- report:
+    type: count
+    title: "Lights on"
+    style: [bold, underline]      # combine freely
+```
+
+Notes:
+- **Combine** any of the three in the list. `bold` + `italic` together currently
+  renders as **bold** (no bold-italic font is baked).
+- Bold and italic need real font data — LVGL has no synthetic weighting — so the
+  panel bakes Montserrat **Bold** and **Italic** at the three row sizes. That's
+  already wired (`packages/style-fonts.yaml`, pulled from Google Fonts at build
+  and merged into the component); you only write `style:` on a row. Underline
+  needs no font.
+- Adds ~tens of KB of flash for the baked variants and a build-time font
+  download (like the MDI webfont). If you never use `style:`, the fonts still
+  bake — drop the `style_fonts:` package from `ha-amoled-panel.yaml` to reclaim
+  the space.
+
 ### Report rows
 
 A row with a `report:` block (instead of `entity_id:`) shows a **computed
@@ -328,6 +375,7 @@ row; `size:` still applies.
     show_source: false          # min/max: prepend the extreme entity's name
     scope: all                  # all (default) = whole panel; page = this page
     icon: mdi:lightbulb-multiple # optional — MDI glyph; omit = no icon column
+    style: [bold]               # optional — bold / italic / underline (list)
   size: medium
 ```
 
@@ -402,6 +450,7 @@ source of truth for your install):
 | Domain | Typical `match_state` values |
 |--------|------------------------------|
 | `light` `switch` `fan` `input_boolean` | `on`, `off` |
+| `automation` `script` | `on`, `off` (script `on` = running) |
 | `cover` | `open`, `closed`, `opening`, `closing` |
 | `lock` | `locked`, `unlocked`, `jammed` |
 | `climate` | `off`, `heat`, `cool`, `heat_cool`, `auto`, `dry`, `fan_only` |
@@ -424,6 +473,77 @@ Common `device_class` values (for when UE7 lands): `sensor` →
 > **Quote `on`/`off`** (`["on"]`, not `[on]`) — YAML reads bare `on`/`off` as
 > booleans. The panel maps them back, but quoting is clearer and avoids surprises
 > with other truthy words (`yes`/`no`).
+
+---
+
+### Page picker badges
+
+A page can carry a `picker_badge:` — a small **icon + count** shown to the right
+of the page name in the **page picker** (the dropdown you open from the header),
+so you can tell "is anything on over there" without opening each page. Declare
+**one** badge or a **list** of them (stacked horizontally, right-aligned; the
+page name stays left). Recomputed every time the picker opens (and live while
+it's open) over **that page's own entities only**.
+
+**Quiet badges dim, they don't vanish.** When a badge has nothing to report
+(`0` lights on, no alarm) it stays visible but **greyed** — its presence tells
+you the panel is *watching* that thing, the grey tells you all's quiet. It
+brightens to its semantic colour when something's notable. A badge **only hides
+entirely when there's nothing on the page to monitor** (e.g. `lights_on` on a
+page with no lights), so you never see a dim count for something that isn't
+there.
+
+```yaml
+pages:
+  - name: "Living Room"
+    picker_badge: lights_on                  # one badge (bare type name)
+    entities: [ ... ]
+  - name: "Whole House"
+    picker_badge: [lights_on, open_covers, offline]   # a list, stacked right
+    entities: [ ... ]
+  - name: "Climate"
+    picker_badge: { type: temperature, agg: avg }     # block form (params)
+    entities: [ ... ]
+```
+
+A bare type name (`picker_badge: lights_on`) is shorthand for `{ type: lights_on }`.
+The **block form** carries params: `agg:` (`avg`/`min`/`max`/`sum`, for the
+numeric badges), `threshold:` (int, `low_battery` percent, default `20`),
+`unit:` (suffix override for numeric badges), and `icon:` (`mdi:foo` to override
+the type's default glyph — same baked-subset rule as an entity/report `icon:`):
+
+```yaml
+picker_badge: { type: lights_on, icon: mdi:ceiling-light }   # custom glyph
+```
+
+**`type:` is a closed list** (a typo is a compile error):
+
+| `type` | Shows | Notes |
+|--------|-------|-------|
+| `lights_on` | `light` entities that are `on` | |
+| `devices_on` | `switch` / `fan` / `input_boolean` that are `on` | |
+| `unlocked` | `lock` not `locked` | |
+| `open_covers` | `cover` not `closed` | |
+| `media_playing` | `media_player` that are `playing` | |
+| `climate_active` | `climate` not `off` | |
+| `running` | `script` / `automation` `on`, `timer` `active` | |
+| `offline` | `unavailable` / `unknown` entities (red) | |
+| `entities` | total entities on the page | no state filter |
+| `idle` | a green ✓ when nothing is on / open | calm-state indicator |
+| `open_doors` | `binary_sensor` `door`/`window`/`garage_door` `on` (amber) | needs `device_class` ⚠ |
+| `motion` | `binary_sensor` `motion`/`occupancy`/`presence` `on` (amber) | needs `device_class` ⚠ |
+| `low_battery` | batteries at/below `threshold:` (red) | needs `device_class` ⚠ |
+| `alarm` | a red dot when smoke/leak/gas/CO/problem/safety is `on` | needs `device_class` ⚠ |
+| `temperature` | `agg:` of temperature sensors | needs `device_class` ⚠ |
+| `humidity` | average humidity | needs `device_class` ⚠ |
+| `power` | sum of power sensors | needs `device_class` ⚠ |
+| `co2` / `aqi` | average CO₂ / AQI | needs `device_class` ⚠ |
+| `severity` | composite dot — `alarm` → red, doors → amber, offline → amber | partly needs `device_class` ⚠ |
+
+> ⚠️ The **`device_class`-dependent** types parse and validate today but stay
+> **hidden** until the attribute subscription lands (UE7) — the panel doesn't
+> know an entity's `device_class` yet, so they match nothing. The config-free
+> types above them work now. (`severity`/`offline` still show the offline signal.)
 
 ---
 
@@ -476,15 +596,23 @@ put it in `secrets.yaml` as `ha_history_token`.
 ## Roadmap
 
 Shipped functionality is documented above and in
-[DEVELOPMENT.md](DEVELOPMENT.md). Two efforts remain:
+[DEVELOPMENT.md](DEVELOPMENT.md). The full list of unimplemented phases — with a
+per-phase design doc for each — lives in **[docs/roadmap.md](docs/roadmap.md)**.
+In brief:
 
-- **[Multi-board support](plan-multi-board-support.md)** (*planned*). Make
+- **UI enhancements** (*planned*): binary_sensor `device_class` subscription —
+  the unlock for LED severity colouring + class-gated report/badge aggregations
+  ([UE7](docs/roadmap-ue7-device-class.md)), inline trend sparklines
+  ([UE8](docs/roadmap-ue8-row-sparkline.md)), a `readonly:` per-entity lock
+  ([UE9](docs/roadmap-ue9-readonly.md)), and report-row drill-down
+  ([UE14](docs/roadmap-ue14-report-drilldown.md)).
+- **[Multi-board support](docs/roadmap-p9-multiboard.md)** (*planned*). Make
   adding a second AMOLED board a matter of dropping in one board package (pins,
   display, touch, dimensions) with no changes to the UI / HA logic.
-- **[Dynamic area + entity discovery](plan-dynamic-discovery.md)**
-  (*tentatively planned*). Move the source-of-truth for pages + entities from the
-  static `ha-entities.yaml` into a single HA-side template sensor, so
-  re-arranging a home updates the panel without a firmware rebuild.
+- **[Dynamic area + entity discovery](docs/roadmap-p10-dynamic-discovery.md)**
+  (*on hold — scope subject to change*). Move the source-of-truth for pages +
+  entities from the static `ha-entities.yaml` into a single HA-side template
+  sensor, so re-arranging a home updates the panel without a firmware rebuild.
 
 ---
 
