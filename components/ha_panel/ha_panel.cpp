@@ -608,8 +608,10 @@ void HAPanel::on_attr_(size_t entity_idx, const std::string &attr_name,
   // Climate rows render the current temperature beside the mode; refresh the row
   // whenever it changes (first arrival at connect, and live updates after).
   if (attr_name == "current_temperature" &&
-      this->entities_[entity_idx].domain == "climate")
+      this->entities_[entity_idx].domain == "climate") {
     this->rebuild_entity_row_(entity_idx);
+    this->refresh_report_members_();  // UE14: a climate member shows current temp
+  }
   // UE7: device_class arrives post-connect (binary_sensor + sensor). Repaint the
   // row so the binary_sensor severity LED is right once the class lands, not just
   // on first paint, and recompute reports — a class-gated aggregate can start
@@ -619,6 +621,7 @@ void HAPanel::on_attr_(size_t entity_idx, const std::string &attr_name,
   if (attr_name == "device_class") {
     this->rebuild_entity_row_(entity_idx);
     this->recompute_reports_();
+    this->refresh_report_members_();  // UE14: a binary_sensor member's severity LED
   }
   // Drive the pending counter ONLY on first arrival per attr. Subsequent
   // pushes (HA state change while modal still open) just refresh the cache
@@ -692,6 +695,10 @@ void HAPanel::on_state_(const std::string &entity_id, StringRef state) {
     if (this->picker_ != nullptr &&
         !lv_obj_has_flag(this->picker_, LV_OBJ_FLAG_HIDDEN))
       this->update_picker_badges_();
+    // UE14: keep an open drill-down list's member rows in sync with live state
+    // (a toggled member's switch flips in place). Cheap — only runs while the
+    // list is visible. Membership is held stable until re-open (see helper).
+    this->refresh_report_members_();
     return;
   }
   ESP_LOGW(TAG, "state callback for unknown entity %s", entity_id.c_str());
@@ -703,6 +710,20 @@ void HAPanel::rebuild_entity_row_(size_t entity_idx) {
   lv_obj_t *w = this->widgets_by_entity_[entity_idx];
   if (w == nullptr)
     return;
+  lv_obj_t *overlay = entity_idx < this->unavail_labels_by_entity_.size()
+                          ? this->unavail_labels_by_entity_[entity_idx]
+                          : nullptr;
+  lv_obj_t *led = entity_idx < this->leds_by_entity_.size()
+                      ? this->leds_by_entity_[entity_idx]
+                      : nullptr;
+  this->paint_entity_row_(entity_idx, w, overlay, led);
+}
+
+// UE14: the visual-update body, with the child widget pointers passed in. Page
+// rows pass their per-entity array slots (via rebuild_entity_row_); UE14 member
+// rows pass their own throwaway widgets so the two don't share one slot.
+void HAPanel::paint_entity_row_(size_t entity_idx, lv_obj_t *w, lv_obj_t *overlay,
+                                lv_obj_t *led) {
   const Entity &e = this->entities_[entity_idx];
 
   switch (e.render_class) {
@@ -713,9 +734,6 @@ void HAPanel::rebuild_entity_row_(size_t entity_idx) {
       // from across the room) and show the red overlay label instead.
       const bool unavail = !e.has_state || e.state == "unavailable" ||
                             e.state == "unknown";
-      lv_obj_t *overlay = entity_idx < this->unavail_labels_by_entity_.size()
-                              ? this->unavail_labels_by_entity_[entity_idx]
-                              : nullptr;
       if (unavail) {
         lv_obj_add_flag(w, LV_OBJ_FLAG_HIDDEN);
         if (overlay != nullptr)
@@ -850,12 +868,9 @@ void HAPanel::rebuild_entity_row_(size_t entity_idx) {
         // the label too, overriding the generic state→colour set just above.
         col = led_col;
         lv_obj_set_style_text_color(w, lv_color_hex(col), 0);
-        if (entity_idx < this->leds_by_entity_.size()) {
-          lv_obj_t *led = this->leds_by_entity_[entity_idx];
-          if (led != nullptr) {
-            lv_led_set_color(led, lv_color_hex(led_col));
-            lv_led_set_brightness(led, bright);
-          }
+        if (led != nullptr) {
+          lv_led_set_color(led, lv_color_hex(led_col));
+          lv_led_set_brightness(led, bright);
         }
       }
       return;
@@ -876,20 +891,7 @@ void HAPanel::recompute_reports_() {
     Entity &r = this->entities_[i];
     if (r.render_class != RenderClass::REPORT_TEXT)
       continue;
-    // UE12: page scope → limit the scan to the page that holds this report row
-    // (each entity index lives in exactly one page). all scope → nullptr.
-    const std::vector<size_t> *scope = nullptr;
-    if (r.report.scope == ReportScope::PAGE) {
-      for (const auto &p : this->pages_) {
-        bool here = false;
-        for (size_t ei : p.entity_indices)
-          if (ei == i) { here = true; break; }
-        if (here) {
-          scope = &p.entity_indices;
-          break;
-        }
-      }
-    }
+    const std::vector<size_t> *scope = this->report_scope_for_(i);
     std::string text;
     uint32_t col = 0xFFFFFF;
     this->compute_report_(r.report, scope, &text, &col);
@@ -905,25 +907,58 @@ void HAPanel::recompute_reports_() {
   }
 }
 
+const std::vector<size_t> *HAPanel::report_scope_for_(size_t report_idx) const {
+  // UE12: page scope → limit the scan to the page that holds this report row
+  // (each entity index lives in exactly one page). all scope → nullptr.
+  if (report_idx >= this->entities_.size())
+    return nullptr;
+  if (this->entities_[report_idx].report.scope != ReportScope::PAGE)
+    return nullptr;
+  for (const auto &p : this->pages_)
+    for (size_t ei : p.entity_indices)
+      if (ei == report_idx)
+        return &p.entity_indices;
+  return nullptr;
+}
+
+void HAPanel::report_members_(size_t report_idx, std::vector<size_t> &out) {
+  out.clear();
+  if (report_idx >= this->entities_.size())
+    return;
+  const Entity &r = this->entities_[report_idx];
+  if (r.render_class != RenderClass::REPORT_TEXT)
+    return;
+  // Share compute_report_'s one filter pass; the text/colour are recomputed and
+  // discarded — only the member vector matters here.
+  std::string text;
+  uint32_t col = 0xFFFFFF;
+  this->compute_report_(r.report, this->report_scope_for_(report_idx), &text, &col,
+                        &out);
+}
+
 void HAPanel::compute_report_(const ReportSpec &s, const std::vector<size_t> *scope_indices,
-                              std::string *out_text, uint32_t *out_color) {
+                              std::string *out_text, uint32_t *out_color,
+                              std::vector<size_t> *out_members) {
   // Shared palette with rebuild_entity_row_: white neutral, grey idle, green
   // all-clear, amber active, red alert.
   constexpr uint32_t NEUTRAL = 0xFFFFFF, GREY = 0x888888, GREEN = 0x66BB66,
                      AMBER = 0xDDAA33, RED = 0xCC4444;
   *out_color = NEUTRAL;
+  if (out_members != nullptr)
+    out_members->clear();
 
   // UE12: visit each candidate entity — the report's own page (page scope) or
   // every entity (all scope, scope_indices == nullptr). `fn` returning is the
   // per-candidate body; use `return` inside it where a loop would `continue`.
-  auto for_each = [&](const std::function<void(const Entity &)> &fn) {
+  // UE14: the index is passed alongside the entity so out_members can record it.
+  auto for_each = [&](const std::function<void(size_t, const Entity &)> &fn) {
     if (scope_indices != nullptr) {
       for (size_t idx : *scope_indices)
         if (idx < this->entities_.size())
-          fn(this->entities_[idx]);
+          fn(idx, this->entities_[idx]);
     } else {
-      for (const auto &e : this->entities_)
-        fn(e);
+      for (size_t idx = 0; idx < this->entities_.size(); idx++)
+        fn(idx, this->entities_[idx]);
     }
   };
 
@@ -952,15 +987,21 @@ void HAPanel::compute_report_(const ReportSpec &s, const std::vector<size_t> *sc
     case ReportType::COUNT:
     case ReportType::BOOLEAN: {
       int total = 0, matched = 0;
-      for_each([&](const Entity &e) {
+      for_each([&](size_t idx, const Entity &e) {
         if (!in_scope(e))
           return;
         total++;
         bool m = s.match_state.empty();
         for (const auto &st : s.match_state)
           if (e.state == st) { m = true; break; }
-        if (m)
+        if (m) {
           matched++;
+          // UE14: members = the matched set (the "N" the user tapped toward).
+          // With no match_state every in-scope entity matches, so this is the
+          // full in-scope set — exactly what COUNT reports in that case.
+          if (out_members != nullptr)
+            out_members->push_back(idx);
+        }
       });
       if (s.type == ReportType::BOOLEAN) {
         if (matched == 0) {
@@ -984,11 +1025,14 @@ void HAPanel::compute_report_(const ReportSpec &s, const std::vector<size_t> *sc
     }
     case ReportType::OFFLINE: {
       int n = 0;
-      for_each([&](const Entity &e) {
+      for_each([&](size_t idx, const Entity &e) {
         if (!in_scope(e))
           return;
-        if (!e.has_state || e.state == "unavailable" || e.state == "unknown")
+        if (!e.has_state || e.state == "unavailable" || e.state == "unknown") {
           n++;
+          if (out_members != nullptr)  // UE14: the unavailable/unknown set
+            out_members->push_back(idx);
+        }
       });
       char buf[16];
       snprintf(buf, sizeof(buf), "%d", n);
@@ -1000,7 +1044,7 @@ void HAPanel::compute_report_(const ReportSpec &s, const std::vector<size_t> *sc
       int cnt = 0;
       float acc = 0.0f, best = 0.0f;
       const Entity *best_e = nullptr;
-      for_each([&](const Entity &e) {
+      for_each([&](size_t idx, const Entity &e) {
         if (!in_scope(e))
           return;
         float v;
@@ -1008,6 +1052,11 @@ void HAPanel::compute_report_(const ReportSpec &s, const std::vector<size_t> *sc
           return;  // skip non-numeric / unavailable
         cnt++;
         acc += v;
+        // UE14: members = the contributing numeric sensors (each shown with its
+        // value, which is its row state). The skipped non-numeric/unavailable
+        // ones are absent — matching what the aggregate summed/averaged.
+        if (out_members != nullptr)
+          out_members->push_back(idx);
         if (best_e == nullptr) {
           best = v;
           best_e = &e;
@@ -1657,10 +1706,9 @@ static lv_obj_t *make_entity_row(lv_obj_t *parent, const Entity &e, void *user_d
       break;
     }
   }
-  // UE12: a report row is view-only — drop the pressed-state bg flash so it
-  // doesn't read as a tappable control.
-  if (e.render_class == RenderClass::REPORT_TEXT)
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A1A1A), LV_STATE_PRESSED);
+  // UE14: report rows keep the standard pressed-state bg flash — UE12 had
+  // flattened it (view-only on tap), but the report row's short tap now opens
+  // its member drill-down list, so it should read as tappable like any row.
 
   *out_widget = w;
   return btn;
@@ -2378,6 +2426,9 @@ void HAPanel::build_ui_() {
   // ---- E9 read-only history chart sheet (built once, hidden) ----
   this->build_history_sheet_(scr);
 
+  // ---- UE14 report-members drill-down sheet (built once, hidden) ----
+  this->build_report_members_sheet_(scr);
+
   // ---- Boot splash (hides everything until API connects) ----
   this->splash_ = lv_obj_create(scr);
   lv_obj_remove_style_all(this->splash_);
@@ -2437,6 +2488,205 @@ void HAPanel::close_picker_() {
     return;
   lv_obj_add_flag(this->picker_, LV_OBJ_FLAG_HIDDEN);
   ESP_LOGD(TAG, "picker close");
+}
+
+// ---------- UE14 report-row drill-down ----------
+
+// UE14: the per-type line shown when a report's member set is empty, so an
+// all-clear report opens an informative panel instead of a blank modal.
+static const char *report_empty_text_(ReportType t) {
+  switch (t) {
+    case ReportType::BOOLEAN:
+      return LV_SYMBOL_OK "  All clear";
+    case ReportType::OFFLINE:
+      return LV_SYMBOL_OK "  All online";
+    case ReportType::SUM:
+    case ReportType::AVG:
+    case ReportType::MIN:
+    case ReportType::MAX:
+      return "No numeric data";
+    default:  // COUNT
+      return "No matching entities";
+  }
+}
+
+void HAPanel::build_report_members_sheet_(lv_obj_t *scr) {
+  // Clone the picker recipe: a full-screen opaque overlay, built once + hidden,
+  // holding a titled scrollable column. Rows are (re)built per open.
+  this->report_members_sheet_ = lv_obj_create(scr);
+  lv_obj_remove_style_all(this->report_members_sheet_);
+  lv_obj_set_size(this->report_members_sheet_, 480, 480);
+  lv_obj_set_pos(this->report_members_sheet_, 0, 0);
+  lv_obj_set_style_bg_color(this->report_members_sheet_, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(this->report_members_sheet_, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(this->report_members_sheet_, 0, 0);
+  lv_obj_set_style_border_width(this->report_members_sheet_, 0, 0);
+  lv_obj_add_flag(this->report_members_sheet_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(this->report_members_sheet_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(this->report_members_sheet_, &HAPanel::on_report_members_bg_clicked_,
+                      LV_EVENT_CLICKED, this);
+
+  // Title (left) = the tapped report row's own name; set per open.
+  this->report_members_title_ = lv_label_create(this->report_members_sheet_);
+  lv_label_set_text(this->report_members_title_, "");
+  lv_obj_set_style_text_color(this->report_members_title_, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(this->report_members_title_, &lv_font_montserrat_18, 0);
+  lv_obj_align(this->report_members_title_, LV_ALIGN_TOP_LEFT, 16, 14);
+  lv_obj_set_width(this->report_members_title_, 380);
+  lv_label_set_long_mode(this->report_members_title_, LV_LABEL_LONG_DOT);
+
+  // ✕ close button (top-right). Background-tap on the sheet also dismisses.
+  lv_obj_t *close = lv_button_create(this->report_members_sheet_);
+  lv_obj_set_size(close, 40, 40);
+  lv_obj_set_style_bg_opa(close, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_bg_color(close, lv_color_hex(0x2E3640), LV_STATE_PRESSED);
+  lv_obj_set_style_bg_opa(close, LV_OPA_COVER, LV_STATE_PRESSED);
+  lv_obj_set_style_radius(close, 8, 0);
+  lv_obj_set_style_border_width(close, 0, 0);
+  lv_obj_align(close, LV_ALIGN_TOP_RIGHT, -8, 6);
+  lv_obj_add_event_cb(close, &HAPanel::on_report_members_close_, LV_EVENT_CLICKED, this);
+  lv_obj_t *xl = lv_label_create(close);
+  lv_label_set_text(xl, LV_SYMBOL_CLOSE);
+  lv_obj_set_style_text_color(xl, lv_color_hex(0xCCCCCC), 0);
+  lv_obj_set_style_text_font(xl, &lv_font_montserrat_18, 0);
+  lv_obj_center(xl);
+
+  // Scrollable member-row column (same geometry idiom as the entity list).
+  this->report_members_list_ = lv_obj_create(this->report_members_sheet_);
+  lv_obj_remove_style_all(this->report_members_list_);
+  lv_obj_set_size(this->report_members_list_, 464, 416);
+  lv_obj_align(this->report_members_list_, LV_ALIGN_TOP_MID, 0, 52);
+  lv_obj_set_style_bg_color(this->report_members_list_, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(this->report_members_list_, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(this->report_members_list_, 8, 0);
+  lv_obj_set_style_pad_bottom(this->report_members_list_, 28, 0);
+  lv_obj_set_style_pad_row(this->report_members_list_, 4, 0);
+  lv_obj_set_flex_flow(this->report_members_list_, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_scroll_dir(this->report_members_list_, LV_DIR_VER);
+
+  // Empty-state line (centred, hidden unless the member set is empty).
+  this->report_members_empty_ = lv_label_create(this->report_members_sheet_);
+  lv_label_set_text(this->report_members_empty_, "");
+  lv_obj_set_style_text_color(this->report_members_empty_, lv_color_hex(0x888888), 0);
+  lv_obj_set_style_text_font(this->report_members_empty_, &lv_font_montserrat_18, 0);
+  lv_obj_align(this->report_members_empty_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_add_flag(this->report_members_empty_, LV_OBJ_FLAG_HIDDEN);
+}
+
+void HAPanel::open_report_members_(size_t report_idx) {
+  if (this->report_members_sheet_ == nullptr || report_idx >= this->entities_.size())
+    return;
+  const Entity &r = this->entities_[report_idx];
+  if (r.render_class != RenderClass::REPORT_TEXT)
+    return;
+  this->report_members_report_idx_ = report_idx;
+  lv_label_set_text(this->report_members_title_, r.friendly_name.c_str());
+
+  // Collect the member set in the same filter pass the count uses (no drift).
+  std::vector<size_t> members;
+  this->report_members_(report_idx, members);
+
+  // Tear down the previous open's rows (frees child widgets + handlers).
+  lv_obj_clean(this->report_members_list_);
+  this->report_member_rows_.clear();
+
+  if (members.empty()) {
+    // Empty set (e.g. a bool report reading all-clear) → an informative line,
+    // not a blank modal.
+    lv_label_set_text(this->report_members_empty_, report_empty_text_(r.report.type));
+    lv_obj_clear_flag(this->report_members_empty_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(this->report_members_list_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(this->report_members_empty_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(this->report_members_list_, LV_OBJ_FLAG_HIDDEN);
+
+    // Size-matched MDI glyph fonts, resolved once (mirrors build_ui_).
+    const lv_font_t *mdi_lv_font =
+        this->mdi_font_ != nullptr ? this->mdi_font_->get_lv_font() : nullptr;
+    const lv_font_t *mdi_lv_font_med =
+        this->mdi_font_med_ != nullptr ? this->mdi_font_med_->get_lv_font() : mdi_lv_font;
+    const lv_font_t *mdi_lv_font_lg =
+        this->mdi_font_lg_ != nullptr ? this->mdi_font_lg_->get_lv_font() : mdi_lv_font;
+
+    for (size_t ei : members) {
+      if (ei >= this->entities_.size())
+        continue;
+      Entity &e = this->entities_[ei];
+      lv_obj_t *widget = nullptr, *unavail = nullptr, *icon = nullptr, *led = nullptr;
+      const std::string &glyph = this->resolve_icon_(e);
+      const lv_font_t *row_mdi_font = mdi_lv_font;
+      if (e.size == EntitySize::MEDIUM)
+        row_mdi_font = mdi_lv_font_med;
+      else if (e.size == EntitySize::LARGE)
+        row_mdi_font = mdi_lv_font_lg;
+      const RowMetrics metrics = row_metrics_for(e.size);
+      const lv_font_t *name_font_ovr = this->resolve_name_font_(e);
+      const bool name_underline = e.name_style & STYLE_UNDERLINE;
+      // REAL entity row wired to the SAME routers a page row uses — a member tap
+      // toggles / opens detail / confirms exactly as on a page (Step 3).
+      lv_obj_t *btn =
+          make_entity_row(this->report_members_list_, e, this,
+                          &HAPanel::on_entity_row_clicked_, (uintptr_t) ei, &widget,
+                          &unavail, glyph.c_str(), row_mdi_font, &icon, &led, metrics,
+                          name_font_ovr, name_underline);
+      if (HAPanel::has_detail_(e.domain) ||
+          (e.confirm && HAPanel::confirm_meaningful_(e.domain))) {
+        lv_obj_add_event_cb(btn, &HAPanel::on_entity_row_long_pressed_,
+                            LV_EVENT_LONG_PRESSED, this);
+      }
+      this->report_member_rows_.push_back({ei, widget, unavail, led});
+      this->paint_entity_row_(ei, widget, unavail, led);
+    }
+  }
+
+  // Raise over the page. A member-spawned detail/confirm/history modal is raised
+  // above THIS sheet, so closing it falls back here (z-order is the back-stack);
+  // the page is reached only by closing this sheet (close_report_members_).
+  lv_obj_clear_flag(this->report_members_sheet_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(this->report_members_sheet_);
+  this->report_members_open_ = true;
+  ESP_LOGI(TAG, "report members open: \"%s\" (%u members)", r.friendly_name.c_str(),
+           (unsigned) members.size());
+}
+
+void HAPanel::close_report_members_() {
+  if (this->report_members_sheet_ == nullptr)
+    return;
+  lv_obj_add_flag(this->report_members_sheet_, LV_OBJ_FLAG_HIDDEN);
+  this->report_members_open_ = false;
+  // Don't hold a screenful of member widgets while the sheet is closed.
+  lv_obj_clean(this->report_members_list_);
+  this->report_member_rows_.clear();
+  ESP_LOGD(TAG, "report members close");
+}
+
+void HAPanel::refresh_report_members_() {
+  if (!this->report_members_open_ || this->report_members_sheet_ == nullptr ||
+      lv_obj_has_flag(this->report_members_sheet_, LV_OBJ_FLAG_HIDDEN))
+    return;
+  // Repaint each member row's visual from current state (a toggled switch flips
+  // in place). Membership is held stable until re-open — recomputing it live
+  // would yank a now-excluded row out from under the user's finger.
+  for (const auto &mr : this->report_member_rows_) {
+    if (mr.widget != nullptr)
+      this->paint_entity_row_(mr.entity_idx, mr.widget, mr.unavail, mr.led);
+  }
+}
+
+void HAPanel::on_report_members_close_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self != nullptr)
+    self->close_report_members_();
+}
+
+void HAPanel::on_report_members_bg_clicked_(lv_event_t *e) {
+  auto *self = static_cast<HAPanel *>(lv_event_get_user_data(e));
+  if (self == nullptr)
+    return;
+  // Only the sheet's own background dismisses — not a tap that lands on a member
+  // row (those route through the row's own click handler).
+  if (lv_event_get_target_obj(e) == self->report_members_sheet_)
+    self->close_report_members_();
 }
 
 void HAPanel::open_settings_() {
@@ -3319,6 +3569,13 @@ void HAPanel::on_entity_row_clicked_(lv_event_t *e) {
   // short-tap opens a confirm sheet or detail modal instead of firing now.
   if (entity_idx < self->entities_.size()) {
     const Entity &en = self->entities_[entity_idx];
+    // UE14: a report row's short tap opens its member drill-down list (UE12 left
+    // this inert on purpose). The report row itself still fires no service — it
+    // only opens the list; the member rows inside are the live ones.
+    if (en.render_class == RenderClass::REPORT_TEXT) {
+      self->open_report_members_(entity_idx);
+      return;
+    }
     if (en.confirm && HAPanel::confirm_meaningful_(en.domain)) {
       self->open_confirm_or_detail_(entity_idx);
       return;

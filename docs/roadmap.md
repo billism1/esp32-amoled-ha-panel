@@ -4,7 +4,7 @@ Forward-looking work not yet implemented. Each phase below links to its own
 sub-document with the full design, tasks, exit criteria, and risks.
 
 **Completed phases are not listed here.** Shipped work — including the MVP phases
-(0–8), the UI-enhancement phases that have landed (UE1–UE7, UE10–UE13), and their
+(0–8), the UI-enhancement phases that have landed (UE1–UE7, UE10–UE14), and their
 design rationale — is recorded in [DEVELOPMENT.md](../DEVELOPMENT.md). As a
 roadmap item ships, remove it from this file; its history lives in DEVELOPMENT.md.
 
@@ -24,7 +24,6 @@ Complexity is rated on a T-shirt scale: **XS** (very simple) · **S** (simple) �
 |-------|------|--------------|------------|------------|
 | [UE8](roadmap-ue8-row-sparkline.md) | Inline trend sparkline | Opt-in `plot_preview: true` paints a faint trend line behind a numeric sensor row, scaled to its `size:`, fed by the existing per-entity history ring buffer. | M | reuses UE6 |
 | [UE9](roadmap-ue9-readonly.md) | `readonly: true` per-entity lock | A flag that keeps a row's state read-out + history/sparkline but disables every path that actuates HA (taps, confirm sheet, detail modal). | S | — |
-| [UE14](roadmap-ue14-report-drilldown.md) | Report-row drill-down | Tap a UE12 report row to open a modal listing the member entities behind the number; the listed rows are fully interactive (toggle / detail / confirm), exactly as on a page. | L | UE12 (done) |
 
 ---
 

@@ -123,8 +123,12 @@ behaviour live in shared, board-agnostic packages.
   (1h / 6h / 24h windows). See [Entity history chart](#entity-history-chart).
 - **Report rows** (`report:` instead of `entity_id:`) show a live, computed
   summary of your other entities — lights on, totals per domain, offline count,
-  or min / max / avg of a sensor group — with no extra HA data. View-only;
-  see [packages/ha-entities.example.yaml](packages/ha-entities.example.yaml) for
+  or min / max / avg of a sensor group — with no extra HA data. **Tap a report
+  row to drill down**: a modal lists the exact entities behind the number (the
+  on-lights, the offline devices, the contributing sensors), and those listed
+  rows are fully live — tap a switch to toggle it, long-press for detail —
+  exactly as on a page. See
+  [packages/ha-entities.example.yaml](packages/ha-entities.example.yaml) for
   the `type:` values.
 - Optional low-volume **touch click sound** (ES8311 codec), off by default,
   fires on a tap but not a swipe.
@@ -366,8 +370,10 @@ Notes:
 
 A row with a `report:` block (instead of `entity_id:`) shows a **computed
 aggregate** over the other entities on your panel — no extra Home Assistant data,
-refreshed live, view-only. `report:` and `entity_id:` are mutually exclusive on a
-row; `size:` still applies.
+refreshed live. The number itself fires no service on tap, but **tapping the row
+opens a drill-down** listing the entities behind it — and those listed rows are
+fully interactive (see [Report drill-down](#report-drill-down) below). `report:`
+and `entity_id:` are mutually exclusive on a row; `size:` still applies.
 
 ```yaml
 - report:
@@ -480,6 +486,29 @@ Common `device_class` values: `sensor` →
 > **Quote `on`/`off`** (`["on"]`, not `[on]`) — YAML reads bare `on`/`off` as
 > booleans. The panel maps them back, but quoting is clearer and avoids surprises
 > with other truthy words (`yes`/`no`).
+
+#### Report drill-down
+
+A report row answers *how many* ("3 lights on", "2 offline", "Coldest 18°") but
+not *which ones*. **Tap the row** to open a modal listing the exact entities
+behind the number, drawn from the same filter the count uses — so the list can
+never disagree with the count above it:
+
+| `type` | The drill-down lists |
+|--------|----------------------|
+| `count` | the matched entities (with `match_state`, only the matched ones; without it, the full in-scope set) |
+| `bool`  | the active ("not-clear") entities — all-clear shows an **"All clear"** line, not a blank modal |
+| `offline` | the `unavailable`/`unknown` entities |
+| `sum` / `avg` | every numeric sensor that contributed (each shown with its value) |
+| `min` / `max` | the in-scope numeric sensors |
+
+The listed rows are **not** read-only previews — they behave exactly like rows on
+a page: tap a switch/light to toggle it, a lock/cover to act, a climate/media row
+to open its detail modal; long-press for detail; `confirm` / `readonly` / `size`
+/ `style` all apply. Toggling a member updates the list live. Closing a detail
+modal opened from the list returns to the **list**; ✕ or a background tap closes
+the list and returns to the page. The report row itself still fires no service —
+it only opens the list.
 
 ---
 
@@ -609,9 +638,8 @@ per-phase design doc for each — lives in **[docs/roadmap.md](docs/roadmap.md)*
 In brief:
 
 - **UI enhancements** (*planned*): inline trend sparklines
-  ([UE8](docs/roadmap-ue8-row-sparkline.md)), a `readonly:` per-entity lock
-  ([UE9](docs/roadmap-ue9-readonly.md)), and report-row drill-down
-  ([UE14](docs/roadmap-ue14-report-drilldown.md)).
+  ([UE8](docs/roadmap-ue8-row-sparkline.md)) and a `readonly:` per-entity lock
+  ([UE9](docs/roadmap-ue9-readonly.md)).
 - **[Multi-board support](docs/roadmap-p9-multiboard.md)** (*planned*). Make
   adding a second AMOLED board a matter of dropping in one board package (pins,
   display, touch, dimensions) with no changes to the UI / HA logic.
