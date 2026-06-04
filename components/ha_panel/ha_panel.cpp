@@ -277,6 +277,36 @@ RenderClass HAPanel::render_class_for_(const std::string &d) {
   return RenderClass::READ_ONLY_TEXT;
 }
 
+BinarySensorSeverity HAPanel::binary_sensor_severity_(const std::string &dc) {
+  // Class lists mirror Home Assistant's own frontend semantics (problem classes
+  // alert on detection; door/motion are neutral "active" highlights). `battery`
+  // is a PROBLEM class because binary battery "on" = low. These overlap the badge
+  // class lists (ALARM_CLASSES / DOOR_CLASSES / MOTION_CLASSES) but are broader by
+  // design — this is the per-row LED's bucket, not a badge's narrower filter.
+  if (dc.empty())
+    return BinarySensorSeverity::UNKNOWN;
+  // "on" = something bad: leak, alarm, fault, low battery.
+  static const char *const PROBLEM[] = {
+      "moisture", "smoke", "gas", "co", "safety", "problem",
+      "tamper",   "heat",  "cold", "battery"};
+  for (const char *c : PROBLEM)
+    if (dc == c)
+      return BinarySensorSeverity::PROBLEM;
+  // "on" = active, no good/bad claim.
+  static const char *const ACTIVITY[] = {
+      "motion", "occupancy", "presence", "door",      "window",
+      "opening", "garage_door", "light", "sound",     "running",
+      "power",  "plug",      "vibration", "moving"};
+  for (const char *c : ACTIVITY)
+    if (dc == c)
+      return BinarySensorSeverity::ACTIVITY;
+  // "on" = good: connected / charging.
+  if (dc == "connectivity" || dc == "battery_charging")
+    return BinarySensorSeverity::POSITIVE;
+  // Recognised-but-unbucketed or custom class → UE5 fallback.
+  return BinarySensorSeverity::UNKNOWN;
+}
+
 // ---------- P7e icon resolution ----------
 
 uint32_t HAPanel::mdi_codepoint_(const std::string &name) {
@@ -435,6 +465,36 @@ void HAPanel::setup() {
     }
     ESP_LOGCONFIG(TAG, "UE3: subscribed %u climate attrs", climate_subs);
   }
+  // UE7: connect-time `device_class` subscription for binary_sensor + sensor
+  // rows. One standard attr each, riding the same initial state_subs cursor walk
+  // as E7 brightness / UE3 climate (no re-arm), so the class is cached before the
+  // first paint. This is the unlock for the whole class-aware glance layer: the
+  // binary_sensor severity LED below, plus the device_class-gated report
+  // aggregates (UE12) and picker badges (UE11) that parse-but-gate until now —
+  // open_doors / motion / low_battery / alarm / severity off binary_sensor
+  // classes, and temperature / humidity / power / co2 / aqi / low_battery off
+  // sensor classes (the six that read class off the `sensor` domain, dark until
+  // this half lands). Scope is strictly these two domains, one attr apiece.
+  //
+  // TX-burst watch (the P7d/P7e lesson): adds N(binary_sensor)+N(sensor) subs to
+  // the connect flood. A typical config (~17 binary_sensor + ~31 sensor ≈ 48) on
+  // top of ~107 state + ~33 brightness + ~12 climate ≈ 200 — under the ~278 that
+  // saturated the P7d iter-1 attempt, but sensors usually outnumber binaries, so
+  // if a larger config regresses (`Buffer full` / `ping queued` /
+  // unresponsive-disconnect at connect) fall back to binary_sensor-only here and
+  // defer the sensor half to a follow-on (UE8 already touches numeric sensors).
+  {
+    unsigned dc_subs = 0;
+    for (size_t i = 0; i < this->entities_.size(); i++) {
+      const std::string &d = this->entities_[i].domain;
+      if (d == "binary_sensor" || d == "sensor") {
+        this->subscribe_attr_(i, "device_class");
+        dc_subs++;
+      }
+    }
+    ESP_LOGCONFIG(TAG, "UE7: subscribed device_class for %u binary_sensor/sensor entities",
+                  dc_subs);
+  }
   // P7d follow-up: per-domain attribute subscriptions REMAIN DISABLED for the
   // high-count domains (lights × full attr set, media, number, select, fan,
   // cover). Only the two narrow, connect-time exceptions above ride the cursor
@@ -550,6 +610,16 @@ void HAPanel::on_attr_(size_t entity_idx, const std::string &attr_name,
   if (attr_name == "current_temperature" &&
       this->entities_[entity_idx].domain == "climate")
     this->rebuild_entity_row_(entity_idx);
+  // UE7: device_class arrives post-connect (binary_sensor + sensor). Repaint the
+  // row so the binary_sensor severity LED is right once the class lands, not just
+  // on first paint, and recompute reports — a class-gated aggregate can start
+  // matching the moment the class arrives, with no later state change to trigger
+  // recompute_reports_ from on_state_. (Picker badges recompute on open, so the
+  // class is already cached by the time the picker is shown — nothing to do here.)
+  if (attr_name == "device_class") {
+    this->rebuild_entity_row_(entity_idx);
+    this->recompute_reports_();
+  }
   // Drive the pending counter ONLY on first arrival per attr. Subsequent
   // pushes (HA state change while modal still open) just refresh the cache
   // — modal stays sticky during user edit, picks up new values on next open.
@@ -735,20 +805,57 @@ void HAPanel::rebuild_entity_row_(size_t entity_idx) {
       else if (e.state == "unavailable" || e.state == "unknown")
         col = 0xCC4444;
       lv_obj_set_style_text_color(w, lv_color_hex(col), 0);
-      // UE5: drive the binary_sensor status LED from the same state. Reuse `col`
-      // (on=green, off=grey, unavailable=red); brightness carries the "glow":
-      // full when active, a dim ember when off, mid when unavailable.
-      if (e.domain == "binary_sensor" &&
-          entity_idx < this->leds_by_entity_.size()) {
-        lv_obj_t *led = this->leds_by_entity_[entity_idx];
-        if (led != nullptr) {
-          lv_led_set_color(led, lv_color_hex(col));
-          uint8_t bright = 60;  // off: dim ember
-          if (e.state == "on")
-            bright = 255;  // active: full glow
-          else if (e.state == "unavailable" || e.state == "unknown")
-            bright = 160;
-          lv_led_set_brightness(led, bright);
+      // UE7: drive the binary_sensor status LED by (device_class severity, state)
+      // instead of raw on/off. binary_sensor "on" means "detected/active" — good,
+      // bad, or neutral depending on the class — so painting every "on" green
+      // (UE5) reads "all clear" at exactly the moment a leak/smoke/low-battery
+      // sensor is alarming. Severity colour: PROBLEM on=red, ACTIVITY on=amber,
+      // POSITIVE on=green, with the LED and the on/off word kept in agreement.
+      // UNKNOWN (no device_class yet, or a custom class) falls back to the UE5
+      // green-on/grey-off so nothing regresses before the attr lands. The class
+      // arrives post-connect via on_attr_, which re-runs this row.
+      if (e.domain == "binary_sensor") {
+        constexpr uint32_t GREEN = 0x66BB66, AMBER = 0xDDAA33, RED = 0xCC4444,
+                           GREY = 0x888888;
+        const std::string &dc = this->entities_[entity_idx].attrs.count("device_class")
+                                    ? this->entities_[entity_idx].attrs["device_class"]
+                                    : std::string();
+        const BinarySensorSeverity sev = HAPanel::binary_sensor_severity_(dc);
+        const bool unavail =
+            !e.has_state || e.state == "unavailable" || e.state == "unknown";
+        const bool on = e.has_state && e.state == "on";
+        uint32_t led_col;
+        uint8_t bright;
+        if (unavail) {
+          led_col = RED;  // class-agnostic: a sensor we can't read is a fault
+          bright = 160;
+        } else {
+          switch (sev) {
+            case BinarySensorSeverity::PROBLEM:
+              led_col = on ? RED : GREEN;  // on = alarm; off = all clear
+              break;
+            case BinarySensorSeverity::ACTIVITY:
+              led_col = on ? AMBER : GREY;  // on = active; off = idle
+              break;
+            case BinarySensorSeverity::POSITIVE:
+              led_col = on ? GREEN : RED;  // on = connected; off = down
+              break;
+            default:  // UNKNOWN → UE5 behaviour
+              led_col = on ? GREEN : GREY;
+              break;
+          }
+          bright = on ? 255 : 60;  // active: full glow; quiet: dim ember
+        }
+        // Keep the on/off word agreeing with the dot (the UE5 invariant): recolour
+        // the label too, overriding the generic state→colour set just above.
+        col = led_col;
+        lv_obj_set_style_text_color(w, lv_color_hex(col), 0);
+        if (entity_idx < this->leds_by_entity_.size()) {
+          lv_obj_t *led = this->leds_by_entity_[entity_idx];
+          if (led != nullptr) {
+            lv_led_set_color(led, lv_color_hex(led_col));
+            lv_led_set_brightness(led, bright);
+          }
         }
       }
       return;
@@ -821,8 +928,8 @@ void HAPanel::compute_report_(const ReportSpec &s, const std::vector<size_t> *sc
   };
 
   // A real (non-report) entity is "in scope" when it passes the domain +
-  // device_class filter. Empty domains = any. device_class needs UE7's attr
-  // subscription, so it matches nothing until that lands (documented).
+  // device_class filter. Empty domains = any. device_class is matched against
+  // the attr UE7 subscribes at connect (binary_sensor + sensor).
   auto in_scope = [&](const Entity &e) -> bool {
     if (e.render_class == RenderClass::REPORT_TEXT)
       return false;
@@ -1059,7 +1166,7 @@ bool HAPanel::eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
     *color = matched > 0 ? active_color : DIM;
     return true;
   };
-  // Numeric aggregate over sensors with device_class `dc` (gated until UE7):
+  // Numeric aggregate over sensors with device_class `dc` (UE7 subscribes it):
   // hide when no such sensors; DIM "--" when present but no numeric reading yet;
   // else the aggregate value at full brightness.
   auto numeric = [&](const char *dc, BadgeAgg agg, const char *def_unit,

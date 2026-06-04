@@ -53,6 +53,15 @@ enum class RenderClass : uint8_t {
   REPORT_TEXT,
 };
 
+// UE7: severity bucket a binary_sensor's `device_class` maps to, used to colour
+// the status LED by meaning instead of raw on/off. "on" means "detected/active";
+// whether that's good, bad, or neutral depends on the class:
+//   PROBLEM  — "on" is bad (leak/smoke/gas/CO/fault/low-battery): on → red.
+//   ACTIVITY — "on" is neutral activity (motion/door/window/…): on → amber.
+//   POSITIVE — "on" is good (connectivity/charging): on → green.
+//   UNKNOWN  — absent / unrecognised class → UE5 fallback (green-on / grey-off).
+enum class BinarySensorSeverity : uint8_t { PROBLEM, ACTIVITY, POSITIVE, UNKNOWN };
+
 // UE12: which aggregate a REPORT_TEXT row computes over the filtered entities.
 // Mirrors the `type:` enum validated in __init__.py (REPORT_TYPES).
 enum class ReportType : uint8_t {
@@ -74,8 +83,8 @@ enum class ReportScope : uint8_t {
 
 // UE12: the parsed `report:` spec carried by a synthetic report Entity. Empty
 // `domains` = any domain; empty `match_state` = any state. `device_class` is
-// matched against the entity's subscribed attrs — inert until UE7 subscribes
-// it, so v1 reports filter on domains + match_state.
+// matched against the entity's subscribed attrs — live since UE7 added the
+// connect-time device_class subscription for binary_sensor + sensor rows.
 struct ReportSpec {
   ReportType type{ReportType::COUNT};
   ReportScope scope{ReportScope::ALL};
@@ -156,9 +165,9 @@ struct Entity {
 // UE11: a page-picker count badge. Each page declares at most one, shown as
 // icon+value to the right of the page name in the picker. Computed fresh on
 // open over the page's OWN entities only (page-scoped). Mirrors BADGE_TYPES /
-// BADGE_AGGS in __init__.py. The config-free types (lights_on … entities) ship
-// in v1; the device_class / numeric types (open_doors … aqi) parse + evaluate
-// but stay empty until UE7 subscribes device_class (gated, documented).
+// BADGE_AGGS in __init__.py. The config-free types (lights_on … entities) shipped
+// in v1; the device_class / numeric types (open_doors … aqi) went live once UE7
+// added the connect-time device_class subscription.
 enum class BadgeType : uint8_t {
   NONE,            // no badge (default)
   LIGHTS_ON,       // light == on
@@ -170,15 +179,15 @@ enum class BadgeType : uint8_t {
   RUNNING,         // script / automation == on, timer == active
   OFFLINE,         // unavailable / unknown
   ENTITIES,        // total entities on the page (no state filter)
-  OPEN_DOORS,      // binary_sensor door/window/garage_door == on  (needs UE7)
-  MOTION,          // binary_sensor motion/occupancy/presence == on (needs UE7)
-  LOW_BATTERY,     // battery device_class <= threshold (needs UE7)
+  OPEN_DOORS,      // binary_sensor door/window/garage_door == on (UE7 device_class)
+  MOTION,          // binary_sensor motion/occupancy/presence == on (UE7)
+  LOW_BATTERY,     // battery device_class <= threshold (UE7)
   ALARM,           // smoke/moisture/co/gas/problem/safety == on → red dot (UE7)
-  TEMPERATURE,     // agg of temperature sensors (needs UE7 device_class)
-  HUMIDITY,        // avg of humidity sensors (needs UE7)
-  POWER,           // sum of power sensors (needs UE7)
-  CO2,             // avg of carbon_dioxide sensors (needs UE7)
-  AQI,             // avg of aqi sensors (needs UE7)
+  TEMPERATURE,     // agg of temperature sensors (UE7 device_class)
+  HUMIDITY,        // avg of humidity sensors (UE7)
+  POWER,           // sum of power sensors (UE7)
+  CO2,             // avg of carbon_dioxide sensors (UE7)
+  AQI,             // avg of aqi sensors (UE7)
   SEVERITY,        // composite: alarm → red, open_doors → amber, offline → amber
   IDLE,            // green check when nothing on / open
 };
@@ -339,6 +348,9 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   bool tap_entity_(size_t entity_idx);
   static std::string extract_domain_(const std::string &entity_id);
   static RenderClass render_class_for_(const std::string &domain);
+  // UE7: classify a binary_sensor's device_class into a severity bucket. Empty /
+  // unrecognised → UNKNOWN (caller falls back to the UE5 green-on/grey-off LED).
+  static BinarySensorSeverity binary_sensor_severity_(const std::string &device_class);
 
   // P7e icon resolution. resolve_icon_ implements the v1 chain (override →
   // domain default → fallback) and caches the UTF-8 glyph on the Entity.

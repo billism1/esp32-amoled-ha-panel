@@ -11,7 +11,7 @@ Still-active forward plans live under [docs/](docs/) and are indexed by the
 ([docs/roadmap-p9-multiboard.md](docs/roadmap-p9-multiboard.md)) and dynamic
 area/entity discovery
 ([docs/roadmap-p10-dynamic-discovery.md](docs/roadmap-p10-dynamic-discovery.md),
-on hold), plus the unimplemented UI-enhancement phases (UE7–UE9, UE14).
+on hold), plus the unimplemented UI-enhancement phases (UE8, UE9, UE14).
 
 ---
 
@@ -2765,6 +2765,93 @@ climate, etc.) are visually unchanged.
 
 ---
 
+### Phase UE7 — `device_class` subscription (severity LED + class-gated aggregates)
+
+**Outcome:** the panel now subscribes each `binary_sensor` **and** `sensor`
+entity's **`device_class`** at connect time, and the UE5 status LED is repainted
+by **(class severity, state)** instead of raw on/off. A water-leak / smoke /
+low-battery `binary_sensor` shows a **red** glowing dot when `on` (alarm), not
+green; motion / door / window show a neutral **amber** "active" dot; connectivity
+/ charging show **green**; an unrecognised or not-yet-arrived class falls back to
+the UE5 green-on / grey-off so nothing regresses. The same subscription is the
+**shared unlock** for the `device_class`-gated report aggregates (UE12) and
+picker badges (UE11) — `open_doors`, `motion`, `low_battery`, `alarm`,
+`severity`, and the `sensor`-domain numerics `temperature` / `humidity` /
+`power` / `co2` / `aqi` — which parsed-but-gated since they shipped and now
+evaluate. **On-device validation pending** (no-commit-before-flash gate).
+
+**Decision — option A (device_class-aware severity), as the sub-doc recommended.**
+This mirrors Home Assistant's own frontend (problem classes alert on detection;
+door/motion are neutral "active" highlights, not "good"). The documented fallback
+was C (amber-active, no new attr); not needed — the connect-time TX cost came in
+comfortably (see below), so the full classifier was worth it. Options B (activity-
+only) and D (per-entity YAML override) were declined as in the plan: B loses the
+at-a-glance alarm signal, D is against the config-free-v1 principle (still
+available later as an escape hatch on top of A).
+
+**The one intentional scope exception.** UE7 is the single UI-enhancement item
+that **leaves the "no new HA data" constraint** — it needs `device_class`, which
+the panel didn't subscribe. This is the same kind of standard-attribute fetch as
+E7 brightness / UE3 climate, not an HA-side change (no new service, no template
+sensor). Flagged here, not hidden.
+
+**Subscription (connect-time, rides the cursor walk).** `setup()` adds a third
+narrow `subscribe_attr_` block after E7 brightness and UE3 climate: one
+`device_class` sub per `binary_sensor` / `sensor` entity, riding the initial
+`state_subs` cursor walk with **no re-arm** (same as E7/UE3). For the bundled
+config that's ~17 binary_sensor + ~31 sensor ≈ **48** subs on top of ~107 state +
+~33 brightness + ~12 climate ≈ **200** total — under the **~278** burst that
+saturated the P7d iter-1 attempt. **TX-burst fallback documented in code:** if a
+larger config regresses (`Buffer full` / `ping queued` / unresponsive-disconnect
+at connect), drop to `binary_sensor`-only and defer the `sensor` half to a
+follow-on (UE8 already touches numeric sensors). Sensors usually outnumber
+binaries, so they're the half to shed first.
+
+**Classifier.** New `static BinarySensorSeverity binary_sensor_severity_(dc)` →
+`{PROBLEM, ACTIVITY, POSITIVE, UNKNOWN}`. PROBLEM = `moisture`, `smoke`, `gas`,
+`co`, `safety`, `problem`, `tamper`, `heat`, `cold`, `battery` ("on" = low).
+ACTIVITY = `motion`, `occupancy`, `presence`, `door`, `window`, `opening`,
+`garage_door`, `light`, `sound`, `running`, `power`, `plug`, `vibration`,
+`moving`. POSITIVE = `connectivity`, `battery_charging`. Empty / anything else →
+UNKNOWN. These overlap the badge class lists (`ALARM_CLASSES` / `DOOR_CLASSES` /
+`MOTION_CLASSES`) but are intentionally **broader** — this is the per-row LED's
+bucket, not a badge's narrower filter.
+
+**LED rewrite.** The UE5 block in `rebuild_entity_row_`'s READ_ONLY_TEXT arm now
+looks the class up off `Entity::attrs["device_class"]`, classifies, and picks
+colour by (severity, state): PROBLEM on→red / off→green (all clear), ACTIVITY
+on→amber / off→grey, POSITIVE on→green / off→red, UNKNOWN on→green / off→grey
+(UE5). `unavailable`/`unknown` stays red, mid-brightness, class-agnostic (a sensor
+we can't read is a fault). Brightness is unchanged from UE5: 255 active glow, 60
+dim ember when quiet, 160 unavailable. The **on/off word is recoloured to match
+the dot** (the UE5 dot-and-word-agree invariant) — and the word itself is the
+colour-blind redundant channel (kept, per the plan's risk note).
+
+**Live arrival.** `device_class` arrives post-connect, so `on_attr_` now re-runs
+`rebuild_entity_row_(idx)` on a `device_class` push (same pattern UE3 used for
+`current_temperature`) so the LED is right once the class lands, not only on
+first paint — and also calls `recompute_reports_()`, because a class-gated report
+can start matching the moment the class arrives with no later state change to
+trigger a recompute from `on_state_`. Picker badges recompute on open, by which
+point the class is cached, so no badge wiring was needed.
+
+**No codegen / HA-side change.** UE11/UE12 already parsed + validated the
+`device_class` types; UE7 is pure C++ runtime. The `__init__.py` /
+`ha_panel.h` "needs UE7" / "inert until UE7" comments were updated to
+"live since UE7".
+
+**Verification:** clean `esphome config` (Python codegen) + `esphome compile`.
+On-device checks to eyeball: (1) a `moisture`/`smoke`/`battery` binary_sensor
+`on` → **red** dot + red word, `off` → dim green; (2) `motion`/`door`/`window`
+`on` → **amber** dot, `off` → dim grey; (3) `connectivity` `on` → green, `off`
+→ red; (4) a binary_sensor with no device_class is unchanged from UE5; (5) the
+connect log shows `UE7: subscribed device_class for N …` with **no** `Buffer
+full` / unresponsive-disconnect; (6) a page with `picker_badge: [open_doors,
+low_battery, temperature]` and a UE12 `device_class:` report now light up instead
+of reading 0 / `--`.
+
+---
+
 ### Phase UE6 — History fetch on a core-pinned worker task
 
 **Outcome:** moved the E9 history backfill (the blocking HTTP GET + JSON parse)
@@ -3145,10 +3232,11 @@ right edge.
 `devices_on`, `unlocked`, `open_covers`, `media_playing`, `climate_active`,
 `running`, `offline`, `entities`, `idle`. The `device_class` / numeric group
 (`open_doors`, `motion`, `low_battery`, `alarm`, `temperature`, `humidity`,
-`power`, `co2`, `aqi`, `severity`) parses + evaluates but stays **hidden until
-UE7** subscribes `device_class` (the predicates read `attrs["device_class"]`,
-empty today → 0 → hidden). Colours: neutral counts, amber active (doors/motion),
-red alarm/severity/offline/low-battery, green `idle`.
+`power`, `co2`, `aqi`, `severity`) parsed + evaluated against
+`attrs["device_class"]` but stayed **hidden until UE7** subscribed
+`device_class` (empty until then → 0 → hidden); live since UE7. Colours: neutral
+counts, amber active (doors/motion), red alarm/severity/offline/low-battery,
+green `idle`.
 
 **Local evaluator, not UE12's `compute_report_`.** Badge predicates are mostly
 **negative** — `unlocked` = *not* `locked`, `open_covers` = *not* `closed`,
