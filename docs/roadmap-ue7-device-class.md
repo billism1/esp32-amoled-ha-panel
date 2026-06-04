@@ -1,19 +1,30 @@
 > Part of the [Roadmap](roadmap.md). Shared conventions for all UI-enhancement
 > (UE) phases are listed at the bottom of the roadmap.
 
-# UE7 — binary_sensor `device_class` subscription (severity + aggregations)
+# UE7 — `device_class` subscription (severity + aggregations)
 
 **Status:** ⬜ not started · target tag: `ue7-device-class`
 
 **Scope:** UE7's deliverable is the **connect-time `device_class` subscription**
-for binary_sensors plus a severity/semantics classifier on top of it. That data
-is a **shared prerequisite** for several features, not just one:
+plus a severity/semantics classifier on top of it. The subscription covers
+**two domains**, because the gated consumers split across both:
+- **binary_sensor** `device_class` → the severity classifier + the
+  binary_sensor-class badges (`open_doors`, `motion`, `alarm`, `severity`).
+- **sensor** `device_class` → the numeric-aggregate badges (`temperature`,
+  `humidity`, `power`, `co2`, `aqi`) and `low_battery`, which read class off
+  `sensor`-domain entities, not binary_sensors. Subscribing binary_sensors
+  alone leaves these six dark — the badge/report code already exists and is
+  merged (UE11/UE12), it just matches nothing until the `sensor` attr lands.
+
+That data is a **shared prerequisite** for several features, not just one:
 - **LED severity colouring** (the first consumer, detailed below) — paint the
   binary_sensor status dot by meaning instead of always-green.
 - **Report-row aggregations** (UE12) that need class — e.g. counting **open
-  doors / windows**, **low battery**, **alarm/leak** entities.
+  doors / windows**, **low battery**, **alarm/leak** entities, plus the numeric
+  temp/humidity/power/co2/aqi aggregates.
 - **Picker badges** (UE11) gated on class — `open_doors`, `motion`,
-  `low_battery`, `alarm`.
+  `low_battery`, `alarm`, `temperature`, `humidity`, `power`, `co2`, `aqi`,
+  `severity`.
 
 UE11 and UE12 already ship their config-free types and **parse-but-gate** the
 device_class types until this phase lands. So UE7 is the unlock for every
@@ -78,9 +89,15 @@ classification table proves not worth it on-device; C is the documented fallback
 
 Tasks (assuming A):
 - [ ] **Decide** (above) and record the choice + reasoning in `DEVELOPMENT.md`.
-- [ ] Subscribe `device_class` for binary_sensors at connect time (mirror the
-      UE3 climate-attr connect-time subscription; scoped to binary_sensors only
-      to keep the TX burst small — see the P7d/P7e TX-saturation lesson).
+- [ ] Subscribe `device_class` at connect time for **both binary_sensor and
+      sensor** entities (mirror the UE3 climate-attr connect-time subscription;
+      `subscribe_attr_(i, "device_class")` is domain-agnostic). Scope to these
+      two domains only — one attr each, bounded to configured page/report
+      entities — and **watch the TX burst** on flash (the P7d/P7e TX-saturation
+      lesson). Sensors usually outnumber binary_sensors; if the connect-time
+      burst regresses (`ping queued` / unresponsive-disconnect), fall back to
+      binary_sensor-only and defer the `sensor` half to a follow-on (e.g. fold
+      into UE8, which already touches numeric sensors).
 - [ ] Add a `binary_sensor_severity_(device_class)` classifier → enum
       {PROBLEM, ACTIVITY, POSITIVE, UNKNOWN} with the class lists above.
 - [ ] Replace the UE5 colour/brightness logic in `rebuild_entity_row_`'s
@@ -97,7 +114,10 @@ Tasks (assuming A):
 **Exit criteria:** A water-leak / smoke / low-battery binary_sensor shows a **red**
 glowing dot when "on" (alarm), not green; motion/door/window show a neutral
 amber "active" dot when "on"; connectivity/charging show green when "on";
-sensors with no `device_class` keep the UE5 behaviour. No connect-time
+sensors with no `device_class` keep the UE5 behaviour. The previously-dark
+class-gated badges/reports now light up: binary_sensor classes (`open_doors`,
+`motion`, `alarm`, `severity`) **and** the sensor-domain numeric aggregates
+(`temperature`, `humidity`, `power`, `co2`, `aqi`, `low_battery`). No connect-time
 `Buffer full` / unresponsive-disconnect from the added subscriptions.
 
 **Risks / unknowns:**
