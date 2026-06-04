@@ -393,6 +393,12 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void go_to_page_(size_t page_idx);
   // P7c: dispatches on Entity::render_class to update the right child widget.
   void rebuild_entity_row_(size_t entity_idx);
+  // UE14: the per-render-class visual-update body, with the row's child widget
+  // pointers passed in explicitly. rebuild_entity_row_ looks them up from the
+  // per-entity arrays; the report-members list (UE14) passes its own throwaway
+  // member-row widgets so a member and its page row don't fight over one slot.
+  void paint_entity_row_(size_t entity_idx, lv_obj_t *w, lv_obj_t *overlay,
+                         lv_obj_t *led);
   // UE13: resolve the bold/italic baked font for a row's name label given its
   // style flags + size; returns nullptr to use the regular built-in (the
   // RowMetrics name_font). bold+italic with no bold-italic font → bold.
@@ -402,9 +408,22 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   void recompute_reports_();
   // UE12: evaluate one report spec → display string + text colour. When
   // scope_indices is non-null the scan is limited to those entity indices
-  // (page scope); null scans every entity (all-pages scope).
+  // (page scope); null scans every entity (all-pages scope). UE14: when
+  // out_members is non-null it is filled with the entity indices that make up
+  // the reported number (the matched / contributing set per type) in the SAME
+  // filter pass, so the drill-down list can never disagree with the count.
   void compute_report_(const ReportSpec &spec, const std::vector<size_t> *scope_indices,
-                       std::string *out_text, uint32_t *out_color);
+                       std::string *out_text, uint32_t *out_color,
+                       std::vector<size_t> *out_members = nullptr);
+  // UE12/UE14: resolve a report row's scan scope — its own page's entity list
+  // (PAGE scope) or nullptr (ALL scope). Shared by recompute_reports_ and the
+  // UE14 member helper so both scope identically.
+  const std::vector<size_t> *report_scope_for_(size_t report_idx) const;
+  // UE14: collect the entity indices behind a report's number (the on-lights for
+  // a "lights on" count, the unavailable devices for offline, the contributing
+  // sensors for sum/avg/min/max). Thin wrapper over compute_report_'s shared
+  // pass so the list and the count stay in lock-step.
+  void report_members_(size_t report_idx, std::vector<size_t> &out);
   // UE11: recompute every page's picker badge from current state and repaint
   // (icon + value + colour, hidden on 0/empty). Called from open_picker_ — the
   // picker is a transient modal, so there's no per-frame / on_state_ wiring.
@@ -418,6 +437,24 @@ class HAPanel : public Component, public api::CustomAPIDevice {
                           std::string *icon, std::string *value, uint32_t *color);
   void open_picker_();
   void close_picker_();
+  // UE14: report-row drill-down. A reusable scrollable overlay (cloned from the
+  // picker pattern) listing the member entities behind a tapped report row. The
+  // members are REAL make_entity_row rows wired to the same click/long-press
+  // routers a page row uses, so they toggle / open detail / confirm in place.
+  // Built once hidden; rows are (re)built per open from report_members_ and torn
+  // down on close. Raised over the page (and any page beneath stays put); a
+  // member-spawned detail/confirm/history modal is raised over THIS sheet, so
+  // closing it falls back to the list, not the page (z-order = the back-stack).
+  void build_report_members_sheet_(lv_obj_t *scr);
+  void open_report_members_(size_t report_idx);
+  void close_report_members_();
+  // UE14: repaint the open list's member rows from current state (membership held
+  // stable until re-open so a row can't vanish under the user's finger). Driven
+  // from on_state_ behind a !HIDDEN guard, mirroring the UE11 picker-badge live
+  // update.
+  void refresh_report_members_();
+  static void on_report_members_close_(lv_event_t *e);
+  static void on_report_members_bg_clicked_(lv_event_t *e);
   void update_status_dot_();
   void update_splash_status_();
   // E5: a splash init-stage's indicator handles — an amber dot that blinks
@@ -665,6 +702,25 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // (child 1); a group hides itself when its value is 0/empty (and collapses out
   // of the right-aligned bar's flex layout). Repainted by update_picker_badges_.
   std::vector<std::vector<lv_obj_t *>> picker_badges_;
+  // UE14: report-row drill-down overlay (built once, hidden). The list holds the
+  // member rows rebuilt per open; the empty label shows the per-type empty-state
+  // line (e.g. a bool report's "All clear") instead of a blank modal.
+  lv_obj_t *report_members_sheet_{nullptr};
+  lv_obj_t *report_members_title_{nullptr};
+  lv_obj_t *report_members_list_{nullptr};
+  lv_obj_t *report_members_empty_{nullptr};
+  bool report_members_open_{false};
+  size_t report_members_report_idx_{0};
+  // UE14: one tracked throwaway member row (entity index + its child widgets) so
+  // refresh_report_members_ can repaint live without touching widgets_by_entity_
+  // (which belongs to the page row for the same entity). Rebuilt each open.
+  struct MemberRow {
+    size_t entity_idx;
+    lv_obj_t *widget;
+    lv_obj_t *unavail;
+    lv_obj_t *led;
+  };
+  std::vector<MemberRow> report_member_rows_;
   lv_obj_t *splash_{nullptr};
   // E5: splash shows one row per init stage (Wi-Fi, then HA API). Each row is a
   // phrase label with a status indicator to its right (after the "..."): an

@@ -80,6 +80,13 @@
 # entities — is in README.md → "Defining your pages" → "Report rows".
 # (Quote on/off states as ["on"], not [on] — YAML reads bare on/off as booleans.)
 #
+# Report drill-down (UE14): TAP a report row to open a modal listing the exact
+# entities behind the number (the on-lights, the offline devices, the
+# contributing sensors). Those listed rows are FULLY LIVE — tap a switch to
+# toggle it, long-press for detail — exactly as on a page. The report row itself
+# still fires no service; it just opens the list. No config needed — every report
+# row is tappable.
+#
 # Page picker badges (UE11): add a page-level `picker_badge:` to show a small
 # icon+value to the RIGHT of the page name in the page picker — an at-a-glance
 # "is anything on over there". A page may declare ONE badge or a LIST of badges

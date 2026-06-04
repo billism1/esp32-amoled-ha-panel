@@ -11,7 +11,7 @@ Still-active forward plans live under [docs/](docs/) and are indexed by the
 ([docs/roadmap-p9-multiboard.md](docs/roadmap-p9-multiboard.md)) and dynamic
 area/entity discovery
 ([docs/roadmap-p10-dynamic-discovery.md](docs/roadmap-p10-dynamic-discovery.md),
-on hold), plus the unimplemented UI-enhancement phases (UE8, UE9, UE14).
+on hold), plus the unimplemented UI-enhancement phases (UE8, UE9).
 
 ---
 
@@ -3090,6 +3090,12 @@ indexing is the lever if it ever bites).
 false; `on_entity_row_clicked_`'s confirm / chartable / summary branches don't
 match `domain=="report"`, so a tap reaches the no-op. No long-press cb is
 registered (report has no detail modal / confirm).
+> **Superseded by UE14 for the report-row tap.** The report row's *short tap* now
+> opens a member drill-down list (`on_entity_row_clicked_` gained a
+> `REPORT_TEXT` → `open_report_members_()` branch; the pressed-bg flash is
+> re-enabled). `tap_entity_` still returns false for the report row — it fires no
+> service; it only opens the list. The deferred "tap acts on the matched set"
+> action report stays deferred. See the UE14 phase log entry below.
 
 **Config plumbing.** `report:` is mutually exclusive with `entity_id:` per row,
 enforced by `cv.has_exactly_one_key(CONF_ENTITY_ID, CONF_REPORT)`. `type` is a
@@ -3259,6 +3265,92 @@ ASCII digits), hence the [icon][value] group. All badge glyphs
 open_covers]` on a page, turn a light on, open the picker → badge shows `🔆 1`,
 hides when 0; long page names ellipsize without overlapping; a list stacks
 right-aligned; bare / block / list forms all render.
+
+---
+
+### Phase UE14 — Report-row drill-down (tap a report → list its members)
+
+Re-opens the door UE12 deliberately shut, but only for the **report row's own
+tap**: tapping a report row now opens a modal listing the exact entities behind
+its number, and those listed rows are **fully live** (toggle / detail / confirm,
+exactly as on a page). The report row itself still fires no service — it only
+opens the list. No HA-side change; lists entities the panel already subscribes
+to. See [docs/roadmap-ue14-report-drilldown.md](docs/roadmap-ue14-report-drilldown.md).
+
+**Step 1 — member set per `type:` (decided).** Reuses `compute_report_`'s exact
+filter pass so the list can never drift from the count:
+- `count` → the **matched** set (with `match_state`, only the matched; without
+  it, the full in-scope set — same as what the count reports).
+- `bool` → the active set; empty (all-clear) → an **"All clear"** empty-state
+  line, not a blank modal.
+- `offline` → the `unavailable`/`unknown` set.
+- `sum`/`avg`/`min`/`max` → the contributing numeric sensors (each row shows its
+  value as its state). *Extreme highlighting for min/max is deferred* — the
+  contributing rows are listed; flagging which one is the extreme is polish.
+- Deferred UE12 types (`security`/`diagnostic`/…) aren't in the `ReportType`
+  enum yet, so there's no inert-type case to handle today; all seven live types
+  have a meaningful member set.
+
+**Shared-pass implementation.** `compute_report_` gained an optional
+`out_members` vector filled in the SAME scan that computes the number (the
+UE11/UE12 "whichever owns the helper" discipline). `for_each` now passes the
+entity index alongside the entity so members can be recorded. Scope resolution
+(PAGE vs ALL) was extracted to `report_scope_for_(report_idx)`, shared by
+`recompute_reports_` and the new `report_members_(report_idx, out)` wrapper.
+
+**Step 2 — list surface (decided).** Cloned the page-picker overlay recipe:
+`report_members_sheet_`, a built-once-hidden titled scrollable column with a ✕
+button + background-tap dismiss. Rows are (re)built per open from
+`report_members_()` and torn down (`lv_obj_clean` + clear the tracking vector) on
+each open and on close — accepting the per-open build cost as the price of full
+interactivity (bounded by the member-set size).
+
+**Step 3 — members are real, live rows (decided).** Each member is built by the
+same `make_entity_row` and wired to the **same** `on_entity_row_clicked_` /
+`on_entity_row_long_pressed_` routers a page row uses — no report-specific
+dispatch — so per-entity `confirm` / `readonly` / `size` / `style` all apply for
+free. The row carries the real entity index, so the routers toggle / open detail
+/ confirm exactly as on a page.
+
+**`widgets_by_entity_` collision (the design pivot).** Page rows store their child
+widgets in the per-entity arrays so `rebuild_entity_row_(idx)` can repaint them.
+A member row is a SECOND widget for the same entity — storing it there would
+clobber the page row's pointer (dangling on rebuild). Fix: factored the
+per-render-class visual-update body out of `rebuild_entity_row_` into
+`paint_entity_row_(idx, w, overlay, led)` that takes the child pointers
+explicitly. `rebuild_entity_row_` looks them up from the arrays (page rows);
+member rows pass their own throwaway pointers (tracked in `report_member_rows_`).
+The arrays are never touched for members.
+
+**Back-stack = z-order (no explicit parent tracking needed).** Every modal
+(detail / confirm / history) is an opaque full-screen overlay raised with
+`lv_obj_move_foreground`. When a member tap opens one, it lands ABOVE the still-
+visible member sheet; closing it (hide) reveals the member sheet beneath — so the
+close falls back to the **list**, not the page, with zero new "return-to" state.
+When the same modal is opened from a *page* row the member sheet is hidden, so
+the same close reveals the page. The sheet's own hidden flag distinguishes the
+two cases automatically. The page is reached only by closing the list itself.
+
+**Live refresh.** `refresh_report_members_()` repaints the open list's member
+rows from current state, driven from `on_state_` (and the `device_class` /
+`current_temperature` `on_attr_` branches) behind a `!HIDDEN` guard — mirrors the
+UE11 picker-badge live update. **Membership is held stable until re-open**
+(recommended in the plan): a toggled member's switch flips in place, but a now-
+excluded entity stays visible until the list is re-opened, so a row can't vanish
+under the user's finger. The page's report count still updates live via
+`recompute_reports_`.
+
+**readonly co-existence.** A `readonly` *report* still opens its drill-down
+(view-only is about the report row's tap firing no service, which it never did); a
+`readonly` *member* inside the list still won't actuate because the shared
+`tap_entity_` / UE9 gate runs unchanged. Neither gate blocks the other.
+
+**Verification (pending on-device):** tap a "lights on" report → modal lists the
+on-lights; tap one → it toggles in place and the switch flips; long-press → detail
+modal, and closing it returns to the **list**; ✕ / bg-tap → back to the page; an
+all-clear `bool` report shows "All clear", not a blank modal; a min/max/avg report
+lists the contributing sensors with their values. Compiles + links clean (19 s
+incremental, RAM 16.8% / Flash 21.0%).
 
 ---
 

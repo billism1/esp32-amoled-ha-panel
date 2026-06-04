@@ -3,7 +3,8 @@
 
 # UE14 — Report-row drill-down (tap a report → list its member entities)
 
-**Status:** ⬜ not started · target tag: `ue14-report-drilldown`
+**Status:** ✅ implemented (compiles + links clean; on-device verification
+pending) · target tag: `ue14-report-drilldown`
 
 **Why:** UE12 report rows answer "*how many*" ("3 lights on", "2 offline",
 "Coldest 18°") but not "*which ones*". A glance line that says two devices are
@@ -157,52 +158,57 @@ Page row:   "Lights on            3 / 5"   ← tap
 ```
 
 Tasks:
-- [ ] **DECIDE** Steps 1–3 (member set per type · list surface · member
+- [x] **DECIDE** Steps 1–3 (member set per type · list surface · member
       tap-through) and record the choices + reasoning in `DEVELOPMENT.md`.
-- [ ] **Member helper.** Add `report_members_(const Entity &report,
-      std::vector<int> &out)` reusing `compute_report_`'s filter/predicate;
-      preferably refactor `compute_report_` to optionally emit the member vector
-      so count + list share one pass (note divergence risk if duplicated).
-- [ ] **List overlay.** Build a reusable `report_members_sheet_` (clone the
-      `open_picker_` built-once-hidden, scrollable, titled overlay), with a ✕
-      button and background-tap dismiss that re-shows the page.
-- [ ] **Populate on open with REAL rows.** `open_report_members_(report_idx)`
-      fills the overlay from `report_members_()` — title from the report's
-      `title`, and **one `make_entity_row` per member wired to the same
-      `on_entity_row_clicked_` / `on_entity_row_long_pressed_` routers a page row
-      uses** (full toggle / detail / confirm behaviour). Empty-state line when the
-      set is empty (e.g. `bool` all-clear). Clear + rebuild the member rows each
-      open (free the previous set first to avoid leaks).
-- [ ] **Member interactivity = page parity.** Verify a switch/light member toggles
-      on tap, a lock/cover fires its service, a climate/media member opens detail,
-      a `confirm` member opens its confirm sheet, and long-press matches a page
-      row — all by reusing the existing routers, no report-specific dispatch.
-- [ ] **Back-stack.** When a member tap opens a detail modal / confirm sheet /
-      history sheet, closing it returns to the **member list**, not the page. Track
-      the list as the parent overlay (a "return-to" target) so the close handlers
-      re-show it; the page is reached only by closing the list itself.
-- [ ] **Live refresh while open.** After a member toggles (or any subscribed state
-      changes) refresh the open list so the member rows reflect new state — drive
-      it from `on_state_` behind a `!HIDDEN` guard (mirror UE11's live-update
-      guard); recompute the member set too, since a toggle can drop an entity out
-      of the set ("3 on" → "2 on").
-- [ ] **Re-enable the report-row tap.** In `on_entity_row_clicked_`, route
-      `domain=="report"` → `open_report_members_()`; re-enable the pressed-bg flash
-      for report rows (UE12 disabled it) so the row reads as tappable. Keep
-      `tap_entity_` returning false for the report row itself (its tap opens the
-      list, fires no service); the deferred UE12 *action* report stays deferred.
-- [ ] **readonly co-existence.** A `readonly` *report* still opens its drill-down
-      (view-only, like UE9 keeps history open for readonly rows); a `readonly`
-      *member* inside the list still won't actuate (the shared `tap_entity_` /
-      UE9 gate handles it). Confirm neither gate blocks the wrong thing.
-- [ ] **Inert types.** Reports with no meaningful member list (`diagnostic`, or
-      any future panel-self type) either skip the tap (stay inert) or show a static
-      info panel — decide in Step 1; don't open an empty list.
-- [ ] **Docs.** README report section ("tap a report row to see — and control —
-      the entities behind it; they behave just like rows on a page");
-      `ha-entities.example.yaml` note; DEVELOPMENT.md phase log; mark the UE12
-      "view-only" note as superseded for the report-row *tap* (it now opens an
-      interactive list; the action-report-over-the-matched-set remains deferred).
+- [x] **Member helper.** Added `report_members_(size_t report_idx,
+      std::vector<size_t> &out)` (took the index, not `const Entity &`, so it can
+      resolve PAGE scope) — a thin wrapper over `compute_report_`, which now
+      optionally emits the member vector in its ONE filter pass. Scope resolution
+      factored to `report_scope_for_`, shared with `recompute_reports_`. No
+      duplication, so no drift risk.
+- [x] **List overlay.** Built `report_members_sheet_` (cloned the picker's
+      built-once-hidden, scrollable, titled overlay) with a ✕ button +
+      background-tap dismiss.
+- [x] **Populate on open with REAL rows.** `open_report_members_(report_idx)`
+      fills the overlay from `report_members_()` — title from the report's name,
+      one `make_entity_row` per member wired to the same `on_entity_row_clicked_`
+      / `on_entity_row_long_pressed_` routers a page row uses. Empty-state line
+      when the set is empty (`bool` all-clear). `lv_obj_clean` + clear the
+      tracking vector each open (and on close) to free the previous set.
+- [x] **Member interactivity = page parity.** Members carry the real entity index
+      and route through the unchanged routers — no report-specific dispatch — so
+      toggle / lock / cover / detail / confirm / long-press all behave as on a
+      page. *(Behavioural verify pending on-device.)*
+- [x] **Back-stack.** Solved by z-order, not explicit parent tracking: the member
+      sheet stays visible beneath a member-spawned detail/confirm/history modal
+      (each raised with `move_foreground`), so closing the modal reveals the list;
+      the page is reached only by closing the list. The sheet's hidden flag
+      distinguishes "opened from a member" (list visible) vs "opened from a page
+      row" (list hidden → close reveals page) automatically.
+- [x] **Live refresh while open.** `refresh_report_members_()` repaints the open
+      list's rows from `on_state_` (+ the relevant `on_attr_` branches) behind a
+      `!HIDDEN` guard. **Decision:** membership held STABLE until re-open (the
+      plan's recommended option) — a toggled member's switch flips in place, but a
+      now-excluded entity stays until re-open so a row can't vanish under the
+      finger. The page's count still updates live via `recompute_reports_`.
+- [x] **Re-enable the report-row tap.** `on_entity_row_clicked_` routes
+      `REPORT_TEXT` → `open_report_members_()`; the pressed-bg flash is re-enabled
+      in `make_entity_row` (UE12's flatten removed). `tap_entity_` still returns
+      false for the report row (fires no service); the deferred UE12 *action*
+      report stays deferred.
+- [x] **readonly co-existence.** Unchanged gates: a `readonly` report still opens
+      its drill-down (its tap never fired a service); a `readonly` member still
+      won't actuate (shared `tap_entity_` / UE9 gate). Neither blocks the other.
+- [x] **Inert types.** N/A for v1 — the `ReportType` enum has only the seven live
+      types, all with a meaningful member set. Deferred panel-self types
+      (`diagnostic`, …) aren't implemented yet; revisit when one lands.
+- [x] **Docs.** README report section + new "Report drill-down" subsection;
+      `ha-entities.example.yaml` note; DEVELOPMENT.md UE14 phase log; the UE12
+      "view-only" note marked superseded for the report-row *tap* (the
+      action-report-over-the-matched-set remains deferred).
+- [ ] **Min/max extreme highlight (deferred polish).** The contributing sensors
+      are listed with their values; flagging *which* row is the extreme is not yet
+      done (the count's `show_source` already names it on the row above).
 
 **Exit criteria:** Tapping a report row opens a modal listing the exact entities
 behind its number — the on-lights for a "lights on" count, the unavailable
