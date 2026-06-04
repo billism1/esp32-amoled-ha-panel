@@ -428,6 +428,17 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // (icon + value + colour, hidden on 0/empty). Called from open_picker_ — the
   // picker is a transient modal, so there's no per-frame / on_state_ wiring.
   void update_picker_badges_();
+  // UE11 perf (#1): repaint just one page's badge groups. The coalescing timer
+  // repaints only the pages whose entities changed, instead of every page on
+  // every state push.
+  void update_picker_badges_for_page_(size_t page_idx);
+  // UE11 perf (#1): mark the page holding `entity_idx` dirty so the next timer
+  // tick repaints only it. Called from on_state_ while the picker is open.
+  void mark_picker_page_dirty_(size_t entity_idx);
+  // UE11 perf (#2): coalesce live badge repaints onto a timer (created on open,
+  // deleted on close) so a chatty HA can't jank the picker scroll with a synch-
+  // ronous all-page recompute per state push. Repaints the dirty pages, if any.
+  static void picker_badge_timer_cb_(lv_timer_t *t);
   // UE11: evaluate one badge spec over a page's OWN entities (page-scoped).
   // Returns false → hide (nothing in scope to monitor); otherwise fills the mdi
   // icon name (empty = value only), the value string (empty = icon-only dot),
@@ -702,6 +713,14 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // (child 1); a group hides itself when its value is 0/empty (and collapses out
   // of the right-aligned bar's flex layout). Repainted by update_picker_badges_.
   std::vector<std::vector<lv_obj_t *>> picker_badges_;
+  // UE11 perf: per-page "badges need repaint" flags + a coalescing timer (alive
+  // only while the picker is open). on_state_ marks the changed entity's page
+  // dirty; the timer repaints just the dirty pages a few times a second instead
+  // of every page synchronously on every push. picker_badges_dirty_ is the cheap
+  // any-dirty early-out for the timer cb.
+  std::vector<bool> picker_page_dirty_;
+  bool picker_badges_dirty_{false};
+  lv_timer_t *picker_badge_timer_{nullptr};
   // UE14: report-row drill-down overlay (built once, hidden). The list holds the
   // member rows rebuilt per open; the empty label shows the per-type empty-state
   // line (e.g. a bool report's "All clear") instead of a blank modal.

@@ -690,11 +690,14 @@ void HAPanel::on_state_(const std::string &entity_id, StringRef state) {
     // UE12: any state change can shift a report's aggregate — recompute all
     // report rows. Bounded (tens of entities); see the plan's perf note.
     this->recompute_reports_();
-    // UE11: keep the picker badges live while it's open (cheap — only runs when
-    // the picker is visible, which is brief). Closed → recomputed on next open.
+    // UE11: keep the picker badges live while it's open. Perf (#1+#2): don't
+    // repaint synchronously here — mark only the changed entity's page dirty and
+    // let the coalescing timer (picker_badge_timer_cb_) repaint just that page a
+    // few times a second, so a chatty HA can't jank the picker scroll. Closed →
+    // recomputed in full on next open.
     if (this->picker_ != nullptr &&
         !lv_obj_has_flag(this->picker_, LV_OBJ_FLAG_HIDDEN))
-      this->update_picker_badges_();
+      this->mark_picker_page_dirty_(i);
     // UE14: keep an open drill-down list's member rows in sync with live state
     // (a toggled member's switch flips in place). Cheap — only runs while the
     // list is visible. Membership is held stable until re-open (see helper).
@@ -1100,7 +1103,18 @@ void HAPanel::compute_report_(const ReportSpec &s, const std::vector<size_t> *sc
 
 void HAPanel::update_picker_badges_() {
   for (size_t pi = 0;
-       pi < this->pages_.size() && pi < this->picker_badges_.size(); pi++) {
+       pi < this->pages_.size() && pi < this->picker_badges_.size(); pi++)
+    this->update_picker_badges_for_page_(pi);
+}
+
+// UE11 perf (#1): repaint just one page's badge groups. update_picker_badges_
+// loops every page (used on open for a full refresh); the coalescing timer
+// (picker_badge_timer_cb_) repaints only the dirty pages so a chatty HA can't
+// jank the picker scroll with a per-push all-page recompute.
+void HAPanel::update_picker_badges_for_page_(size_t pi) {
+  if (pi >= this->pages_.size() || pi >= this->picker_badges_.size())
+    return;
+  {
     const std::vector<PickerBadge> &specs = this->pages_[pi].badges;
     std::vector<lv_obj_t *> &groups = this->picker_badges_[pi];
     for (size_t bi = 0; bi < groups.size() && bi < specs.size(); bi++) {
@@ -1146,6 +1160,37 @@ void HAPanel::update_picker_badges_() {
       lv_obj_clear_flag(grp, LV_OBJ_FLAG_HIDDEN);
     }
   }
+}
+
+void HAPanel::mark_picker_page_dirty_(size_t entity_idx) {
+  // An entity index lives in exactly one page; mark that page's badges dirty and
+  // let the coalescing timer repaint it on its next tick.
+  for (size_t pi = 0; pi < this->pages_.size(); pi++) {
+    for (size_t ei : this->pages_[pi].entity_indices) {
+      if (ei != entity_idx)
+        continue;
+      if (pi < this->picker_page_dirty_.size())
+        this->picker_page_dirty_[pi] = true;
+      this->picker_badges_dirty_ = true;
+      return;
+    }
+  }
+}
+
+void HAPanel::picker_badge_timer_cb_(lv_timer_t *t) {
+  auto *self = static_cast<HAPanel *>(lv_timer_get_user_data(t));
+  // Defensive: no-op if the picker isn't actually showing or nothing's dirty.
+  if (self == nullptr || self->picker_ == nullptr ||
+      lv_obj_has_flag(self->picker_, LV_OBJ_FLAG_HIDDEN) ||
+      !self->picker_badges_dirty_)
+    return;
+  for (size_t pi = 0; pi < self->picker_page_dirty_.size(); pi++) {
+    if (!self->picker_page_dirty_[pi])
+      continue;
+    self->update_picker_badges_for_page_(pi);
+    self->picker_page_dirty_[pi] = false;
+  }
+  self->picker_badges_dirty_ = false;
 }
 
 bool HAPanel::eval_picker_badge_(size_t page_idx, const PickerBadge &spec,
@@ -2340,6 +2385,7 @@ void HAPanel::build_ui_() {
   const lv_font_t *picker_mdi_font =
       this->mdi_font_ != nullptr ? this->mdi_font_->get_lv_font() : nullptr;
   this->picker_badges_.assign(this->pages_.size(), {});
+  this->picker_page_dirty_.assign(this->pages_.size(), false);  // UE11 perf
   for (size_t pi = 0; pi < this->pages_.size(); pi++) {
     lv_obj_t *row = lv_button_create(plist);
     lv_obj_set_width(row, LV_PCT(100));
@@ -2478,6 +2524,14 @@ void HAPanel::open_picker_() {
   // UE11: recompute badges from current state before the unhide — entity states
   // are already live (subscriptions don't pause), so no fetch is needed.
   this->update_picker_badges_();
+  // UE11 perf (#1+#2): just painted every page, so clear the dirty set and start
+  // the coalescing timer. While open, on_state_ marks only the changed entity's
+  // page dirty; the timer repaints those (and only those) a few times a second.
+  this->picker_page_dirty_.assign(this->picker_page_dirty_.size(), false);
+  this->picker_badges_dirty_ = false;
+  if (this->picker_badge_timer_ == nullptr)
+    this->picker_badge_timer_ =
+        lv_timer_create(&HAPanel::picker_badge_timer_cb_, 300, this);
   lv_obj_clear_flag(this->picker_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(this->picker_);
   ESP_LOGD(TAG, "picker open");
@@ -2486,6 +2540,10 @@ void HAPanel::open_picker_() {
 void HAPanel::close_picker_() {
   if (this->picker_ == nullptr)
     return;
+  if (this->picker_badge_timer_ != nullptr) {  // UE11 perf: no ticks while closed
+    lv_timer_delete(this->picker_badge_timer_);
+    this->picker_badge_timer_ = nullptr;
+  }
   lv_obj_add_flag(this->picker_, LV_OBJ_FLAG_HIDDEN);
   ESP_LOGD(TAG, "picker close");
 }
