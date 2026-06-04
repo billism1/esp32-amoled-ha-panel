@@ -218,6 +218,8 @@ PICKER_BADGE_BLOCK_SCHEMA = cv.Schema(
         cv.Optional(CONF_THRESHOLD, default=20): cv.int_,
         # numeric badges: suffix override ("°", "%", "W", …); empty = built-in.
         cv.Optional(CONF_UNIT, default=""): cv.string,
+        # icon override ("mdi:foo" or bare); empty = the type's default glyph.
+        cv.Optional(CONF_ICON, default=""): cv.string,
     }
 )
 
@@ -318,6 +320,7 @@ async def to_code(config):
                     badge[CONF_AGG],
                     badge[CONF_THRESHOLD],
                     badge[CONF_UNIT],
+                    badge[CONF_ICON],
                 )
             )
         for ent in page[CONF_ENTITIES]:

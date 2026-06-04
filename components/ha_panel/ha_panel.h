@@ -191,6 +191,7 @@ struct PickerBadge {
   BadgeAgg agg{BadgeAgg::AVG};
   int threshold{20};  // LOW_BATTERY: percent at/below which a battery counts
   std::string unit;   // numeric types: suffix override ("°", "%", "W", …)
+  std::string icon;   // optional mdi glyph override (empty = the type default)
 };
 
 struct Page {
@@ -227,9 +228,11 @@ class HAPanel : public Component, public api::CustomAPIDevice {
   // UE11: append a picker badge to the most-recently-added page (call once per
   // badge in the page's `picker_badge:` list). `type` / `agg` are the validated
   // enum strings; threshold is for LOW_BATTERY; unit overrides a numeric badge's
-  // suffix. Type "none" is ignored.
+  // suffix; icon ("mdi:foo" or bare, empty = type default) overrides the glyph.
+  // Type "none" is ignored.
   void add_page_badge(const std::string &type, const std::string &agg,
-                      int threshold, const std::string &unit);
+                      int threshold, const std::string &unit,
+                      const std::string &icon);
   // P7e: MDI glyph font for the per-entity icon column. nullptr → icons off,
   // rows fall back to the pre-P7e name-at-left layout.
   void set_mdi_font(font::Font *f) { this->mdi_font_ = f; }

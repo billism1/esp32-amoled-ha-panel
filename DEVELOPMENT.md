@@ -3122,8 +3122,9 @@ so open badges track state live; a closed picker is zero-cost and refreshes on
 next open. Entity states are already live (subscriptions don't pause), no fetch.
 
 **Config.** Page-level `picker_badge:` accepts a bare type name (`lights_on`), a
-block (`{type, agg, threshold, unit}`), or a **list** of either
-(`cv.ensure_list(_picker_badge)`). `BADGE_TYPES` / `BADGE_AGGS` in `__init__.py`
+block (`{type, agg, threshold, unit, icon}` — `icon:` overrides the type's
+default glyph, same baked-subset rule as an entity/report `icon:`), or a **list**
+of either (`cv.ensure_list(_picker_badge)`). `BADGE_TYPES` / `BADGE_AGGS` in `__init__.py`
 are the validation source of truth — an unknown type is a compile error
 (`cv.one_of`). Codegen emits `add_page_badge(...)` once per badge, appending to
 the page just added (mirrors `add_entity`'s `pages_.back()`).

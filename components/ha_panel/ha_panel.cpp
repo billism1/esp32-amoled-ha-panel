@@ -139,7 +139,8 @@ static BadgeAgg badge_agg_from_(const std::string &a) {
 }
 
 void HAPanel::add_page_badge(const std::string &type, const std::string &agg,
-                             int threshold, const std::string &unit) {
+                             int threshold, const std::string &unit,
+                             const std::string &icon) {
   if (this->pages_.empty()) {
     ESP_LOGE(TAG, "add_page_badge called before any page — codegen bug");
     return;
@@ -149,6 +150,7 @@ void HAPanel::add_page_badge(const std::string &type, const std::string &agg,
   b.agg = badge_agg_from_(agg);
   b.threshold = threshold;
   b.unit = unit;
+  b.icon = icon;
   if (b.type == BadgeType::NONE)
     return;  // "none" → leave the page badgeless
   this->pages_.back().badges.push_back(b);
@@ -955,6 +957,13 @@ void HAPanel::update_picker_badges_() {
       if (!show) {
         lv_obj_add_flag(grp, LV_OBJ_FLAG_HIDDEN);
         continue;
+      }
+      // UE11: per-badge icon override (mdi name, "mdi:" prefix optional) replaces
+      // the type's default glyph; colour + value/dim semantics are unchanged.
+      if (!specs[bi].icon.empty()) {
+        icon_name = specs[bi].icon;
+        if (icon_name.rfind("mdi:", 0) == 0)
+          icon_name.erase(0, 4);
       }
       lv_obj_t *bicon = lv_obj_get_child(grp, 0);
       lv_obj_t *bval = lv_obj_get_child(grp, 1);

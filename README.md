@@ -502,8 +502,13 @@ pages:
 
 A bare type name (`picker_badge: lights_on`) is shorthand for `{ type: lights_on }`.
 The **block form** carries params: `agg:` (`avg`/`min`/`max`/`sum`, for the
-numeric badges), `threshold:` (int, `low_battery` percent, default `20`), and
-`unit:` (suffix override for numeric badges).
+numeric badges), `threshold:` (int, `low_battery` percent, default `20`),
+`unit:` (suffix override for numeric badges), and `icon:` (`mdi:foo` to override
+the type's default glyph — same baked-subset rule as an entity/report `icon:`):
+
+```yaml
+picker_badge: { type: lights_on, icon: mdi:ceiling-light }   # custom glyph
+```
 
 **`type:` is a closed list** (a typo is a compile error):
 

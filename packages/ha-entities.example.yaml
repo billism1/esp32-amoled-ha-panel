@@ -106,7 +106,8 @@
 #     co2 / aqi        avg of co2 / aqi sensors            → gauge + value
 #     severity        composite: alarm→red, doors→amber, offline→amber dot
 # Block params: `agg:` (avg|min|max|sum, numeric badges) · `threshold:` (int,
-# low_battery percent, default 20) · `unit:` (suffix override for numeric badges).
+# low_battery percent, default 20) · `unit:` (suffix override for numeric badges)
+# · `icon:` (mdi:foo to override the type's default glyph; baked-subset only).
 #
 # Icons: value is `mdi:<name>` from https://pictogrammers.com/library/mdi/ — but
 # ONLY glyphs in this panel's baked subset render; anything else falls back to a
@@ -184,7 +185,8 @@ ha_panel:
           friendly_name: "Dishwasher"
 
     - name: "Bedroom"
-      picker_badge: { type: open_covers }   # UE11: block single (open-shutter + N)
+      # UE11: block single + icon override (blinds glyph instead of the default).
+      picker_badge: { type: open_covers, icon: mdi:blinds-open }
       entities:
         - entity_id: light.bedside_lamp
           friendly_name: "Bedside"
