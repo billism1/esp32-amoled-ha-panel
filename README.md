@@ -445,6 +445,7 @@ source of truth for your install):
 | Domain | Typical `match_state` values |
 |--------|------------------------------|
 | `light` `switch` `fan` `input_boolean` | `on`, `off` |
+| `automation` `script` | `on`, `off` (script `on` = running) |
 | `cover` | `open`, `closed`, `opening`, `closing` |
 | `lock` | `locked`, `unlocked`, `jammed` |
 | `climate` | `off`, `heat`, `cool`, `heat_cool`, `auto`, `dry`, `fan_only` |
